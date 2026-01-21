@@ -1,0 +1,23 @@
+[server]
+host = "127.0.0.1"
+port = 8000
+
+[database]
+# Use either postgres or mysql
+driver = "postgres"
+# PostgreSQL example
+url = "postgres://postgres:postgres@localhost:5432/casdog"
+# MySQL example
+# url = "mysql://root:root@localhost:3306/casdog"
+max_connections = 10
+
+[jwt]
+secret = "your-super-secret-key-change-in-production"
+expiration_hours = 24
+issuer = "casdog"
+
+[casbin]
+model_path = "casbin/model.conf"
+
+[logging]
+level = "info"

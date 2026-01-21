@@ -1,0 +1,41 @@
+# Top-level .gitignore for casdog (Rust backend + Vite/TS frontend)
+
+# Rust/Cargo
+/target/
+**/*.rs.bk
+
+# Common build artifacts
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Environment files (keep examples)
+.env
+.env.*
+!.env.example
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-specific noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Emacs/Editor temp (e.g., flycheck)
+flycheck*
+
+# Frontend (Vite/React) in web/
+web/node_modules/
+web/dist/
+web/.vite/
+web/.cache/
+web/coverage/
+web/.eslintcache
+.claude
+nul
