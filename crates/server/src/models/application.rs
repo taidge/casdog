@@ -18,6 +18,7 @@ pub struct Application {
     pub redirect_uris: String,
     pub token_format: String,
     pub expire_in_hours: i32,
+    pub cert: Option<String>,
     pub is_deleted: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -35,6 +36,7 @@ pub struct CreateApplicationRequest {
     pub redirect_uris: Option<String>,
     pub token_format: Option<String>,
     pub expire_in_hours: Option<i32>,
+    pub cert: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -46,6 +48,7 @@ pub struct UpdateApplicationRequest {
     pub redirect_uris: Option<String>,
     pub token_format: Option<String>,
     pub expire_in_hours: Option<i32>,
+    pub cert: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -63,6 +66,7 @@ pub struct ApplicationResponse {
     pub redirect_uris: String,
     pub token_format: String,
     pub expire_in_hours: i32,
+    pub cert: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -83,6 +87,7 @@ impl From<Application> for ApplicationResponse {
             redirect_uris: app.redirect_uris,
             token_format: app.token_format,
             expire_in_hours: app.expire_in_hours,
+            cert: app.cert,
             created_at: app.created_at,
             updated_at: app.updated_at,
         }

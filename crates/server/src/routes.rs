@@ -1,6 +1,9 @@
 use crate::handlers::{
-    application, auth, cert, group, health, invitation, oidc, organization, permission, policy,
-    provider, record, resource, role, session, syncer, token, user, verification, webhook,
+    adapter, app_extra, application, auth, cas, cert, cert_extra, dashboard, enforcer, group,
+    health, impersonation, invitation, ldap, messaging, mfa, model, oidc, org_extra, organization,
+    payment, permission, permission_extra, plan, policy, pricing, product, provider, provider_extra,
+    record, resource, role, saml, scim, session, subscription, syncer, system, token, transaction,
+    user, user_extra, verification, webhook,
 };
 use crate::middleware::JwtAuth;
 use rust_embed::Embed;
@@ -38,6 +41,10 @@ fn wellknown_router() -> Router {
 fn oauth_router() -> Router {
     Router::with_path("login/oauth")
         .push(Router::with_path("authorize").get(oidc::authorize))
+        .push(Router::with_path("access_token").post(auth::oauth_access_token))
+        .push(Router::with_path("refresh_token").post(auth::oauth_refresh_token))
+        .push(Router::with_path("introspect").post(auth::oauth_introspect))
+        .push(Router::with_path("revoke").post(auth::oauth_revoke))
 }
 
 fn api_router() -> Router {
@@ -62,6 +69,10 @@ fn protected_routes() -> Router {
         .hoop(JwtAuth)
         .push(Router::with_path("logout").post(auth::logout))
         .push(Router::with_path("get-account").get(auth::get_account))
+        .push(Router::with_path("set-password").post(auth::set_password))
+        .push(Router::with_path("check-user-password").post(auth::check_user_password))
+        .push(Router::with_path("sso-logout").post(auth::sso_logout))
+        .push(mfa_routes())
         .push(user_routes())
         .push(organization_routes())
         .push(application_routes())
@@ -79,6 +90,43 @@ fn protected_routes() -> Router {
         .push(syncer_routes())
         .push(invitation_routes())
         .push(record_routes())
+        .push(saml_routes())
+        .push(cas_routes())
+        .push(scim_routes())
+        .push(ldap_routes())
+        .push(model_routes())
+        .push(adapter_routes())
+        .push(enforcer_routes())
+        // Phase 8: Extra convenience query endpoints
+        .push(Router::with_path("get-global-users").get(user_extra::get_global_users))
+        .push(Router::with_path("get-sorted-users").get(user_extra::get_sorted_users))
+        .push(Router::with_path("get-user-count").get(user_extra::get_user_count))
+        .push(Router::with_path("get-organization-names").get(org_extra::get_organization_names))
+        .push(Router::with_path("get-user-application").get(app_extra::get_user_application))
+        .push(Router::with_path("get-organization-applications").get(app_extra::get_organization_applications))
+        .push(Router::with_path("get-default-application").get(app_extra::get_default_application))
+        .push(Router::with_path("get-global-providers").get(provider_extra::get_global_providers))
+        .push(Router::with_path("get-global-certs").get(cert_extra::get_global_certs))
+        .push(Router::with_path("get-permissions-by-submitter").get(permission_extra::get_permissions_by_submitter))
+        .push(Router::with_path("get-permissions-by-role").get(permission_extra::get_permissions_by_role))
+        .push(Router::with_path("get-dashboard").get(dashboard::get_dashboard))
+        .push(Router::with_path("metrics").get(dashboard::get_metrics))
+        .push(Router::with_path("send-email").post(messaging::send_email))
+        .push(Router::with_path("send-sms").post(messaging::send_sms))
+        .push(Router::with_path("send-notification").post(messaging::send_notification))
+        // System info
+        .push(Router::with_path("get-system-info").get(system::get_system_info))
+        .push(Router::with_path("get-prometheus-info").get(system::get_prometheus_info))
+        // Impersonation
+        .push(Router::with_path("impersonate-user").post(impersonation::impersonate_user))
+        .push(Router::with_path("exit-impersonate-user").post(impersonation::exit_impersonate_user))
+        // E-commerce
+        .push(product_routes())
+        .push(plan_routes())
+        .push(pricing_routes())
+        .push(subscription_routes())
+        .push(payment_routes())
+        .push(transaction_routes())
 }
 
 fn user_routes() -> Router {
@@ -148,6 +196,10 @@ fn permission_routes() -> Router {
 fn policy_routes() -> Router {
     Router::new()
         .push(Router::with_path("enforce").post(policy::enforce))
+        .push(Router::with_path("batch-enforce").post(policy::batch_enforce))
+        .push(Router::with_path("get-all-objects").get(policy::get_all_objects))
+        .push(Router::with_path("get-all-actions").get(policy::get_all_actions))
+        .push(Router::with_path("get-all-roles").get(policy::get_all_roles))
         .push(
             Router::with_path("policies")
                 .get(policy::get_policies)
@@ -277,6 +329,15 @@ fn invitation_routes() -> Router {
         )
 }
 
+fn mfa_routes() -> Router {
+    Router::with_path("mfa")
+        .push(Router::with_path("setup/initiate").post(mfa::initiate_mfa_setup))
+        .push(Router::with_path("setup/verify").post(mfa::verify_mfa_setup))
+        .push(Router::with_path("setup/enable").post(mfa::enable_mfa))
+        .push(Router::with_path("delete").post(mfa::delete_mfa))
+        .push(Router::with_path("set-preferred").post(mfa::set_preferred_mfa))
+}
+
 fn record_routes() -> Router {
     Router::with_path("records")
         .get(record::list_records)
@@ -285,6 +346,139 @@ fn record_routes() -> Router {
             Router::with_path("<id>")
                 .get(record::get_record)
                 .delete(record::delete_record),
+        )
+}
+
+fn saml_routes() -> Router {
+    Router::with_path("saml")
+        .push(Router::with_path("metadata").get(saml::saml_metadata))
+        .push(Router::with_path("login").get(saml::get_saml_login))
+        .push(Router::with_path("acs").post(saml::saml_acs))
+}
+
+fn cas_routes() -> Router {
+    Router::with_path("cas")
+        .push(Router::with_path("serviceValidate").get(cas::service_validate))
+        .push(Router::with_path("validate").get(cas::validate))
+}
+
+fn scim_routes() -> Router {
+    Router::with_path("scim/v2")
+        .push(Router::with_path("Users").get(scim::list_scim_users))
+        .push(Router::with_path("Users/<id>").get(scim::get_scim_user))
+}
+
+fn ldap_routes() -> Router {
+    Router::with_path("ldap")
+        .push(Router::with_path("sync-users").post(ldap::sync_ldap_users))
+        .push(Router::with_path("test-connection").post(ldap::test_ldap_connection))
+}
+
+fn model_routes() -> Router {
+    Router::with_path("models")
+        .get(model::list_models)
+        .post(model::create_model)
+        .push(
+            Router::with_path("<id>")
+                .get(model::get_model)
+                .put(model::update_model)
+                .delete(model::delete_model),
+        )
+}
+
+fn adapter_routes() -> Router {
+    Router::with_path("adapters")
+        .get(adapter::list_adapters)
+        .post(adapter::create_adapter)
+        .push(
+            Router::with_path("<id>")
+                .get(adapter::get_adapter)
+                .put(adapter::update_adapter)
+                .delete(adapter::delete_adapter),
+        )
+}
+
+fn enforcer_routes() -> Router {
+    Router::with_path("enforcers")
+        .get(enforcer::list_enforcers)
+        .post(enforcer::create_enforcer)
+        .push(
+            Router::with_path("<id>")
+                .get(enforcer::get_enforcer)
+                .put(enforcer::update_enforcer)
+                .delete(enforcer::delete_enforcer),
+        )
+}
+
+fn product_routes() -> Router {
+    Router::with_path("products")
+        .get(product::list_products)
+        .post(product::create_product)
+        .push(
+            Router::with_path("<id>")
+                .get(product::get_product)
+                .put(product::update_product)
+                .delete(product::delete_product),
+        )
+}
+
+fn plan_routes() -> Router {
+    Router::with_path("plans")
+        .get(plan::list_plans)
+        .post(plan::create_plan)
+        .push(
+            Router::with_path("<id>")
+                .get(plan::get_plan)
+                .put(plan::update_plan)
+                .delete(plan::delete_plan),
+        )
+}
+
+fn pricing_routes() -> Router {
+    Router::with_path("pricings")
+        .get(pricing::list_pricings)
+        .post(pricing::create_pricing)
+        .push(
+            Router::with_path("<id>")
+                .get(pricing::get_pricing)
+                .put(pricing::update_pricing)
+                .delete(pricing::delete_pricing),
+        )
+}
+
+fn subscription_routes() -> Router {
+    Router::with_path("subscriptions")
+        .get(subscription::list_subscriptions)
+        .post(subscription::create_subscription)
+        .push(
+            Router::with_path("<id>")
+                .get(subscription::get_subscription)
+                .put(subscription::update_subscription)
+                .delete(subscription::delete_subscription),
+        )
+}
+
+fn payment_routes() -> Router {
+    Router::with_path("payments")
+        .get(payment::list_payments)
+        .post(payment::create_payment)
+        .push(
+            Router::with_path("<id>")
+                .get(payment::get_payment)
+                .put(payment::update_payment)
+                .delete(payment::delete_payment),
+        )
+}
+
+fn transaction_routes() -> Router {
+    Router::with_path("transactions")
+        .get(transaction::list_transactions)
+        .post(transaction::create_transaction)
+        .push(
+            Router::with_path("<id>")
+                .get(transaction::get_transaction)
+                .put(transaction::update_transaction)
+                .delete(transaction::delete_transaction),
         )
 }
 
@@ -312,10 +506,29 @@ fn api_router_for_openapi() -> Router {
             .push(Router::with_path("login").post(auth::login))
             .push(Router::with_path("logout").post(auth::logout))
             .push(Router::with_path("get-account").get(auth::get_account))
+            .push(Router::with_path("set-password").post(auth::set_password))
+            .push(Router::with_path("check-user-password").post(auth::check_user_password))
+            .push(Router::with_path("sso-logout").post(auth::sso_logout))
+            .push(
+                Router::with_path("mfa")
+                    .push(Router::with_path("setup/initiate").post(mfa::initiate_mfa_setup))
+                    .push(Router::with_path("setup/verify").post(mfa::verify_mfa_setup))
+                    .push(Router::with_path("setup/enable").post(mfa::enable_mfa))
+                    .push(Router::with_path("delete").post(mfa::delete_mfa))
+                    .push(Router::with_path("set-preferred").post(mfa::set_preferred_mfa)),
+            )
             .push(Router::with_path("userinfo").get(oidc::userinfo))
             .push(Router::with_path("captcha").get(verification::get_captcha))
             .push(Router::with_path("verify-captcha").post(verification::verify_captcha))
             .push(Router::with_path("get-email-and-phone").post(verification::get_email_and_phone))
+            // OAuth endpoints
+            .push(
+                Router::with_path("login/oauth")
+                    .push(Router::with_path("access_token").post(auth::oauth_access_token))
+                    .push(Router::with_path("refresh_token").post(auth::oauth_refresh_token))
+                    .push(Router::with_path("introspect").post(auth::oauth_introspect))
+                    .push(Router::with_path("revoke").post(auth::oauth_revoke)),
+            )
             .push(
                 Router::with_path("users")
                     .get(user::list_users)
@@ -378,6 +591,10 @@ fn api_router_for_openapi() -> Router {
                     ),
             )
             .push(Router::with_path("enforce").post(policy::enforce))
+            .push(Router::with_path("batch-enforce").post(policy::batch_enforce))
+            .push(Router::with_path("get-all-objects").get(policy::get_all_objects))
+            .push(Router::with_path("get-all-actions").get(policy::get_all_actions))
+            .push(Router::with_path("get-all-roles").get(policy::get_all_roles))
             .push(
                 Router::with_path("policies")
                     .get(policy::get_policies)
@@ -503,6 +720,126 @@ fn api_router_for_openapi() -> Router {
                         Router::with_path("<id>")
                             .get(record::get_record)
                             .delete(record::delete_record),
+                    ),
+            )
+            .push(
+                Router::with_path("models")
+                    .get(model::list_models)
+                    .post(model::create_model)
+                    .push(
+                        Router::with_path("<id>")
+                            .get(model::get_model)
+                            .put(model::update_model)
+                            .delete(model::delete_model),
+                    ),
+            )
+            .push(
+                Router::with_path("adapters")
+                    .get(adapter::list_adapters)
+                    .post(adapter::create_adapter)
+                    .push(
+                        Router::with_path("<id>")
+                            .get(adapter::get_adapter)
+                            .put(adapter::update_adapter)
+                            .delete(adapter::delete_adapter),
+                    ),
+            )
+            .push(
+                Router::with_path("enforcers")
+                    .get(enforcer::list_enforcers)
+                    .post(enforcer::create_enforcer)
+                    .push(
+                        Router::with_path("<id>")
+                            .get(enforcer::get_enforcer)
+                            .put(enforcer::update_enforcer)
+                            .delete(enforcer::delete_enforcer),
+                    ),
+            )
+            // Phase 8: Extra convenience query endpoints
+            .push(Router::with_path("get-global-users").get(user_extra::get_global_users))
+            .push(Router::with_path("get-sorted-users").get(user_extra::get_sorted_users))
+            .push(Router::with_path("get-user-count").get(user_extra::get_user_count))
+            .push(Router::with_path("get-organization-names").get(org_extra::get_organization_names))
+            .push(Router::with_path("get-user-application").get(app_extra::get_user_application))
+            .push(Router::with_path("get-organization-applications").get(app_extra::get_organization_applications))
+            .push(Router::with_path("get-default-application").get(app_extra::get_default_application))
+            .push(Router::with_path("get-global-providers").get(provider_extra::get_global_providers))
+            .push(Router::with_path("get-global-certs").get(cert_extra::get_global_certs))
+            .push(Router::with_path("get-permissions-by-submitter").get(permission_extra::get_permissions_by_submitter))
+            .push(Router::with_path("get-permissions-by-role").get(permission_extra::get_permissions_by_role))
+            .push(Router::with_path("get-dashboard").get(dashboard::get_dashboard))
+            .push(Router::with_path("metrics").get(dashboard::get_metrics))
+            .push(Router::with_path("send-email").post(messaging::send_email))
+            .push(Router::with_path("send-sms").post(messaging::send_sms))
+            .push(Router::with_path("send-notification").post(messaging::send_notification))
+            .push(Router::with_path("get-system-info").get(system::get_system_info))
+            .push(Router::with_path("get-prometheus-info").get(system::get_prometheus_info))
+            .push(Router::with_path("impersonate-user").post(impersonation::impersonate_user))
+            .push(Router::with_path("exit-impersonate-user").post(impersonation::exit_impersonate_user))
+            .push(
+                Router::with_path("products")
+                    .get(product::list_products)
+                    .post(product::create_product)
+                    .push(
+                        Router::with_path("<id>")
+                            .get(product::get_product)
+                            .put(product::update_product)
+                            .delete(product::delete_product),
+                    ),
+            )
+            .push(
+                Router::with_path("plans")
+                    .get(plan::list_plans)
+                    .post(plan::create_plan)
+                    .push(
+                        Router::with_path("<id>")
+                            .get(plan::get_plan)
+                            .put(plan::update_plan)
+                            .delete(plan::delete_plan),
+                    ),
+            )
+            .push(
+                Router::with_path("pricings")
+                    .get(pricing::list_pricings)
+                    .post(pricing::create_pricing)
+                    .push(
+                        Router::with_path("<id>")
+                            .get(pricing::get_pricing)
+                            .put(pricing::update_pricing)
+                            .delete(pricing::delete_pricing),
+                    ),
+            )
+            .push(
+                Router::with_path("subscriptions")
+                    .get(subscription::list_subscriptions)
+                    .post(subscription::create_subscription)
+                    .push(
+                        Router::with_path("<id>")
+                            .get(subscription::get_subscription)
+                            .put(subscription::update_subscription)
+                            .delete(subscription::delete_subscription),
+                    ),
+            )
+            .push(
+                Router::with_path("payments")
+                    .get(payment::list_payments)
+                    .post(payment::create_payment)
+                    .push(
+                        Router::with_path("<id>")
+                            .get(payment::get_payment)
+                            .put(payment::update_payment)
+                            .delete(payment::delete_payment),
+                    ),
+            )
+            .push(
+                Router::with_path("transactions")
+                    .get(transaction::list_transactions)
+                    .post(transaction::create_transaction)
+                    .push(
+                        Router::with_path("<id>")
+                            .get(transaction::get_transaction)
+                            .put(transaction::update_transaction)
+                            .delete(transaction::delete_transaction),
                     ),
             ),
     )

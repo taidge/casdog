@@ -1,0 +1,68 @@
+name: ci-linux
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '.github/workflows/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '.github/workflows/**'
+
+jobs:
+  format:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run clippy
+        run: cargo clippy --all --bins --tests -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - stable
+
+    name: Test ${{ matrix.version }} - x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.version }}
+          components: rustfmt, clippy
+
+      - name: Check build
+        run: cargo check --all --bins --tests
+
+      - name: Check release build
+        run: cargo check --all --bins --tests --release
+
+      - name: Run tests
+        timeout-minutes: 40
+        run: cargo test --all --no-fail-fast -- --nocapture

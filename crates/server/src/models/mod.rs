@@ -15,6 +15,7 @@ pub mod verification;
 pub mod invitation;
 pub mod record;
 pub mod oidc;
+pub mod casbin_model;
 
 pub use user::*;
 pub use organization::*;
@@ -33,3 +34,18 @@ pub use verification::*;
 pub use invitation::*;
 pub use record::*;
 pub use oidc::*;
+pub use casbin_model::*;
+
+pub mod product;
+pub mod plan;
+pub mod pricing;
+pub mod subscription;
+pub mod payment;
+pub mod transaction;
+
+pub use product::*;
+pub use plan::*;
+pub use pricing::*;
+pub use subscription::*;
+pub use payment::*;
+pub use transaction::*;

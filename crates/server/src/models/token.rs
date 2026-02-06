@@ -11,6 +11,7 @@ pub struct Token {
     pub created_at: DateTime<Utc>,
     pub application: String,
     pub organization: String,
+    #[sqlx(rename = "user_id")]
     pub user: String,
     pub code: Option<String>,
     pub access_token: String,
@@ -23,6 +24,9 @@ pub struct Token {
     pub code_challenge: Option<String>,
     pub code_is_used: bool,
     pub code_expire_in: Option<i64>,
+    pub nonce: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub code_challenge_method: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -81,7 +85,7 @@ impl From<Token> for TokenResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct OAuthTokenRequest {
     pub grant_type: String,
-    pub client_id: String,
+    pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub code: Option<String>,
     pub redirect_uri: Option<String>,
@@ -90,6 +94,7 @@ pub struct OAuthTokenRequest {
     pub username: Option<String>,
     pub password: Option<String>,
     pub code_verifier: Option<String>,
+    pub nonce: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -97,8 +102,11 @@ pub struct OAuthTokenResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id_token: Option<String>,
 }
 
@@ -111,13 +119,28 @@ pub struct IntrospectRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct IntrospectResponse {
     pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub token_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exp: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub iat: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sub: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub aud: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub iss: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RevokeRequest {
+    pub token: String,
+    pub token_type_hint: Option<String>,
 }

@@ -1,6 +1,9 @@
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
-use crate::models::{EnforceRequest, EnforceResponse, PolicyListResponse, PolicyRequest, PolicyResponse};
+use crate::models::{
+    BatchEnforceResponse, EnforceRequest, EnforceRequestItem, EnforceResponse,
+    EnforceResultItem, PolicyListResponse, PolicyRequest, PolicyResponse,
+};
 use casbin::{CoreApi, DefaultModel, Enforcer, MgmtApi, RbacApi};
 use sqlx_adapter::SqlxAdapter;
 use std::sync::Arc;
@@ -172,5 +175,66 @@ impl CasbinService {
             .await
             .map_err(|e| AppError::Casbin(format!("Failed to reload policy: {}", e)))?;
         Ok(())
+    }
+
+    pub async fn batch_enforce(&self, reqs: Vec<EnforceRequestItem>) -> AppResult<BatchEnforceResponse> {
+        let enforcer = self.enforcer.read().await;
+        let mut results = Vec::with_capacity(reqs.len());
+
+        for req in reqs {
+            let allowed = enforcer
+                .enforce((&req.sub, &req.obj, &req.act))
+                .map_err(|e| AppError::Casbin(format!("Batch enforce error: {}", e)))?;
+            results.push(EnforceResultItem {
+                sub: req.sub,
+                obj: req.obj,
+                act: req.act,
+                allowed,
+            });
+        }
+
+        Ok(BatchEnforceResponse { results })
+    }
+
+    pub async fn get_all_objects(&self) -> AppResult<Vec<String>> {
+        let enforcer = self.enforcer.read().await;
+        let policies = enforcer.get_policy();
+
+        let mut objects: Vec<String> = policies
+            .into_iter()
+            .filter_map(|p| p.get(1).cloned())
+            .collect();
+        objects.sort();
+        objects.dedup();
+
+        Ok(objects)
+    }
+
+    pub async fn get_all_actions(&self) -> AppResult<Vec<String>> {
+        let enforcer = self.enforcer.read().await;
+        let policies = enforcer.get_policy();
+
+        let mut actions: Vec<String> = policies
+            .into_iter()
+            .filter_map(|p| p.get(2).cloned())
+            .collect();
+        actions.sort();
+        actions.dedup();
+
+        Ok(actions)
+    }
+
+    pub async fn get_all_roles(&self) -> AppResult<Vec<String>> {
+        let enforcer = self.enforcer.read().await;
+        let grouping_policies = enforcer.get_grouping_policy();
+
+        let mut roles: Vec<String> = grouping_policies
+            .into_iter()
+            .filter_map(|p| p.get(1).cloned())
+            .collect();
+        roles.sort();
+        roles.dedup();
+
+        Ok(roles)
     }
 }

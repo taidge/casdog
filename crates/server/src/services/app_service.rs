@@ -38,8 +38,8 @@ impl AppService {
 
         let app = sqlx::query_as::<_, Application>(
             r#"
-            INSERT INTO applications (id, owner, name, display_name, logo, homepage_url, description, organization, client_id, client_secret, redirect_uris, token_format, expire_in_hours, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            INSERT INTO applications (id, owner, name, display_name, logo, homepage_url, description, organization, client_id, client_secret, redirect_uris, token_format, expire_in_hours, cert, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             RETURNING *
             "#,
         )
@@ -56,6 +56,7 @@ impl AppService {
         .bind(req.redirect_uris.unwrap_or_default())
         .bind(req.token_format.unwrap_or_else(|| "JWT".to_string()))
         .bind(req.expire_in_hours.unwrap_or(24))
+        .bind(&req.cert)
         .bind(now)
         .bind(now)
         .fetch_one(&self.pool)
@@ -216,13 +217,16 @@ impl AppService {
         if let Some(expire_in_hours) = req.expire_in_hours {
             app.expire_in_hours = expire_in_hours;
         }
+        if let Some(cert) = req.cert {
+            app.cert = Some(cert);
+        }
         app.updated_at = Utc::now();
 
         let updated_app = sqlx::query_as::<_, Application>(
             r#"
             UPDATE applications
-            SET display_name = $1, logo = $2, homepage_url = $3, description = $4, redirect_uris = $5, token_format = $6, expire_in_hours = $7, updated_at = $8
-            WHERE id = $9
+            SET display_name = $1, logo = $2, homepage_url = $3, description = $4, redirect_uris = $5, token_format = $6, expire_in_hours = $7, cert = $8, updated_at = $9
+            WHERE id = $10
             RETURNING *
             "#,
         )
@@ -233,6 +237,7 @@ impl AppService {
         .bind(&app.redirect_uris)
         .bind(&app.token_format)
         .bind(app.expire_in_hours)
+        .bind(&app.cert)
         .bind(app.updated_at)
         .bind(id)
         .fetch_one(&self.pool)

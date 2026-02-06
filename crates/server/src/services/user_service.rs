@@ -18,6 +18,10 @@ impl UserService {
         Self { pool }
     }
 
+    pub fn pool(&self) -> &Pool<Postgres> {
+        &self.pool
+    }
+
     pub fn hash_password(password: &str) -> AppResult<String> {
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
@@ -81,6 +85,18 @@ impl UserService {
         .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
 
         Ok(user.into())
+    }
+
+    pub async fn get_by_id_internal(&self, id: &str) -> AppResult<User> {
+        let user = sqlx::query_as::<_, User>(
+            "SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
+
+        Ok(user)
     }
 
     pub async fn get_by_name(&self, owner: &str, name: &str) -> AppResult<User> {

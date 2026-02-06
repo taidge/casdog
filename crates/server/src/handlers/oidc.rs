@@ -1,7 +1,9 @@
 use crate::config::AppConfig;
-use crate::models::{Jwks, OidcDiscovery, UserinfoResponse, WebfingerLink, WebfingerResponse};
+use crate::models::{Certificate, Jwks, OidcDiscovery, UserinfoResponse, WebfingerLink, WebfingerResponse};
+use crate::services::CertService;
 use salvo::oapi::extract::QueryParam;
 use salvo::prelude::*;
+use sqlx::{Pool, Postgres};
 
 /// OpenID Connect Discovery endpoint
 #[endpoint(tags("oidc"), summary = "OpenID Connect Discovery")]
@@ -23,17 +25,79 @@ pub async fn app_openid_configuration(
 
 /// JSON Web Key Set endpoint
 #[endpoint(tags("oidc"), summary = "JSON Web Key Set")]
-pub async fn jwks() -> Json<Jwks> {
-    // Return empty JWKS for now - in production, this should return the actual keys
-    Json(Jwks { keys: vec![] })
+pub async fn jwks(depot: &mut Depot) -> Json<Jwks> {
+    let pool = match depot.obtain::<Pool<Postgres>>() {
+        Ok(pool) => pool.clone(),
+        Err(_) => return Json(Jwks { keys: vec![] }),
+    };
+
+    let certs = sqlx::query_as::<_, Certificate>(
+        "SELECT * FROM certificates WHERE scope = 'JWT'"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let keys = certs
+        .iter()
+        .filter_map(|cert| CertService::get_jwk_from_cert(cert).ok())
+        .collect();
+
+    Json(Jwks { keys })
 }
 
 /// Application-specific JSON Web Key Set endpoint
 #[endpoint(tags("oidc"), summary = "Application-specific JSON Web Key Set")]
 pub async fn app_jwks(
-    _application: salvo::oapi::extract::PathParam<String>,
+    depot: &mut Depot,
+    application: salvo::oapi::extract::PathParam<String>,
 ) -> Json<Jwks> {
-    Json(Jwks { keys: vec![] })
+    let pool = match depot.obtain::<Pool<Postgres>>() {
+        Ok(pool) => pool.clone(),
+        Err(_) => return Json(Jwks { keys: vec![] }),
+    };
+
+    let app_name = application.into_inner();
+
+    // Try to find the application's cert
+    let cert_name: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT cert FROM applications WHERE name = $1 AND is_deleted = FALSE"
+    )
+    .bind(&app_name)
+    .fetch_optional(&pool)
+    .await
+    .unwrap_or(None);
+
+    let keys = if let Some((Some(cert_name),)) = cert_name {
+        // Get the specific cert for this application
+        let certs = sqlx::query_as::<_, Certificate>(
+            "SELECT * FROM certificates WHERE name = $1"
+        )
+        .bind(&cert_name)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        certs
+            .iter()
+            .filter_map(|cert| CertService::get_jwk_from_cert(cert).ok())
+            .collect()
+    } else {
+        // Fallback to all JWT certs
+        let certs = sqlx::query_as::<_, Certificate>(
+            "SELECT * FROM certificates WHERE scope = 'JWT'"
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        certs
+            .iter()
+            .filter_map(|cert| CertService::get_jwk_from_cert(cert).ok())
+            .collect()
+    };
+
+    Json(Jwks { keys })
 }
 
 /// WebFinger endpoint for discovery
@@ -53,26 +117,55 @@ pub async fn webfinger(
     })
 }
 
-/// Userinfo endpoint
+/// Userinfo endpoint - fetches full user info from the database
 #[endpoint(tags("oidc"), summary = "Get user information")]
 pub async fn userinfo(depot: &mut Depot) -> Result<Json<UserinfoResponse>, StatusCode> {
-    // Get user from JWT claims (set by auth middleware)
     let user_id = depot
         .get::<String>("user_id")
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    // In a real implementation, fetch user details from database
-    Ok(Json(UserinfoResponse {
-        sub: user_id.clone(),
-        name: None,
-        preferred_username: Some(user_id.clone()),
-        email: None,
-        email_verified: None,
-        phone_number: None,
-        phone_number_verified: None,
-        picture: None,
-        groups: None,
-    }))
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .clone();
+
+    // Fetch full user info from database
+    let user: Option<(String, String, Option<String>, Option<String>, Option<String>, bool)> =
+        sqlx::query_as(
+            "SELECT id, name, email, phone, avatar, is_admin FROM users WHERE id = $1 AND is_deleted = FALSE"
+        )
+        .bind(user_id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap_or(None);
+
+    match user {
+        Some((id, name, email, phone, avatar, _is_admin)) => {
+            // Fetch user's groups
+            let groups: Vec<(String,)> = sqlx::query_as(
+                "SELECT g.name FROM groups g INNER JOIN user_groups ug ON g.id = ug.group_id WHERE ug.user_id = $1"
+            )
+            .bind(&id)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+
+            let group_names: Vec<String> = groups.into_iter().map(|(n,)| n).collect();
+
+            Ok(Json(UserinfoResponse {
+                sub: id,
+                name: Some(name.clone()),
+                preferred_username: Some(name),
+                email: email.clone(),
+                email_verified: email.as_ref().map(|_| true),
+                phone_number: phone.clone(),
+                phone_number_verified: phone.as_ref().map(|_| false),
+                picture: avatar,
+                groups: if group_names.is_empty() { None } else { Some(group_names) },
+            }))
+        }
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 /// OAuth authorize endpoint (redirect to login page)
@@ -84,20 +177,35 @@ pub async fn authorize(
     response_type: QueryParam<String, true>,
     scope: QueryParam<String, false>,
     state: QueryParam<String, false>,
+    code_challenge: QueryParam<String, false>,
+    code_challenge_method: QueryParam<String, false>,
+    nonce: QueryParam<String, false>,
 ) -> Result<(), StatusCode> {
     let config = AppConfig::get();
     let base_url = format!("http://{}:{}", config.server.host, config.server.port);
 
     // Build login URL with OAuth parameters
-    let login_url = format!(
-        "{}/login?client_id={}&redirect_uri={}&response_type={}&scope={}&state={}",
+    let mut login_url = format!(
+        "{}/login?client_id={}&redirect_uri={}&response_type={}&scope={}",
         base_url,
         client_id.as_str(),
         urlencoding::encode(redirect_uri.as_str()),
         response_type.as_str(),
         scope.as_deref().unwrap_or("openid profile"),
-        state.as_deref().unwrap_or("")
     );
+
+    if let Some(state) = state.as_deref() {
+        login_url.push_str(&format!("&state={}", urlencoding::encode(state)));
+    }
+    if let Some(cc) = code_challenge.as_deref() {
+        login_url.push_str(&format!("&code_challenge={}", urlencoding::encode(cc)));
+    }
+    if let Some(ccm) = code_challenge_method.as_deref() {
+        login_url.push_str(&format!("&code_challenge_method={}", urlencoding::encode(ccm)));
+    }
+    if let Some(n) = nonce.as_deref() {
+        login_url.push_str(&format!("&nonce={}", urlencoding::encode(n)));
+    }
 
     res.render(salvo::writing::Redirect::found(login_url));
     Ok(())
