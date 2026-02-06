@@ -27,7 +27,7 @@ pub fn create_router() -> Router {
 
 fn static_router() -> Router {
     Router::new()
-        .push(Router::with_path("<**path>").get(static_embed::<Assets>().fallback("index.html")))
+        .push(Router::with_path("{**path}").get(static_embed::<Assets>().fallback("index.html")))
 }
 
 fn wellknown_router() -> Router {
@@ -36,10 +36,10 @@ fn wellknown_router() -> Router {
         .push(Router::with_path("jwks").get(oidc::jwks))
         .push(Router::with_path("webfinger").get(oidc::webfinger))
         .push(
-            Router::with_path("<application>/openid-configuration")
+            Router::with_path("{application}/openid-configuration")
                 .get(oidc::app_openid_configuration),
         )
-        .push(Router::with_path("<application>/jwks").get(oidc::app_jwks))
+        .push(Router::with_path("{application}/jwks").get(oidc::app_jwks))
 }
 
 fn oauth_router() -> Router {
@@ -67,8 +67,8 @@ fn public_routes() -> Router {
         .push(Router::with_path("verify-captcha").post(verification::verify_captcha))
         .push(Router::with_path("get-email-and-phone").post(verification::get_email_and_phone))
         // Social login (OAuth provider callbacks)
-        .push(Router::with_path("auth/<provider>").get(social_login::get_provider_auth_url))
-        .push(Router::with_path("auth/<provider>/callback").get(social_login::provider_callback))
+        .push(Router::with_path("auth/{provider}").get(social_login::get_provider_auth_url))
+        .push(Router::with_path("auth/{provider}/callback").get(social_login::provider_callback))
 }
 
 fn protected_routes() -> Router {
@@ -80,7 +80,7 @@ fn protected_routes() -> Router {
         .push(Router::with_path("check-user-password").post(auth::check_user_password))
         .push(Router::with_path("sso-logout").get(auth::sso_logout).post(auth::sso_logout))
         // Social login provider unlink
-        .push(Router::with_path("auth/<provider>/unlink").post(social_login::unlink_provider))
+        .push(Router::with_path("auth/{provider}/unlink").post(social_login::unlink_provider))
         .push(mfa_routes())
         .push(user_routes())
         .push(organization_routes())
@@ -141,8 +141,8 @@ fn protected_routes() -> Router {
         .push(form_routes())
         // File upload/download/delete with storage provider integration
         .push(Router::with_path("upload-resource").post(upload::upload_resource))
-        .push(Router::with_path("download-resource/<id>").get(upload::download_resource))
-        .push(Router::with_path("delete-resource/<id>").post(upload::delete_resource_with_file))
+        .push(Router::with_path("download-resource/{id}").get(upload::download_resource))
+        .push(Router::with_path("delete-resource/{id}").post(upload::delete_resource_with_file))
 }
 
 fn user_routes() -> Router {
@@ -150,7 +150,7 @@ fn user_routes() -> Router {
         .get(user::list_users)
         .post(user::create_user)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(user::get_user)
                 .put(user::update_user)
                 .delete(user::delete_user),
@@ -162,7 +162,7 @@ fn organization_routes() -> Router {
         .get(organization::list_organizations)
         .post(organization::create_organization)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(organization::get_organization)
                 .put(organization::update_organization)
                 .delete(organization::delete_organization),
@@ -174,7 +174,7 @@ fn application_routes() -> Router {
         .get(application::list_applications)
         .post(application::create_application)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(application::get_application)
                 .put(application::update_application)
                 .delete(application::delete_application),
@@ -186,9 +186,9 @@ fn role_routes() -> Router {
         .get(role::list_roles)
         .post(role::create_role)
         .push(Router::with_path("assign").post(role::assign_role))
-        .push(Router::with_path("user/<user_id>").get(role::get_user_roles))
+        .push(Router::with_path("user/{user_id}").get(role::get_user_roles))
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(role::get_role)
                 .put(role::update_role)
                 .delete(role::delete_role),
@@ -200,9 +200,9 @@ fn permission_routes() -> Router {
         .get(permission::list_permissions)
         .post(permission::create_permission)
         .push(Router::with_path("assign").post(permission::assign_permission))
-        .push(Router::with_path("role/<role_id>").get(permission::get_role_permissions))
+        .push(Router::with_path("role/{role_id}").get(permission::get_role_permissions))
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(permission::get_permission)
                 .put(permission::update_permission)
                 .delete(permission::delete_permission),
@@ -229,7 +229,7 @@ fn provider_routes() -> Router {
         .get(provider::list_providers)
         .post(provider::create_provider)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(provider::get_provider)
                 .put(provider::update_provider)
                 .delete(provider::delete_provider),
@@ -241,7 +241,7 @@ fn token_routes() -> Router {
         .get(token::list_tokens)
         .post(token::create_token)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(token::get_token)
                 .put(token::update_token)
                 .delete(token::delete_token),
@@ -255,12 +255,12 @@ fn group_routes() -> Router {
         .push(Router::with_path("add-user").post(group::add_user_to_group))
         .push(Router::with_path("remove-user").post(group::remove_user_from_group))
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(group::get_group)
                 .put(group::update_group)
                 .delete(group::delete_group),
         )
-        .push(Router::with_path("<id>/users").get(group::get_users_in_group))
+        .push(Router::with_path("{id}/users").get(group::get_users_in_group))
 }
 
 fn session_routes() -> Router {
@@ -269,7 +269,7 @@ fn session_routes() -> Router {
         .post(session::create_session)
         .push(Router::with_path("is-duplicated").post(session::is_session_duplicated))
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(session::get_session)
                 .put(session::update_session)
                 .delete(session::delete_session),
@@ -281,7 +281,7 @@ fn cert_routes() -> Router {
         .get(cert::list_certs)
         .post(cert::create_cert)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(cert::get_cert)
                 .put(cert::update_cert)
                 .delete(cert::delete_cert),
@@ -293,7 +293,7 @@ fn resource_routes() -> Router {
         .get(resource::list_resources)
         .post(resource::create_resource)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(resource::get_resource)
                 .put(resource::update_resource)
                 .delete(resource::delete_resource),
@@ -311,7 +311,7 @@ fn webhook_routes() -> Router {
         .get(webhook::list_webhooks)
         .post(webhook::create_webhook)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(webhook::get_webhook)
                 .put(webhook::update_webhook)
                 .delete(webhook::delete_webhook),
@@ -322,9 +322,9 @@ fn syncer_routes() -> Router {
     Router::with_path("syncers")
         .get(syncer::list_syncers)
         .post(syncer::create_syncer)
-        .push(Router::with_path("<id>/run").post(syncer::run_syncer))
+        .push(Router::with_path("{id}/run").post(syncer::run_syncer))
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(syncer::get_syncer)
                 .put(syncer::update_syncer)
                 .delete(syncer::delete_syncer),
@@ -338,7 +338,7 @@ fn invitation_routes() -> Router {
         .push(Router::with_path("verify").post(invitation::verify_invitation))
         .push(Router::with_path("send").post(invitation::send_invitation))
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(invitation::get_invitation)
                 .put(invitation::update_invitation)
                 .delete(invitation::delete_invitation),
@@ -359,7 +359,7 @@ fn record_routes() -> Router {
         .get(record::list_records)
         .push(Router::with_path("filter").post(record::filter_records))
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(record::get_record)
                 .delete(record::delete_record),
         )
@@ -381,7 +381,7 @@ fn cas_routes() -> Router {
 fn scim_routes() -> Router {
     Router::with_path("scim/v2")
         .push(Router::with_path("Users").get(scim::list_scim_users))
-        .push(Router::with_path("Users/<id>").get(scim::get_scim_user))
+        .push(Router::with_path("Users/{id}").get(scim::get_scim_user))
 }
 
 fn ldap_routes() -> Router {
@@ -395,7 +395,7 @@ fn model_routes() -> Router {
         .get(model::list_models)
         .post(model::create_model)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(model::get_model)
                 .put(model::update_model)
                 .delete(model::delete_model),
@@ -407,7 +407,7 @@ fn adapter_routes() -> Router {
         .get(adapter::list_adapters)
         .post(adapter::create_adapter)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(adapter::get_adapter)
                 .put(adapter::update_adapter)
                 .delete(adapter::delete_adapter),
@@ -419,7 +419,7 @@ fn enforcer_routes() -> Router {
         .get(enforcer::list_enforcers)
         .post(enforcer::create_enforcer)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(enforcer::get_enforcer)
                 .put(enforcer::update_enforcer)
                 .delete(enforcer::delete_enforcer),
@@ -431,7 +431,7 @@ fn product_routes() -> Router {
         .get(product::list_products)
         .post(product::create_product)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(product::get_product)
                 .put(product::update_product)
                 .delete(product::delete_product),
@@ -443,7 +443,7 @@ fn plan_routes() -> Router {
         .get(plan::list_plans)
         .post(plan::create_plan)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(plan::get_plan)
                 .put(plan::update_plan)
                 .delete(plan::delete_plan),
@@ -455,7 +455,7 @@ fn pricing_routes() -> Router {
         .get(pricing::list_pricings)
         .post(pricing::create_pricing)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(pricing::get_pricing)
                 .put(pricing::update_pricing)
                 .delete(pricing::delete_pricing),
@@ -467,7 +467,7 @@ fn subscription_routes() -> Router {
         .get(subscription::list_subscriptions)
         .post(subscription::create_subscription)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(subscription::get_subscription)
                 .put(subscription::update_subscription)
                 .delete(subscription::delete_subscription),
@@ -479,7 +479,7 @@ fn payment_routes() -> Router {
         .get(payment::list_payments)
         .post(payment::create_payment)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(payment::get_payment)
                 .put(payment::update_payment)
                 .delete(payment::delete_payment),
@@ -491,7 +491,7 @@ fn transaction_routes() -> Router {
         .get(transaction::list_transactions)
         .post(transaction::create_transaction)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(transaction::get_transaction)
                 .put(transaction::update_transaction)
                 .delete(transaction::delete_transaction),
@@ -503,7 +503,7 @@ fn order_routes() -> Router {
         .get(order::get_orders)
         .post(order::add_order)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(order::get_order)
                 .put(order::update_order)
                 .delete(order::delete_order),
@@ -515,7 +515,7 @@ fn ticket_routes() -> Router {
         .get(ticket::get_tickets)
         .post(ticket::add_ticket)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(ticket::get_ticket)
                 .put(ticket::update_ticket)
                 .delete(ticket::delete_ticket),
@@ -527,7 +527,7 @@ fn form_routes() -> Router {
         .get(form::get_forms)
         .post(form::add_form)
         .push(
-            Router::with_path("<id>")
+            Router::with_path("{id}")
                 .get(form::get_form)
                 .put(form::update_form)
                 .delete(form::delete_form),
@@ -538,7 +538,7 @@ fn swagger_router() -> Router {
     let doc = create_openapi_doc();
     Router::new()
         .push(doc.into_router("/api-doc/openapi.json"))
-        .push(Router::with_path("swagger-ui/<**>").get(SwaggerUi::new("/api-doc/openapi.json")))
+        .push(Router::with_path("swagger-ui/{**}").get(SwaggerUi::new("/api-doc/openapi.json")))
 }
 
 pub fn create_openapi_doc() -> OpenApi {
@@ -571,9 +571,9 @@ fn api_router_for_openapi() -> Router {
             .push(Router::with_path("verify-captcha").post(verification::verify_captcha))
             .push(Router::with_path("get-email-and-phone").post(verification::get_email_and_phone))
             // Social login endpoints
-            .push(Router::with_path("auth/<provider>").get(social_login::get_provider_auth_url))
-            .push(Router::with_path("auth/<provider>/callback").get(social_login::provider_callback))
-            .push(Router::with_path("auth/<provider>/unlink").post(social_login::unlink_provider))
+            .push(Router::with_path("auth/{provider}").get(social_login::get_provider_auth_url))
+            .push(Router::with_path("auth/{provider}/callback").get(social_login::provider_callback))
+            .push(Router::with_path("auth/{provider}/unlink").post(social_login::unlink_provider))
             // OAuth endpoints
             .push(
                 Router::with_path("login/oauth")
@@ -587,7 +587,7 @@ fn api_router_for_openapi() -> Router {
                     .get(user::list_users)
                     .post(user::create_user)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(user::get_user)
                             .put(user::update_user)
                             .delete(user::delete_user),
@@ -598,7 +598,7 @@ fn api_router_for_openapi() -> Router {
                     .get(organization::list_organizations)
                     .post(organization::create_organization)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(organization::get_organization)
                             .put(organization::update_organization)
                             .delete(organization::delete_organization),
@@ -609,7 +609,7 @@ fn api_router_for_openapi() -> Router {
                     .get(application::list_applications)
                     .post(application::create_application)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(application::get_application)
                             .put(application::update_application)
                             .delete(application::delete_application),
@@ -620,9 +620,9 @@ fn api_router_for_openapi() -> Router {
                     .get(role::list_roles)
                     .post(role::create_role)
                     .push(Router::with_path("assign").post(role::assign_role))
-                    .push(Router::with_path("user/<user_id>").get(role::get_user_roles))
+                    .push(Router::with_path("user/{user_id}").get(role::get_user_roles))
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(role::get_role)
                             .put(role::update_role)
                             .delete(role::delete_role),
@@ -634,10 +634,10 @@ fn api_router_for_openapi() -> Router {
                     .post(permission::create_permission)
                     .push(Router::with_path("assign").post(permission::assign_permission))
                     .push(
-                        Router::with_path("role/<role_id>").get(permission::get_role_permissions),
+                        Router::with_path("role/{role_id}").get(permission::get_role_permissions),
                     )
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(permission::get_permission)
                             .put(permission::update_permission)
                             .delete(permission::delete_permission),
@@ -659,7 +659,7 @@ fn api_router_for_openapi() -> Router {
                     .get(provider::list_providers)
                     .post(provider::create_provider)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(provider::get_provider)
                             .put(provider::update_provider)
                             .delete(provider::delete_provider),
@@ -670,7 +670,7 @@ fn api_router_for_openapi() -> Router {
                     .get(token::list_tokens)
                     .post(token::create_token)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(token::get_token)
                             .put(token::update_token)
                             .delete(token::delete_token),
@@ -683,12 +683,12 @@ fn api_router_for_openapi() -> Router {
                     .push(Router::with_path("add-user").post(group::add_user_to_group))
                     .push(Router::with_path("remove-user").post(group::remove_user_from_group))
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(group::get_group)
                             .put(group::update_group)
                             .delete(group::delete_group),
                     )
-                    .push(Router::with_path("<id>/users").get(group::get_users_in_group)),
+                    .push(Router::with_path("{id}/users").get(group::get_users_in_group)),
             )
             .push(
                 Router::with_path("sessions")
@@ -696,7 +696,7 @@ fn api_router_for_openapi() -> Router {
                     .post(session::create_session)
                     .push(Router::with_path("is-duplicated").post(session::is_session_duplicated))
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(session::get_session)
                             .put(session::update_session)
                             .delete(session::delete_session),
@@ -707,7 +707,7 @@ fn api_router_for_openapi() -> Router {
                     .get(cert::list_certs)
                     .post(cert::create_cert)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(cert::get_cert)
                             .put(cert::update_cert)
                             .delete(cert::delete_cert),
@@ -718,7 +718,7 @@ fn api_router_for_openapi() -> Router {
                     .get(resource::list_resources)
                     .post(resource::create_resource)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(resource::get_resource)
                             .put(resource::update_resource)
                             .delete(resource::delete_resource),
@@ -734,7 +734,7 @@ fn api_router_for_openapi() -> Router {
                     .get(webhook::list_webhooks)
                     .post(webhook::create_webhook)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(webhook::get_webhook)
                             .put(webhook::update_webhook)
                             .delete(webhook::delete_webhook),
@@ -744,9 +744,9 @@ fn api_router_for_openapi() -> Router {
                 Router::with_path("syncers")
                     .get(syncer::list_syncers)
                     .post(syncer::create_syncer)
-                    .push(Router::with_path("<id>/run").post(syncer::run_syncer))
+                    .push(Router::with_path("{id}/run").post(syncer::run_syncer))
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(syncer::get_syncer)
                             .put(syncer::update_syncer)
                             .delete(syncer::delete_syncer),
@@ -759,7 +759,7 @@ fn api_router_for_openapi() -> Router {
                     .push(Router::with_path("verify").post(invitation::verify_invitation))
                     .push(Router::with_path("send").post(invitation::send_invitation))
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(invitation::get_invitation)
                             .put(invitation::update_invitation)
                             .delete(invitation::delete_invitation),
@@ -770,7 +770,7 @@ fn api_router_for_openapi() -> Router {
                     .get(record::list_records)
                     .push(Router::with_path("filter").post(record::filter_records))
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(record::get_record)
                             .delete(record::delete_record),
                     ),
@@ -780,7 +780,7 @@ fn api_router_for_openapi() -> Router {
                     .get(model::list_models)
                     .post(model::create_model)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(model::get_model)
                             .put(model::update_model)
                             .delete(model::delete_model),
@@ -791,7 +791,7 @@ fn api_router_for_openapi() -> Router {
                     .get(adapter::list_adapters)
                     .post(adapter::create_adapter)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(adapter::get_adapter)
                             .put(adapter::update_adapter)
                             .delete(adapter::delete_adapter),
@@ -802,7 +802,7 @@ fn api_router_for_openapi() -> Router {
                     .get(enforcer::list_enforcers)
                     .post(enforcer::create_enforcer)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(enforcer::get_enforcer)
                             .put(enforcer::update_enforcer)
                             .delete(enforcer::delete_enforcer),
@@ -834,7 +834,7 @@ fn api_router_for_openapi() -> Router {
                     .get(product::list_products)
                     .post(product::create_product)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(product::get_product)
                             .put(product::update_product)
                             .delete(product::delete_product),
@@ -845,7 +845,7 @@ fn api_router_for_openapi() -> Router {
                     .get(plan::list_plans)
                     .post(plan::create_plan)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(plan::get_plan)
                             .put(plan::update_plan)
                             .delete(plan::delete_plan),
@@ -856,7 +856,7 @@ fn api_router_for_openapi() -> Router {
                     .get(pricing::list_pricings)
                     .post(pricing::create_pricing)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(pricing::get_pricing)
                             .put(pricing::update_pricing)
                             .delete(pricing::delete_pricing),
@@ -867,7 +867,7 @@ fn api_router_for_openapi() -> Router {
                     .get(subscription::list_subscriptions)
                     .post(subscription::create_subscription)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(subscription::get_subscription)
                             .put(subscription::update_subscription)
                             .delete(subscription::delete_subscription),
@@ -878,7 +878,7 @@ fn api_router_for_openapi() -> Router {
                     .get(payment::list_payments)
                     .post(payment::create_payment)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(payment::get_payment)
                             .put(payment::update_payment)
                             .delete(payment::delete_payment),
@@ -889,7 +889,7 @@ fn api_router_for_openapi() -> Router {
                     .get(transaction::list_transactions)
                     .post(transaction::create_transaction)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(transaction::get_transaction)
                             .put(transaction::update_transaction)
                             .delete(transaction::delete_transaction),
@@ -900,7 +900,7 @@ fn api_router_for_openapi() -> Router {
                     .get(order::get_orders)
                     .post(order::add_order)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(order::get_order)
                             .put(order::update_order)
                             .delete(order::delete_order),
@@ -911,7 +911,7 @@ fn api_router_for_openapi() -> Router {
                     .get(ticket::get_tickets)
                     .post(ticket::add_ticket)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(ticket::get_ticket)
                             .put(ticket::update_ticket)
                             .delete(ticket::delete_ticket),
@@ -922,7 +922,7 @@ fn api_router_for_openapi() -> Router {
                     .get(form::get_forms)
                     .post(form::add_form)
                     .push(
-                        Router::with_path("<id>")
+                        Router::with_path("{id}")
                             .get(form::get_form)
                             .put(form::update_form)
                             .delete(form::delete_form),
@@ -930,7 +930,7 @@ fn api_router_for_openapi() -> Router {
             )
             // File upload/download/delete with storage provider integration
             .push(Router::with_path("upload-resource").post(upload::upload_resource))
-            .push(Router::with_path("download-resource/<id>").get(upload::download_resource))
-            .push(Router::with_path("delete-resource/<id>").post(upload::delete_resource_with_file)),
+            .push(Router::with_path("download-resource/{id}").get(upload::download_resource))
+            .push(Router::with_path("delete-resource/{id}").post(upload::delete_resource_with_file)),
     )
 }
