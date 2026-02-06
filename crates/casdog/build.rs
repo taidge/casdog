@@ -13,7 +13,10 @@ fn main() {
         local_dist.canonicalize().unwrap()
     } else {
         panic!(
-            "web dist not found at {:?} or {:?}",
+            "web dist not found.\n\
+             Checked: {:?}\n\
+             Checked: {:?}\n\
+             For cargo publish, copy web assets first: cp -r web/dist crates/casdog/web-dist",
             workspace_dist, local_dist
         );
     };
