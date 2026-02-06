@@ -1,7 +1,9 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
-use async_trait::async_trait;
 use std::collections::HashMap;
+
+use async_trait::async_trait;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct TelegramProvider {
     bot_token: String,
@@ -45,7 +47,8 @@ impl OAuthProviderTrait for TelegramProvider {
             .collect();
 
         // Verify the hash (simplified - in production you should verify the hash properly)
-        let id = params.get("id")
+        let id = params
+            .get("id")
             .ok_or_else(|| AppError::Internal("No id in Telegram auth data".to_string()))?;
         let username = params.get("username").cloned();
         let first_name = params.get("first_name").cloned().unwrap_or_default();

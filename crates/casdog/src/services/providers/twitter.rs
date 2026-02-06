@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct TwitterProvider {
     client_id: String,
@@ -10,7 +11,10 @@ pub struct TwitterProvider {
 
 impl TwitterProvider {
     pub fn new(client_id: String, client_secret: String) -> Self {
-        Self { client_id, client_secret }
+        Self {
+            client_id,
+            client_secret,
+        }
     }
 }
 
@@ -49,7 +53,10 @@ impl OAuthProviderTrait for TwitterProvider {
         let client = reqwest::Client::new();
 
         // Twitter requires Basic Auth with client_id:client_secret
-        let auth = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, format!("{}:{}", self.client_id, self.client_secret));
+        let auth = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("{}:{}", self.client_id, self.client_secret),
+        );
 
         let resp = client
             .post("https://api.twitter.com/2/oauth2/token")

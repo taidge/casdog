@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct MicrosoftProvider {
     client_id: String,
@@ -98,7 +99,9 @@ impl OAuthProviderTrait for MicrosoftProvider {
 
         Ok(ProviderUserInfo {
             id: user.id.clone(),
-            username: user.user_principal_name.clone()
+            username: user
+                .user_principal_name
+                .clone()
                 .or_else(|| user.mail.clone())
                 .unwrap_or(user.id),
             display_name: user.display_name.unwrap_or_default(),

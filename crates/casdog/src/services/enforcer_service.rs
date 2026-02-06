@@ -1,7 +1,11 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CasbinEnforcer, CasbinEnforcerResponse, CreateCasbinEnforcerRequest, UpdateCasbinEnforcerRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{
+    CasbinEnforcer, CasbinEnforcerResponse, CreateCasbinEnforcerRequest,
+    UpdateCasbinEnforcerRequest,
+};
 
 pub struct EnforcerService;
 
@@ -77,7 +81,10 @@ impl EnforcerService {
         Ok(enforcer.into())
     }
 
-    pub async fn create(pool: &PgPool, req: CreateCasbinEnforcerRequest) -> AppResult<CasbinEnforcerResponse> {
+    pub async fn create(
+        pool: &PgPool,
+        req: CreateCasbinEnforcerRequest,
+    ) -> AppResult<CasbinEnforcerResponse> {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
         let is_enabled = req.is_enabled.unwrap_or(true);

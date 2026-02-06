@@ -1,9 +1,10 @@
+use sqlx::PgPool;
+use uuid::Uuid;
+
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateTransactionRequest, Transaction, TransactionResponse, UpdateTransactionRequest,
 };
-use sqlx::PgPool;
-use uuid::Uuid;
 
 pub struct TransactionService;
 
@@ -64,10 +65,7 @@ impl TransactionService {
                 .await?
         };
 
-        Ok((
-            transactions.into_iter().map(|t| t.into()).collect(),
-            total,
-        ))
+        Ok((transactions.into_iter().map(|t| t.into()).collect(), total))
     }
 
     pub async fn get_by_id(pool: &PgPool, id: &str) -> AppResult<TransactionResponse> {
@@ -112,7 +110,10 @@ impl TransactionService {
         .bind(&req.description)
         .bind(&req.provider_id)
         .bind(&req.category)
-        .bind(&req.transaction_type.unwrap_or_else(|| "balance".to_string()))
+        .bind(
+            &req.transaction_type
+                .unwrap_or_else(|| "balance".to_string()),
+        )
         .bind(&req.product_id)
         .bind(&req.user_id)
         .bind(&req.application)

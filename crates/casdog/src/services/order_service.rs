@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateOrderRequest, Order, OrderResponse, UpdateOrderRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateOrderRequest, Order, OrderResponse, UpdateOrderRequest};
 
 pub struct OrderService;
 
@@ -69,7 +70,9 @@ impl OrderService {
                 .map(|i| {
                     if i == 1 && owner.is_some() {
                         "owner = $1".to_string()
-                    } else if (i == 2 && owner.is_some() || i == 1 && owner.is_none()) && state.is_some() {
+                    } else if (i == 2 && owner.is_some() || i == 1 && owner.is_none())
+                        && state.is_some()
+                    {
                         format!("state = ${}", i)
                     } else {
                         format!("\"user\" = ${}", i)

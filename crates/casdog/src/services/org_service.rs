@@ -1,11 +1,12 @@
+use chrono::Utc;
+use sqlx::{Pool, Postgres};
+use uuid::Uuid;
+
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateOrganizationRequest, Organization, OrganizationListResponse, OrganizationQuery,
     OrganizationResponse, UpdateOrganizationRequest,
 };
-use chrono::Utc;
-use sqlx::{Pool, Postgres};
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct OrgService {
@@ -140,11 +141,10 @@ impl OrgService {
             .fetch_all(&self.pool)
             .await?;
 
-            let total: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM organizations WHERE is_deleted = FALSE",
-            )
-            .fetch_one(&self.pool)
-            .await?;
+            let total: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM organizations WHERE is_deleted = FALSE")
+                    .fetch_one(&self.pool)
+                    .await?;
 
             (orgs, total.0)
         };
@@ -157,7 +157,11 @@ impl OrgService {
         })
     }
 
-    pub async fn update(&self, id: &str, req: UpdateOrganizationRequest) -> AppResult<OrganizationResponse> {
+    pub async fn update(
+        &self,
+        id: &str,
+        req: UpdateOrganizationRequest,
+    ) -> AppResult<OrganizationResponse> {
         let mut org = sqlx::query_as::<_, Organization>(
             "SELECT * FROM organizations WHERE id = $1 AND is_deleted = FALSE",
         )
@@ -166,41 +170,111 @@ impl OrgService {
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Organization with id '{}' not found", id)))?;
 
-        if let Some(v) = req.display_name { org.display_name = v; }
-        if let Some(v) = req.website_url { org.website_url = Some(v); }
-        if let Some(v) = req.logo { org.logo = Some(v); }
-        if let Some(v) = req.logo_dark { org.logo_dark = Some(v); }
-        if let Some(v) = req.favicon { org.favicon = Some(v); }
-        if let Some(v) = req.password_type { org.password_type = v; }
-        if let Some(v) = req.default_avatar { org.default_avatar = Some(v); }
-        if let Some(v) = req.password_salt { org.password_salt = Some(v); }
-        if let Some(v) = req.password_options { org.password_options = Some(v); }
-        if let Some(v) = req.password_obfuscator_type { org.password_obfuscator_type = Some(v); }
-        if let Some(v) = req.password_obfuscator_key { org.password_obfuscator_key = Some(v); }
-        if let Some(v) = req.password_expire_days { org.password_expire_days = v; }
-        if let Some(v) = req.default_password { org.default_password = Some(v); }
-        if let Some(v) = req.master_password { org.master_password = Some(v); }
-        if let Some(v) = req.user_types { org.user_types = Some(v); }
-        if let Some(v) = req.tags { org.tags = Some(v); }
-        if let Some(v) = req.country_codes { org.country_codes = Some(v); }
-        if let Some(v) = req.default_application { org.default_application = Some(v); }
-        if let Some(v) = req.init_score { org.init_score = v; }
-        if let Some(v) = req.languages { org.languages = Some(v); }
-        if let Some(v) = req.theme_data { org.theme_data = Some(v); }
-        if let Some(v) = req.account_menu { org.account_menu = Some(v); }
-        if let Some(v) = req.enable_soft_deletion { org.enable_soft_deletion = v; }
-        if let Some(v) = req.is_profile_public { org.is_profile_public = v; }
-        if let Some(v) = req.use_email_as_username { org.use_email_as_username = v; }
-        if let Some(v) = req.enable_tour { org.enable_tour = v; }
-        if let Some(v) = req.disable_signin { org.disable_signin = v; }
-        if let Some(v) = req.ip_restriction { org.ip_restriction = Some(v); }
-        if let Some(v) = req.ip_whitelist { org.ip_whitelist = Some(v); }
-        if let Some(v) = req.has_privilege_consent { org.has_privilege_consent = v; }
-        if let Some(v) = req.account_items { org.account_items = Some(v); }
-        if let Some(v) = req.nav_items { org.nav_items = Some(v); }
-        if let Some(v) = req.mfa_items { org.mfa_items = Some(v); }
-        if let Some(v) = req.mfa_remember_in_hours { org.mfa_remember_in_hours = v; }
-        if let Some(v) = req.balance_currency { org.balance_currency = Some(v); }
+        if let Some(v) = req.display_name {
+            org.display_name = v;
+        }
+        if let Some(v) = req.website_url {
+            org.website_url = Some(v);
+        }
+        if let Some(v) = req.logo {
+            org.logo = Some(v);
+        }
+        if let Some(v) = req.logo_dark {
+            org.logo_dark = Some(v);
+        }
+        if let Some(v) = req.favicon {
+            org.favicon = Some(v);
+        }
+        if let Some(v) = req.password_type {
+            org.password_type = v;
+        }
+        if let Some(v) = req.default_avatar {
+            org.default_avatar = Some(v);
+        }
+        if let Some(v) = req.password_salt {
+            org.password_salt = Some(v);
+        }
+        if let Some(v) = req.password_options {
+            org.password_options = Some(v);
+        }
+        if let Some(v) = req.password_obfuscator_type {
+            org.password_obfuscator_type = Some(v);
+        }
+        if let Some(v) = req.password_obfuscator_key {
+            org.password_obfuscator_key = Some(v);
+        }
+        if let Some(v) = req.password_expire_days {
+            org.password_expire_days = v;
+        }
+        if let Some(v) = req.default_password {
+            org.default_password = Some(v);
+        }
+        if let Some(v) = req.master_password {
+            org.master_password = Some(v);
+        }
+        if let Some(v) = req.user_types {
+            org.user_types = Some(v);
+        }
+        if let Some(v) = req.tags {
+            org.tags = Some(v);
+        }
+        if let Some(v) = req.country_codes {
+            org.country_codes = Some(v);
+        }
+        if let Some(v) = req.default_application {
+            org.default_application = Some(v);
+        }
+        if let Some(v) = req.init_score {
+            org.init_score = v;
+        }
+        if let Some(v) = req.languages {
+            org.languages = Some(v);
+        }
+        if let Some(v) = req.theme_data {
+            org.theme_data = Some(v);
+        }
+        if let Some(v) = req.account_menu {
+            org.account_menu = Some(v);
+        }
+        if let Some(v) = req.enable_soft_deletion {
+            org.enable_soft_deletion = v;
+        }
+        if let Some(v) = req.is_profile_public {
+            org.is_profile_public = v;
+        }
+        if let Some(v) = req.use_email_as_username {
+            org.use_email_as_username = v;
+        }
+        if let Some(v) = req.enable_tour {
+            org.enable_tour = v;
+        }
+        if let Some(v) = req.disable_signin {
+            org.disable_signin = v;
+        }
+        if let Some(v) = req.ip_restriction {
+            org.ip_restriction = Some(v);
+        }
+        if let Some(v) = req.ip_whitelist {
+            org.ip_whitelist = Some(v);
+        }
+        if let Some(v) = req.has_privilege_consent {
+            org.has_privilege_consent = v;
+        }
+        if let Some(v) = req.account_items {
+            org.account_items = Some(v);
+        }
+        if let Some(v) = req.nav_items {
+            org.nav_items = Some(v);
+        }
+        if let Some(v) = req.mfa_items {
+            org.mfa_items = Some(v);
+        }
+        if let Some(v) = req.mfa_remember_in_hours {
+            org.mfa_remember_in_hours = v;
+        }
+        if let Some(v) = req.balance_currency {
+            org.balance_currency = Some(v);
+        }
         org.updated_at = Utc::now();
 
         let updated_org = sqlx::query_as::<_, Organization>(

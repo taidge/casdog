@@ -1,6 +1,7 @@
-use crate::error::AppResult;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+use crate::error::AppResult;
 
 /// Unified user info returned from all OAuth providers
 #[derive(Debug, Clone, Serialize, Deserialize)]

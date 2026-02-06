@@ -1,8 +1,9 @@
-use crate::error::AppResult;
-use crate::models::{CreateGroupRequest, Group, GroupResponse, UpdateGroupRequest};
 use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::AppResult;
+use crate::models::{CreateGroupRequest, Group, GroupResponse, UpdateGroupRequest};
 
 pub struct GroupService;
 
@@ -33,7 +34,7 @@ impl GroupService {
             (groups, total.0)
         } else {
             let groups = sqlx::query_as::<_, Group>(
-                r#"SELECT * FROM groups ORDER BY created_at DESC LIMIT $1 OFFSET $2"#
+                r#"SELECT * FROM groups ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
             )
             .bind(page_size)
             .bind(offset)

@@ -1,14 +1,10 @@
-use crate::services::RecordService;
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
 
+use crate::services::RecordService;
+
 /// Paths that should not be logged (static files, health checks, swagger docs).
-const SKIP_LOG_PREFIXES: &[&str] = &[
-    "/swagger-ui/",
-    "/api-doc/",
-    "/api/health",
-    "/.well-known/",
-];
+const SKIP_LOG_PREFIXES: &[&str] = &["/swagger-ui/", "/api-doc/", "/api/health", "/.well-known/"];
 
 /// Global audit record middleware.
 ///
@@ -30,9 +26,7 @@ impl Handler for RecordFilter {
     ) {
         let method = req.method().as_str().to_string();
         let uri = req.uri().path().to_string();
-        let client_ip = req
-            .remote_addr()
-            .to_string();
+        let client_ip = req.remote_addr().to_string();
 
         // Call the next handler first so we can capture the response status
         ctrl.call_next(req, depot, res).await;
@@ -166,9 +160,7 @@ fn derive_action(method: &str, uri: &str) -> String {
 
     // For OAuth and other non-standard paths, use method + path
     if uri.starts_with("/login/oauth/") {
-        let action = uri
-            .strip_prefix("/login/oauth/")
-            .unwrap_or("oauth");
+        let action = uri.strip_prefix("/login/oauth/").unwrap_or("oauth");
         return format!("oauth-{}", action);
     }
 
@@ -184,8 +176,7 @@ fn derive_action(method: &str, uri: &str) -> String {
     format!(
         "{}-{}",
         method.to_lowercase(),
-        uri.trim_start_matches('/')
-            .replace('/', "-")
+        uri.trim_start_matches('/').replace('/', "-")
     )
 }
 

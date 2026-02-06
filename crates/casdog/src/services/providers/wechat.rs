@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct WeChatProvider {
     app_id: String,
@@ -64,20 +65,26 @@ impl OAuthProviderTrait for WeChatProvider {
 
         if let Some(errcode) = token_resp.errcode {
             let errmsg = token_resp.errmsg.unwrap_or_default();
-            return Err(AppError::Internal(format!("WeChat error {}: {}", errcode, errmsg)));
+            return Err(AppError::Internal(format!(
+                "WeChat error {}: {}",
+                errcode, errmsg
+            )));
         }
 
         // WeChat returns both access_token and openid, we'll combine them
-        let access_token = token_resp.access_token
+        let access_token = token_resp
+            .access_token
             .ok_or_else(|| AppError::Internal("No access_token in WeChat response".to_string()))?;
-        let openid = token_resp.openid
+        let openid = token_resp
+            .openid
             .ok_or_else(|| AppError::Internal("No openid in WeChat response".to_string()))?;
 
         // Store both as JSON for later use
         Ok(serde_json::json!({
             "access_token": access_token,
             "openid": openid
-        }).to_string())
+        })
+        .to_string())
     }
 
     async fn get_user_info(&self, access_token: &str) -> AppResult<ProviderUserInfo> {
@@ -95,10 +102,7 @@ impl OAuthProviderTrait for WeChatProvider {
         let client = reqwest::Client::new();
         let resp = client
             .get("https://api.weixin.qq.com/sns/userinfo")
-            .query(&[
-                ("access_token", token),
-                ("openid", openid),
-            ])
+            .query(&[("access_token", token), ("openid", openid)])
             .send()
             .await
             .map_err(|e| AppError::Internal(format!("WeChat user info failed: {}", e)))?;

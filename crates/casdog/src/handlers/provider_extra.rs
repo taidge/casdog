@@ -1,8 +1,9 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{Provider, ProviderResponse};
 use salvo::oapi::extract::QueryParam;
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::error::{AppError, AppResult};
+use crate::models::{Provider, ProviderResponse};
 
 /// Get all providers globally across all organizations
 #[endpoint(tags("Providers"), summary = "Get all providers globally")]
@@ -11,9 +12,10 @@ pub async fn get_global_providers(
     page: QueryParam<i64, false>,
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let page_val = page.into_inner().unwrap_or(1).max(1);
     let page_size_val = page_size.into_inner().unwrap_or(20).min(100);

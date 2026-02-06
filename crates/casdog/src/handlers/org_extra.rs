@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
 use salvo::oapi::extract::QueryParam;
 use salvo::prelude::*;
 use sqlx::{FromRow, Pool, Postgres};
+
+use crate::error::{AppError, AppResult};
 
 /// Lightweight representation of an organization with only id, name, and display_name
 #[derive(Debug, serde::Serialize, FromRow, salvo::oapi::ToSchema)]
@@ -17,9 +18,10 @@ pub async fn get_organization_names(
     depot: &mut Depot,
     owner: QueryParam<String, false>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let owner_val = owner.into_inner();
 

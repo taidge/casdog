@@ -1,10 +1,13 @@
-use crate::error::AppError;
-use crate::models::{CreateUserRequest, UpdateUserRequest, UserListResponse, UserQuery, UserResponse};
-use crate::services::UserService;
-use salvo::oapi::extract::*;
 use salvo::oapi::endpoint;
+use salvo::oapi::extract::*;
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::error::AppError;
+use crate::models::{
+    CreateUserRequest, UpdateUserRequest, UserListResponse, UserQuery, UserResponse,
+};
+use crate::services::UserService;
 
 /// List users
 #[endpoint(
@@ -23,9 +26,10 @@ pub async fn list_users(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<UserListResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let user_service = UserService::new(pool);
 
     let query = UserQuery {
@@ -52,9 +56,10 @@ pub async fn create_user(
     depot: &mut Depot,
     req: JsonBody<CreateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let user_service = UserService::new(pool);
 
     let response = user_service.create(req.into_inner()).await?;
@@ -76,9 +81,10 @@ pub async fn get_user(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<Json<UserResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let user_service = UserService::new(pool);
 
     let response = user_service.get_by_id(&id.into_inner()).await?;
@@ -102,12 +108,15 @@ pub async fn update_user(
     id: PathParam<String>,
     req: JsonBody<UpdateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let user_service = UserService::new(pool);
 
-    let response = user_service.update(&id.into_inner(), req.into_inner()).await?;
+    let response = user_service
+        .update(&id.into_inner(), req.into_inner())
+        .await?;
     Ok(Json(response))
 }
 
@@ -126,9 +135,10 @@ pub async fn delete_user(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let user_service = UserService::new(pool);
 
     user_service.delete(&id.into_inner()).await?;

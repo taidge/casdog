@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::notification_provider::NotificationProvider;
 use async_trait::async_trait;
 use serde::Serialize;
+
+use super::notification_provider::NotificationProvider;
+use crate::error::{AppError, AppResult};
 
 pub struct DingTalkNotifyProvider {
     webhook_url: String,
@@ -12,7 +13,7 @@ impl DingTalkNotifyProvider {
     pub fn new(webhook_url: String, secret: Option<String>) -> Self {
         Self {
             webhook_url,
-            _secret: secret  // Secret-based signing not implemented yet, requires hmac crate
+            _secret: secret, // Secret-based signing not implemented yet, requires hmac crate
         }
     }
 }
@@ -56,7 +57,10 @@ impl NotificationProvider for DingTalkNotifyProvider {
 
         if !resp.status().is_success() {
             let error_text = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!("DingTalk webhook error: {}", error_text)));
+            return Err(AppError::Internal(format!(
+                "DingTalk webhook error: {}",
+                error_text
+            )));
         }
 
         Ok(())

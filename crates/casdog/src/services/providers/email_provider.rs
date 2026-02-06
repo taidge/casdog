@@ -1,15 +1,11 @@
-use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
+
+use crate::error::{AppError, AppResult};
 
 /// Trait for email sending providers
 #[async_trait]
 pub trait EmailProviderTrait: Send + Sync {
-    async fn send_email(
-        &self,
-        to: &str,
-        subject: &str,
-        body: &str,
-    ) -> AppResult<()>;
+    async fn send_email(&self, to: &str, subject: &str, body: &str) -> AppResult<()>;
 }
 
 /// SMTP email provider using lettre
@@ -62,23 +58,20 @@ impl SmtpEmailProvider {
 
 #[async_trait]
 impl EmailProviderTrait for SmtpEmailProvider {
-    async fn send_email(
-        &self,
-        to: &str,
-        subject: &str,
-        body: &str,
-    ) -> AppResult<()> {
+    async fn send_email(&self, to: &str, subject: &str, body: &str) -> AppResult<()> {
         use lettre::message::header::ContentType;
         use lettre::transport::smtp::authentication::Credentials;
         use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
         let email = Message::builder()
-            .from(self.from_address.parse().map_err(|e| {
-                AppError::Internal(format!("Invalid from address: {}", e))
-            })?)
-            .to(to.parse().map_err(|e| {
-                AppError::Internal(format!("Invalid to address: {}", e))
-            })?)
+            .from(
+                self.from_address
+                    .parse()
+                    .map_err(|e| AppError::Internal(format!("Invalid from address: {}", e)))?,
+            )
+            .to(to
+                .parse()
+                .map_err(|e| AppError::Internal(format!("Invalid to address: {}", e)))?)
             .subject(subject)
             .header(ContentType::TEXT_HTML)
             .body(body.to_string())

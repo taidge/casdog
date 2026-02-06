@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreatePricingRequest, Pricing, PricingResponse, UpdatePricingRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreatePricingRequest, Pricing, PricingResponse, UpdatePricingRequest};
 
 pub struct PricingService;
 
@@ -48,10 +49,12 @@ impl PricingService {
         };
 
         let total: i64 = if let Some(owner) = owner {
-            sqlx::query_scalar("SELECT COUNT(*) FROM pricings WHERE owner = $1 AND is_deleted = false")
-                .bind(owner)
-                .fetch_one(pool)
-                .await?
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pricings WHERE owner = $1 AND is_deleted = false",
+            )
+            .bind(owner)
+            .fetch_one(pool)
+            .await?
         } else {
             sqlx::query_scalar("SELECT COUNT(*) FROM pricings WHERE is_deleted = false")
                 .fetch_one(pool)

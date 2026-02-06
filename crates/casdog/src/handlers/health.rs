@@ -1,4 +1,4 @@
-use salvo::oapi::{endpoint, ToSchema};
+use salvo::oapi::{ToSchema, endpoint};
 use salvo::prelude::*;
 use serde::Serialize;
 

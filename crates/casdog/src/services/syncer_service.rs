@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateSyncerRequest, Syncer, SyncerResponse, UpdateSyncerRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateSyncerRequest, Syncer, SyncerResponse, UpdateSyncerRequest};
 
 pub struct SyncerService;
 
@@ -87,7 +88,9 @@ impl SyncerService {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
-        let table_columns_json = req.table_columns.map(|c| serde_json::to_string(&c).unwrap_or_default());
+        let table_columns_json = req
+            .table_columns
+            .map(|c| serde_json::to_string(&c).unwrap_or_default());
 
         sqlx::query(
             r#"
@@ -125,7 +128,9 @@ impl SyncerService {
         id: &str,
         req: UpdateSyncerRequest,
     ) -> AppResult<SyncerResponse> {
-        let table_columns_json = req.table_columns.map(|c| serde_json::to_string(&c).unwrap_or_default());
+        let table_columns_json = req
+            .table_columns
+            .map(|c| serde_json::to_string(&c).unwrap_or_default());
 
         sqlx::query(
             r#"

@@ -1,13 +1,14 @@
-use crate::error::AppError;
-use crate::models::{
-    ApplicationListResponse, ApplicationQuery, ApplicationResponse,
-    CreateApplicationRequest, UpdateApplicationRequest,
-};
-use crate::services::AppService;
-use salvo::oapi::extract::*;
 use salvo::oapi::endpoint;
+use salvo::oapi::extract::*;
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::error::AppError;
+use crate::models::{
+    ApplicationListResponse, ApplicationQuery, ApplicationResponse, CreateApplicationRequest,
+    UpdateApplicationRequest,
+};
+use crate::services::AppService;
 
 /// List applications
 #[endpoint(
@@ -27,9 +28,10 @@ pub async fn list_applications(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<ApplicationListResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let app_service = AppService::new(pool);
 
     let query = ApplicationQuery {
@@ -57,9 +59,10 @@ pub async fn create_application(
     depot: &mut Depot,
     req: JsonBody<CreateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let app_service = AppService::new(pool);
 
     let response = app_service.create(req.into_inner()).await?;
@@ -81,9 +84,10 @@ pub async fn get_application(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<Json<ApplicationResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let app_service = AppService::new(pool);
 
     let response = app_service.get_by_id(&id.into_inner()).await?;
@@ -107,12 +111,15 @@ pub async fn update_application(
     id: PathParam<String>,
     req: JsonBody<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let app_service = AppService::new(pool);
 
-    let response = app_service.update(&id.into_inner(), req.into_inner()).await?;
+    let response = app_service
+        .update(&id.into_inner(), req.into_inner())
+        .await?;
     Ok(Json(response))
 }
 
@@ -131,9 +138,10 @@ pub async fn delete_application(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let app_service = AppService::new(pool);
 
     app_service.delete(&id.into_inner()).await?;

@@ -24,7 +24,7 @@ pub struct Verification {
 pub struct SendVerificationCodeRequest {
     #[serde(rename = "type")]
     pub verification_type: String, // email, phone
-    pub dest: String,              // email address or phone number
+    pub dest: String, // email address or phone number
     pub application: Option<String>,
     pub check_user: Option<bool>,
 }

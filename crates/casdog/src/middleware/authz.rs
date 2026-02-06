@@ -1,9 +1,10 @@
-use crate::error::ErrorResponse;
-use crate::services::CasbinService;
-use crate::services::RecordService;
-use base64::{engine::general_purpose, Engine as _};
+use base64::Engine as _;
+use base64::engine::general_purpose;
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::error::ErrorResponse;
+use crate::services::{CasbinService, RecordService};
 
 /// Routes that skip authorization entirely (public endpoints).
 /// These are matched by prefix -- if the request path starts with any of these, it is allowed.
@@ -48,8 +49,8 @@ const PUBLIC_EXACT: &[&str] = &[
 /// 1. Extracts the subject identity from multiple sources (JWT in depot, Basic Auth,
 ///    clientId/clientSecret query params, accessKey/accessSecret query params, or anonymous).
 /// 2. Extracts the object owner and name from the request (query params or JSON body).
-/// 3. Enforces authorization using the Casbin 6-tuple:
-///    `(sub_owner, sub_name, method, url_path, obj_owner, obj_name)`.
+/// 3. Enforces authorization using the Casbin 6-tuple: `(sub_owner, sub_name, method, url_path,
+///    obj_owner, obj_name)`.
 /// 4. Skips enforcement for public routes and admin users.
 /// 5. Logs denied requests via `RecordService`.
 pub struct AuthzFilter;
@@ -73,11 +74,7 @@ impl Handler for AuthzFilter {
         }
 
         // Check if admin -- admins bypass authorization
-        let is_admin = depot
-            .get::<bool>("is_admin")
-            .copied()
-            .ok()
-            .unwrap_or(false);
+        let is_admin = depot.get::<bool>("is_admin").copied().ok().unwrap_or(false);
         if is_admin {
             ctrl.call_next(req, depot, res).await;
             return;
@@ -118,7 +115,9 @@ impl Handler for AuthzFilter {
             .await
         {
             Ok(true) => {
-                if will_log(&sub_owner, &sub_name, &method, &url_path, &obj_owner, &obj_name) {
+                if will_log(
+                    &sub_owner, &sub_name, &method, &url_path, &obj_owner, &obj_name,
+                ) {
                     tracing::debug!(
                         "Authorization allowed: {}/{} {} {} on {}/{}",
                         sub_owner,
@@ -195,7 +194,11 @@ fn is_public_path(path: &str) -> bool {
     }
 
     // Static files are always public
-    if !path.starts_with("/api/") && !path.starts_with("/login/") && !path.starts_with("/cas/") && !path.starts_with("/scim/") {
+    if !path.starts_with("/api/")
+        && !path.starts_with("/login/")
+        && !path.starts_with("/cas/")
+        && !path.starts_with("/scim/")
+    {
         return true;
     }
 
@@ -266,12 +269,8 @@ fn extract_from_client_credentials(req: &Request) -> Option<(String, String)> {
     };
 
     // Fall back to query params
-    let client_id = client_id.or_else(|| {
-        req.query::<String>("clientId")
-    });
-    let client_secret = client_secret.or_else(|| {
-        req.query::<String>("clientSecret")
-    });
+    let client_id = client_id.or_else(|| req.query::<String>("clientId"));
+    let client_secret = client_secret.or_else(|| req.query::<String>("clientSecret"));
 
     if let (Some(id), Some(_secret)) = (client_id, client_secret) {
         if !id.is_empty() {
@@ -306,9 +305,8 @@ fn extract_access_keys(req: &Request) -> Option<(String, String)> {
 fn extract_object(req: &Request, path: &str, method: &str) -> (String, String) {
     if method == "GET" {
         // For list endpoints (get-*s pattern), only use owner
-        let is_list = path.starts_with("/api/get-")
-            && path.ends_with('s')
-            && path != "/api/get-policies";
+        let is_list =
+            path.starts_with("/api/get-") && path.ends_with('s') && path != "/api/get-policies";
 
         if !is_list {
             // Try "id" query param (format: "owner/name")
@@ -351,12 +349,8 @@ fn extract_object(req: &Request, path: &str, method: &str) -> (String, String) {
         }
 
         // Try "owner" and "name" from query params
-        let owner = req
-            .query::<String>("owner")
-            .unwrap_or_default();
-        let name = req
-            .query::<String>("name")
-            .unwrap_or_default();
+        let owner = req.query::<String>("owner").unwrap_or_default();
+        let name = req.query::<String>("name").unwrap_or_default();
 
         (owner, name)
     }

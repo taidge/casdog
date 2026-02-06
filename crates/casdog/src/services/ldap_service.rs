@@ -1,5 +1,6 @@
-use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
+
+use crate::error::{AppError, AppResult};
 
 pub struct LdapService;
 
@@ -23,7 +24,13 @@ impl LdapService {
         filter: &str,
     ) -> AppResult<Vec<LdapUser>> {
         // TODO: Full LDAP implementation with ldap3 crate
-        tracing::info!("LDAP sync from {}:{} base_dn={} filter={}", host, port, base_dn, filter);
+        tracing::info!(
+            "LDAP sync from {}:{} base_dn={} filter={}",
+            host,
+            port,
+            base_dn,
+            filter
+        );
         Ok(vec![])
     }
 

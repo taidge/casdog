@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
+use sqlx::PgPool;
+use tokio::time::{self, Duration};
+use tracing;
+
 use crate::error::{AppError, AppResult};
 use crate::models::SyncerResponse;
 use crate::services::SyncerService;
-use sqlx::PgPool;
-use std::collections::HashMap;
-use tokio::time::{self, Duration};
-use tracing;
 
 // ---------------------------------------------------------------------------
 // Syncer execution result
@@ -78,7 +80,16 @@ impl SyncerExecutor {
         // Persist the outcome in the syncer's error_text field.
         match &result {
             Ok(run) => {
-                Self::update_error_text(pool, syncer_id, if run.success { None } else { Some(&run.message) }).await;
+                Self::update_error_text(
+                    pool,
+                    syncer_id,
+                    if run.success {
+                        None
+                    } else {
+                        Some(&run.message)
+                    },
+                )
+                .await;
             }
             Err(e) => {
                 Self::update_error_text(pool, syncer_id, Some(&e.to_string())).await;
@@ -275,13 +286,11 @@ impl SyncerExecutor {
     ///
     /// Passing `None` clears any previous error.
     async fn update_error_text(pool: &PgPool, syncer_id: &str, error: Option<&str>) {
-        let result = sqlx::query(
-            "UPDATE syncers SET error_text = $1 WHERE id = $2",
-        )
-        .bind(error)
-        .bind(syncer_id)
-        .execute(pool)
-        .await;
+        let result = sqlx::query("UPDATE syncers SET error_text = $1 WHERE id = $2")
+            .bind(error)
+            .bind(syncer_id)
+            .execute(pool)
+            .await;
 
         if let Err(e) = result {
             tracing::warn!(

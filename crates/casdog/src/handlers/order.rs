@@ -1,9 +1,10 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateOrderRequest, OrderResponse, UpdateOrderRequest};
-use crate::services::OrderService;
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateOrderRequest, OrderResponse, UpdateOrderRequest};
+use crate::services::OrderService;
 
 #[endpoint(tags("Order"), summary = "List orders")]
 pub async fn get_orders(
@@ -25,8 +26,15 @@ pub async fn get_orders(
     let page_val = page.into_inner().unwrap_or(1);
     let page_size_val = page_size.into_inner().unwrap_or(10);
 
-    let (orders, total) =
-        OrderService::list(&pool, owner_ref, state_ref, user_ref, page_val, page_size_val).await?;
+    let (orders, total) = OrderService::list(
+        &pool,
+        owner_ref,
+        state_ref,
+        user_ref,
+        page_val,
+        page_size_val,
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -36,10 +44,7 @@ pub async fn get_orders(
 }
 
 #[endpoint(tags("Order"), summary = "Get order by ID")]
-pub async fn get_order(
-    depot: &mut Depot,
-    id: PathParam<String>,
-) -> AppResult<Json<OrderResponse>> {
+pub async fn get_order(depot: &mut Depot, id: PathParam<String>) -> AppResult<Json<OrderResponse>> {
     let pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?

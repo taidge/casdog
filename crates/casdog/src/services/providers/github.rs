@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct GitHubProvider {
     client_id: String,
@@ -10,7 +11,10 @@ pub struct GitHubProvider {
 
 impl GitHubProvider {
     pub fn new(client_id: String, client_secret: String) -> Self {
-        Self { client_id, client_secret }
+        Self {
+            client_id,
+            client_secret,
+        }
     }
 }
 

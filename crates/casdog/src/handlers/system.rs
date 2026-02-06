@@ -1,8 +1,9 @@
-use crate::error::{AppError, AppResult};
 use salvo::oapi::ToSchema;
 use salvo::prelude::*;
 use serde::Serialize;
 use sqlx::{Pool, Postgres};
+
+use crate::error::{AppError, AppResult};
 
 /// System version and build information.
 #[derive(Debug, Serialize, ToSchema)]
@@ -40,11 +41,9 @@ pub struct PrometheusInfoResponse {
 pub async fn get_system_info() -> AppResult<Json<SystemInfoResponse>> {
     let version = env!("CARGO_PKG_VERSION").to_string();
 
-    let commit_id = std::env::var("CASDOG_COMMIT_ID")
-        .unwrap_or_else(|_| "unknown".to_string());
+    let commit_id = std::env::var("CASDOG_COMMIT_ID").unwrap_or_else(|_| "unknown".to_string());
 
-    let build_time = std::env::var("CASDOG_BUILD_TIME")
-        .unwrap_or_else(|_| "unknown".to_string());
+    let build_time = std::env::var("CASDOG_BUILD_TIME").unwrap_or_else(|_| "unknown".to_string());
 
     // Casdoor returns the Go version here; we return the Rust toolchain info instead.
     let rust_version = format!(
@@ -72,22 +71,32 @@ pub async fn get_system_info() -> AppResult<Json<SystemInfoResponse>> {
     )
 )]
 pub async fn get_prometheus_info(depot: &mut Depot) -> AppResult<String> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
-    let org_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM organizations WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
-    let provider_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM providers WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
-    let app_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM applications WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
+        .fetch_one(&pool)
+        .await?;
+    let org_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM organizations WHERE is_deleted = FALSE")
+            .fetch_one(&pool)
+            .await?;
+    let provider_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM providers WHERE is_deleted = FALSE")
+            .fetch_one(&pool)
+            .await?;
+    let app_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM applications WHERE is_deleted = FALSE")
+            .fetch_one(&pool)
+            .await?;
     let session_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions")
-        .fetch_one(&pool).await?;
+        .fetch_one(&pool)
+        .await?;
     let token_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tokens")
-        .fetch_one(&pool).await?;
+        .fetch_one(&pool)
+        .await?;
 
     let version = env!("CARGO_PKG_VERSION");
 

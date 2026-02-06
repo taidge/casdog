@@ -6,16 +6,17 @@ mod models;
 mod routes;
 mod services;
 
-use crate::config::AppConfig;
-use crate::services::CasbinService;
-use crate::services::InitService;
 use salvo::affix_state::AffixList;
 use salvo::cors::Cors;
 use salvo::http::Method;
 use salvo::logging::Logger;
 use salvo::prelude::*;
 use sqlx::postgres::PgPoolOptions;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+use crate::config::AppConfig;
+use crate::services::{CasbinService, InitService};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,8 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("casdog={},salvo={}", config.logging.level, config.logging.level).into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                format!(
+                    "casdog={},salvo={}",
+                    config.logging.level, config.logging.level
+                )
+                .into()
+            }),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();

@@ -1,10 +1,9 @@
-use crate::error::AppResult;
-use crate::models::{
-    CreateProviderRequest, Provider, ProviderResponse, UpdateProviderRequest,
-};
 use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::AppResult;
+use crate::models::{CreateProviderRequest, Provider, ProviderResponse, UpdateProviderRequest};
 
 pub struct ProviderService;
 
@@ -35,7 +34,7 @@ impl ProviderService {
             (providers, total.0)
         } else {
             let providers = sqlx::query_as::<_, Provider>(
-                r#"SELECT * FROM providers ORDER BY created_at DESC LIMIT $1 OFFSET $2"#
+                r#"SELECT * FROM providers ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
             )
             .bind(page_size)
             .bind(offset)

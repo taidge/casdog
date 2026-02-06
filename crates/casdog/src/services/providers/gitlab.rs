@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct GitLabProvider {
     client_id: String,

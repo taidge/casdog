@@ -1,15 +1,21 @@
-use crate::error::{AppError, AppResult};
-use sqlx::PgPool;
 use std::sync::Arc;
-use webauthn_rs::prelude::*;
+
+use sqlx::PgPool;
 use webauthn_rs::Webauthn;
+use webauthn_rs::prelude::*;
+
+use crate::error::{AppError, AppResult};
 
 pub struct WebauthnService {
     webauthn: Arc<Webauthn>,
 }
 
 impl WebauthnService {
-    pub fn new(rp_id: &str, rp_origin: &webauthn_rs::prelude::Url, rp_name: &str) -> AppResult<Self> {
+    pub fn new(
+        rp_id: &str,
+        rp_origin: &webauthn_rs::prelude::Url,
+        rp_name: &str,
+    ) -> AppResult<Self> {
         let builder = WebauthnBuilder::new(rp_id, rp_origin)
             .map_err(|e| AppError::Internal(format!("WebAuthn builder error: {}", e)))?
             .rp_name(rp_name);
@@ -31,23 +37,17 @@ impl WebauthnService {
         user_display_name: &str,
         existing_credentials: Option<Vec<CredentialID>>,
     ) -> AppResult<(CreationChallengeResponse, PasskeyRegistration)> {
-        let uuid = uuid::Uuid::from_slice(
-            &{
-                let mut buf = [0u8; 16];
-                let len = user_id.len().min(16);
-                buf[..len].copy_from_slice(&user_id[..len]);
-                buf
-            }
-        ).unwrap_or_else(|_| uuid::Uuid::new_v4());
+        let uuid = uuid::Uuid::from_slice(&{
+            let mut buf = [0u8; 16];
+            let len = user_id.len().min(16);
+            buf[..len].copy_from_slice(&user_id[..len]);
+            buf
+        })
+        .unwrap_or_else(|_| uuid::Uuid::new_v4());
 
         let (ccr, reg_state) = self
             .webauthn
-            .start_passkey_registration(
-                uuid,
-                user_name,
-                user_display_name,
-                existing_credentials,
-            )
+            .start_passkey_registration(uuid, user_name, user_display_name, existing_credentials)
             .map_err(|e| AppError::Internal(format!("WebAuthn registration start error: {}", e)))?;
 
         Ok((ccr, reg_state))
@@ -62,7 +62,9 @@ impl WebauthnService {
         let cred = self
             .webauthn
             .finish_passkey_registration(reg, state)
-            .map_err(|e| AppError::Internal(format!("WebAuthn registration finish error: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("WebAuthn registration finish error: {}", e))
+            })?;
 
         Ok(cred)
     }
@@ -75,7 +77,9 @@ impl WebauthnService {
         let (rcr, auth_state) = self
             .webauthn
             .start_passkey_authentication(credentials)
-            .map_err(|e| AppError::Internal(format!("WebAuthn authentication start error: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("WebAuthn authentication start error: {}", e))
+            })?;
 
         Ok((rcr, auth_state))
     }
@@ -89,7 +93,9 @@ impl WebauthnService {
         let result = self
             .webauthn
             .finish_passkey_authentication(auth, state)
-            .map_err(|e| AppError::Internal(format!("WebAuthn authentication finish error: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("WebAuthn authentication finish error: {}", e))
+            })?;
 
         Ok(result)
     }
@@ -124,7 +130,7 @@ impl WebauthnService {
     /// Get all WebAuthn credentials for a user
     pub async fn get_credentials(pool: &PgPool, user_id: &str) -> AppResult<Vec<Passkey>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT credential_data FROM user_webauthn_credentials WHERE user_id = $1"
+            "SELECT credential_data FROM user_webauthn_credentials WHERE user_id = $1",
         )
         .bind(user_id)
         .fetch_all(pool)

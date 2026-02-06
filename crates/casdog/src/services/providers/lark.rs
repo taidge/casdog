@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct LarkProvider {
     app_id: String,
@@ -74,10 +75,14 @@ impl OAuthProviderTrait for LarkProvider {
             .map_err(|e| AppError::Internal(format!("Lark token parse failed: {}", e)))?;
 
         if token_resp.code != 0 {
-            return Err(AppError::Internal(format!("Lark error: {}", token_resp.msg)));
+            return Err(AppError::Internal(format!(
+                "Lark error: {}",
+                token_resp.msg
+            )));
         }
 
-        token_resp.data
+        token_resp
+            .data
             .map(|d| d.access_token)
             .ok_or_else(|| AppError::Internal("No access token in Lark response".to_string()))
     }
@@ -101,7 +106,8 @@ impl OAuthProviderTrait for LarkProvider {
             return Err(AppError::Internal(format!("Lark error: {}", user_resp.msg)));
         }
 
-        let user = user_resp.data
+        let user = user_resp
+            .data
             .ok_or_else(|| AppError::Internal("No user data in Lark response".to_string()))?;
 
         Ok(ProviderUserInfo {

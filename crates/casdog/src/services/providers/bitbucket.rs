@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct BitbucketProvider {
     client_id: String,
@@ -10,7 +11,10 @@ pub struct BitbucketProvider {
 
 impl BitbucketProvider {
     pub fn new(client_id: String, client_secret: String) -> Self {
-        Self { client_id, client_secret }
+        Self {
+            client_id,
+            client_secret,
+        }
     }
 }
 
@@ -65,7 +69,10 @@ impl OAuthProviderTrait for BitbucketProvider {
         let client = reqwest::Client::new();
 
         // Bitbucket requires Basic Auth
-        let auth = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, format!("{}:{}", self.client_id, self.client_secret));
+        let auth = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("{}:{}", self.client_id, self.client_secret),
+        );
 
         let resp = client
             .post("https://bitbucket.org/site/oauth2/access_token")
@@ -110,19 +117,16 @@ impl OAuthProviderTrait for BitbucketProvider {
             .send()
             .await
         {
-            Ok(email_resp) => {
-                email_resp.json::<BitbucketEmailResponse>()
-                    .await
-                    .ok()
-                    .and_then(|e| e.values.into_iter().find(|email| email.is_primary))
-                    .map(|email| email.email)
-            }
+            Ok(email_resp) => email_resp
+                .json::<BitbucketEmailResponse>()
+                .await
+                .ok()
+                .and_then(|e| e.values.into_iter().find(|email| email.is_primary))
+                .map(|email| email.email),
             Err(_) => None,
         };
 
-        let avatar_url = user.links
-            .and_then(|l| l.avatar)
-            .and_then(|a| a.href);
+        let avatar_url = user.links.and_then(|l| l.avatar).and_then(|a| a.href);
 
         Ok(ProviderUserInfo {
             id: user.account_id,

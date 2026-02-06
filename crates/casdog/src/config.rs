@@ -1,7 +1,8 @@
+use std::sync::RwLock;
+
 use config::{Config, ConfigError, File};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
-use std::sync::RwLock;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {

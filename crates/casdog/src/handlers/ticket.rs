@@ -1,9 +1,10 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateTicketRequest, TicketResponse, UpdateTicketRequest};
-use crate::services::TicketService;
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateTicketRequest, TicketResponse, UpdateTicketRequest};
+use crate::services::TicketService;
 
 #[endpoint(tags("Ticket"), summary = "List tickets")]
 pub async fn get_tickets(

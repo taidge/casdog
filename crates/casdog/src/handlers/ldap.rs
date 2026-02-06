@@ -1,8 +1,9 @@
-use crate::error::AppError;
-use crate::services::ldap_service::LdapService;
 use salvo::oapi::ToSchema;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::error::AppError;
+use crate::services::ldap_service::LdapService;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LdapSyncRequest {
@@ -21,10 +22,7 @@ pub struct LdapSyncResponse {
 }
 
 /// Get LDAP users
-#[endpoint(
-    tags("LDAP"),
-    summary = "Sync LDAP users"
-)]
+#[endpoint(tags("LDAP"), summary = "Sync LDAP users")]
 pub async fn sync_ldap_users(
     req: salvo::oapi::extract::JsonBody<LdapSyncRequest>,
 ) -> Result<Json<LdapSyncResponse>, AppError> {
@@ -38,7 +36,8 @@ pub async fn sync_ldap_users(
         &req.bind_password,
         &req.base_dn,
         filter,
-    ).await?;
+    )
+    .await?;
 
     Ok(Json(LdapSyncResponse {
         synced_count: users.len(),
@@ -47,20 +46,13 @@ pub async fn sync_ldap_users(
 }
 
 /// Test LDAP connection
-#[endpoint(
-    tags("LDAP"),
-    summary = "Test LDAP connection"
-)]
+#[endpoint(tags("LDAP"), summary = "Test LDAP connection")]
 pub async fn test_ldap_connection(
     req: salvo::oapi::extract::JsonBody<LdapSyncRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = req.into_inner();
-    let success = LdapService::test_connection(
-        &req.host,
-        req.port,
-        &req.bind_dn,
-        &req.bind_password,
-    ).await?;
+    let success =
+        LdapService::test_connection(&req.host, req.port, &req.bind_dn, &req.bind_password).await?;
 
     Ok(Json(serde_json::json!({
         "success": success,

@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::notification_provider::NotificationProvider;
 use async_trait::async_trait;
 use serde_json::json;
+
+use super::notification_provider::NotificationProvider;
+use crate::error::{AppError, AppResult};
 
 pub struct TeamsNotifyProvider {
     webhook_url: String,
@@ -39,7 +40,10 @@ impl NotificationProvider for TeamsNotifyProvider {
 
         if !resp.status().is_success() {
             let error_text = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!("Teams webhook error: {}", error_text)));
+            return Err(AppError::Internal(format!(
+                "Teams webhook error: {}",
+                error_text
+            )));
         }
 
         Ok(())

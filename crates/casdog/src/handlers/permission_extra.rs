@@ -1,8 +1,9 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{Permission, PermissionResponse};
 use salvo::oapi::extract::QueryParam;
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::error::{AppError, AppResult};
+use crate::models::{Permission, PermissionResponse};
 
 /// Get permissions filtered by submitter (owner)
 #[endpoint(tags("Permissions"), summary = "Get permissions by submitter")]
@@ -10,9 +11,10 @@ pub async fn get_permissions_by_submitter(
     depot: &mut Depot,
     submitter: QueryParam<String, true>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let submitter_val = submitter.into_inner();
 
@@ -23,7 +25,10 @@ pub async fn get_permissions_by_submitter(
     .fetch_all(&pool)
     .await?;
 
-    let data: Vec<PermissionResponse> = permissions.into_iter().map(PermissionResponse::from).collect();
+    let data: Vec<PermissionResponse> = permissions
+        .into_iter()
+        .map(PermissionResponse::from)
+        .collect();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -37,9 +42,10 @@ pub async fn get_permissions_by_role(
     depot: &mut Depot,
     role_id: QueryParam<String, true>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let role_id_val = role_id.into_inner();
 
@@ -53,7 +59,10 @@ pub async fn get_permissions_by_role(
     .fetch_all(&pool)
     .await?;
 
-    let data: Vec<PermissionResponse> = permissions.into_iter().map(PermissionResponse::from).collect();
+    let data: Vec<PermissionResponse> = permissions
+        .into_iter()
+        .map(PermissionResponse::from)
+        .collect();
 
     Ok(Json(serde_json::json!({
         "status": "ok",

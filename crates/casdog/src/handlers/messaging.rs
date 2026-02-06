@@ -1,8 +1,9 @@
-use crate::error::AppResult;
 use salvo::oapi::ToSchema;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde::Deserialize;
+
+use crate::error::AppResult;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SendEmailRequest {
@@ -29,9 +30,7 @@ pub struct SendNotificationRequest {
 }
 
 #[endpoint(tags("Messaging"), summary = "Send email")]
-pub async fn send_email(
-    body: JsonBody<SendEmailRequest>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn send_email(body: JsonBody<SendEmailRequest>) -> AppResult<Json<serde_json::Value>> {
     let req = body.into_inner();
     // In production, use the configured email provider
     Ok(Json(serde_json::json!({
@@ -41,9 +40,7 @@ pub async fn send_email(
 }
 
 #[endpoint(tags("Messaging"), summary = "Send SMS")]
-pub async fn send_sms(
-    body: JsonBody<SendSmsRequest>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn send_sms(body: JsonBody<SendSmsRequest>) -> AppResult<Json<serde_json::Value>> {
     let req = body.into_inner();
     Ok(Json(serde_json::json!({
         "status": "ok",

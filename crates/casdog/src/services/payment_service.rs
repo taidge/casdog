@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreatePaymentRequest, Payment, PaymentResponse, UpdatePaymentRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreatePaymentRequest, Payment, PaymentResponse, UpdatePaymentRequest};
 
 pub struct PaymentService;
 

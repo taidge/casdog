@@ -1,8 +1,9 @@
+use sqlx::PgPool;
+use uuid::Uuid;
+
 use crate::error::AppResult;
 use crate::services::cert_service::CertService;
 use crate::services::user_service::UserService;
-use sqlx::PgPool;
-use uuid::Uuid;
 
 pub struct InitService;
 
@@ -92,9 +93,13 @@ impl InitService {
             {"name": "MFA accounts", "visible": true, "viewRule": "Self", "modifyRule": "Self"},
         ]);
 
-        let country_codes = serde_json::json!(["US", "ES", "FR", "DE", "GB", "CN", "JP", "KR", "VN", "ID", "SG", "IN"]);
+        let country_codes = serde_json::json!([
+            "US", "ES", "FR", "DE", "GB", "CN", "JP", "KR", "VN", "ID", "SG", "IN"
+        ]);
         let password_options = serde_json::json!(["AtLeast6"]);
-        let languages = serde_json::json!(["en", "es", "fr", "de", "ja", "zh", "vi", "pt", "tr", "pl", "uk"]);
+        let languages = serde_json::json!([
+            "en", "es", "fr", "de", "ja", "zh", "vi", "pt", "tr", "pl", "uk"
+        ]);
 
         // Upsert: the row may already exist from migration 001 with minimal data
         sqlx::query(
@@ -322,10 +327,7 @@ impl InitService {
         .execute(pool)
         .await?;
 
-        tracing::info!(
-            "Created built-in application (client_id: {})",
-            client_id
-        );
+        tracing::info!("Created built-in application (client_id: {})", client_id);
         Ok(())
     }
 
@@ -559,9 +561,19 @@ m = g(r.sub, p.sub) && r.obj == p.obj && r.act == p.act"#;
     async fn upsert_built_in_provider(pool: &PgPool) -> AppResult<()> {
         // Casdoor creates three built-in providers: captcha, balance, and dummy payment
         let providers = [
-            ("provider_captcha_default", "Captcha Default", "Captcha", "Default"),
+            (
+                "provider_captcha_default",
+                "Captcha Default",
+                "Captcha",
+                "Default",
+            ),
             ("provider_balance", "Balance", "Payment", "Balance"),
-            ("provider_payment_dummy", "Dummy Payment", "Payment", "Dummy"),
+            (
+                "provider_payment_dummy",
+                "Dummy Payment",
+                "Payment",
+                "Dummy",
+            ),
         ];
 
         for (name, display_name, category, ptype) in providers {

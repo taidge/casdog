@@ -1,11 +1,12 @@
+use chrono::Utc;
+use sqlx::{Pool, Postgres};
+use uuid::Uuid;
+
 use crate::error::{AppError, AppResult};
 use crate::models::{
     AssignRoleRequest, CreateRoleRequest, Role, RoleListResponse, RoleQuery, RoleResponse,
     UpdateRoleRequest,
 };
-use chrono::Utc;
-use sqlx::{Pool, Postgres};
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct RoleService {
@@ -49,13 +50,12 @@ impl RoleService {
     }
 
     pub async fn get_by_id(&self, id: &str) -> AppResult<RoleResponse> {
-        let role = sqlx::query_as::<_, Role>(
-            "SELECT * FROM roles WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Role with id '{}' not found", id)))?;
+        let role =
+            sqlx::query_as::<_, Role>("SELECT * FROM roles WHERE id = $1 AND is_deleted = FALSE")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("Role with id '{}' not found", id)))?;
 
         Ok(role.into())
     }
@@ -92,11 +92,10 @@ impl RoleService {
             .fetch_all(&self.pool)
             .await?;
 
-            let total: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM roles WHERE is_deleted = FALSE",
-            )
-            .fetch_one(&self.pool)
-            .await?;
+            let total: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM roles WHERE is_deleted = FALSE")
+                    .fetch_one(&self.pool)
+                    .await?;
 
             (roles, total.0)
         };
@@ -110,13 +109,12 @@ impl RoleService {
     }
 
     pub async fn update(&self, id: &str, req: UpdateRoleRequest) -> AppResult<RoleResponse> {
-        let mut role = sqlx::query_as::<_, Role>(
-            "SELECT * FROM roles WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Role with id '{}' not found", id)))?;
+        let mut role =
+            sqlx::query_as::<_, Role>("SELECT * FROM roles WHERE id = $1 AND is_deleted = FALSE")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("Role with id '{}' not found", id)))?;
 
         if let Some(display_name) = req.display_name {
             role.display_name = display_name;
@@ -158,7 +156,10 @@ impl RoleService {
         .await?;
 
         if result.rows_affected() == 0 {
-            return Err(AppError::NotFound(format!("Role with id '{}' not found", id)));
+            return Err(AppError::NotFound(format!(
+                "Role with id '{}' not found",
+                id
+            )));
         }
 
         Ok(())

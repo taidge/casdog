@@ -1,8 +1,9 @@
-use crate::error::{AppError, AppResult};
 use chrono::Utc;
 use rand::Rng;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
 
 pub struct MfaService;
 
@@ -20,10 +21,7 @@ pub struct UserMfa {
 
 impl MfaService {
     /// Initiate TOTP setup - generates secret and returns QR code URL
-    pub fn initiate_totp_setup(
-        user_name: &str,
-        issuer: &str,
-    ) -> AppResult<(String, String)> {
+    pub fn initiate_totp_setup(user_name: &str, issuer: &str) -> AppResult<(String, String)> {
         use totp_rs::{Algorithm, Secret, TOTP};
 
         let secret = Secret::generate_secret();
@@ -32,7 +30,9 @@ impl MfaService {
             6,
             1,
             30,
-            secret.to_bytes().map_err(|e| AppError::Internal(format!("TOTP secret error: {}", e)))?,
+            secret
+                .to_bytes()
+                .map_err(|e| AppError::Internal(format!("TOTP secret error: {}", e)))?,
             Some(issuer.to_string()),
             user_name.to_string(),
         )
@@ -54,7 +54,9 @@ impl MfaService {
             6,
             1,
             30,
-            secret.to_bytes().map_err(|e| AppError::Internal(format!("TOTP secret error: {}", e)))?,
+            secret
+                .to_bytes()
+                .map_err(|e| AppError::Internal(format!("TOTP secret error: {}", e)))?,
             None,
             "user".to_string(),
         )
@@ -97,8 +99,8 @@ impl MfaService {
     ) -> AppResult<UserMfa> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let recovery_codes = serde_json::to_string(&Self::generate_recovery_codes(10))
-            .unwrap_or_default();
+        let recovery_codes =
+            serde_json::to_string(&Self::generate_recovery_codes(10)).unwrap_or_default();
 
         let mfa = sqlx::query_as::<_, UserMfa>(
             r#"INSERT INTO user_mfa (id, user_id, mfa_type, secret, recovery_codes, is_enabled, created_at, updated_at)
@@ -131,13 +133,11 @@ impl MfaService {
         .await?;
 
         // Update user's mfa_enabled flag
-        sqlx::query(
-            "UPDATE users SET mfa_enabled = true, updated_at = $1 WHERE id = $2"
-        )
-        .bind(Utc::now())
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+        sqlx::query("UPDATE users SET mfa_enabled = true, updated_at = $1 WHERE id = $2")
+            .bind(Utc::now())
+            .bind(user_id)
+            .execute(pool)
+            .await?;
 
         Ok(())
     }
@@ -152,7 +152,7 @@ impl MfaService {
 
         // Check if user has any remaining MFA
         let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM user_mfa WHERE user_id = $1 AND is_enabled = true"
+            "SELECT COUNT(*) FROM user_mfa WHERE user_id = $1 AND is_enabled = true",
         )
         .bind(user_id)
         .fetch_one(pool)
@@ -170,9 +170,13 @@ impl MfaService {
     }
 
     /// Get MFA record for a user
-    pub async fn get_user_mfa(pool: &PgPool, user_id: &str, mfa_type: &str) -> AppResult<Option<UserMfa>> {
+    pub async fn get_user_mfa(
+        pool: &PgPool,
+        user_id: &str,
+        mfa_type: &str,
+    ) -> AppResult<Option<UserMfa>> {
         let mfa = sqlx::query_as::<_, UserMfa>(
-            "SELECT * FROM user_mfa WHERE user_id = $1 AND mfa_type = $2"
+            "SELECT * FROM user_mfa WHERE user_id = $1 AND mfa_type = $2",
         )
         .bind(user_id)
         .bind(mfa_type)
@@ -185,7 +189,7 @@ impl MfaService {
     /// Check if user has MFA enabled
     pub async fn is_mfa_enabled(pool: &PgPool, user_id: &str) -> AppResult<bool> {
         let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM user_mfa WHERE user_id = $1 AND is_enabled = true"
+            "SELECT COUNT(*) FROM user_mfa WHERE user_id = $1 AND is_enabled = true",
         )
         .bind(user_id)
         .fetch_one(pool)
@@ -196,12 +200,11 @@ impl MfaService {
 
     /// Verify recovery code
     pub async fn verify_recovery_code(pool: &PgPool, user_id: &str, code: &str) -> AppResult<bool> {
-        let mfa_records: Vec<UserMfa> = sqlx::query_as(
-            "SELECT * FROM user_mfa WHERE user_id = $1 AND is_enabled = true"
-        )
-        .bind(user_id)
-        .fetch_all(pool)
-        .await?;
+        let mfa_records: Vec<UserMfa> =
+            sqlx::query_as("SELECT * FROM user_mfa WHERE user_id = $1 AND is_enabled = true")
+                .bind(user_id)
+                .fetch_all(pool)
+                .await?;
 
         for mfa in &mfa_records {
             if let Some(ref codes_json) = mfa.recovery_codes {

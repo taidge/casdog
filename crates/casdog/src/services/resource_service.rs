@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateResourceRequest, Resource, ResourceResponse, UpdateResourceRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateResourceRequest, Resource, ResourceResponse, UpdateResourceRequest};
 
 pub struct ResourceService;
 

@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::notification_provider::NotificationProvider;
 use async_trait::async_trait;
 use serde::Serialize;
+
+use super::notification_provider::NotificationProvider;
+use crate::error::{AppError, AppResult};
 
 pub struct TelegramNotifyProvider {
     bot_token: String,
@@ -33,10 +34,7 @@ impl NotificationProvider for TelegramNotifyProvider {
             parse_mode: "HTML".to_string(),
         };
 
-        let url = format!(
-            "https://api.telegram.org/bot{}/sendMessage",
-            self.bot_token
-        );
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
 
         let resp = client
             .post(&url)
@@ -47,7 +45,10 @@ impl NotificationProvider for TelegramNotifyProvider {
 
         if !resp.status().is_success() {
             let error_text = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!("Telegram API error: {}", error_text)));
+            return Err(AppError::Internal(format!(
+                "Telegram API error: {}",
+                error_text
+            )));
         }
 
         Ok(())

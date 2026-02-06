@@ -1,6 +1,7 @@
-use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+use crate::error::{AppError, AppResult};
 
 /// Request structure for payment
 #[derive(Debug, Clone, Serialize, Deserialize)]

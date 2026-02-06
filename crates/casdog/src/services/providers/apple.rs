@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct AppleProvider {
     client_id: String,
@@ -10,7 +11,10 @@ pub struct AppleProvider {
 
 impl AppleProvider {
     pub fn new(client_id: String, client_secret: String) -> Self {
-        Self { client_id, client_secret }
+        Self {
+            client_id,
+            client_secret,
+        }
     }
 }
 
@@ -69,15 +73,19 @@ impl OAuthProviderTrait for AppleProvider {
         // For simplicity, we'll decode the JWT payload (base64 decode the middle part)
         let parts: Vec<&str> = access_token.split('.').collect();
         if parts.len() != 3 {
-            return Err(AppError::Internal("Invalid Apple ID token format".to_string()));
+            return Err(AppError::Internal(
+                "Invalid Apple ID token format".to_string(),
+            ));
         }
 
         use base64::Engine;
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1])
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[1])
             .map_err(|e| AppError::Internal(format!("Failed to decode Apple ID token: {}", e)))?;
 
-        let claims: AppleIdTokenClaims = serde_json::from_slice(&payload)
-            .map_err(|e| AppError::Internal(format!("Failed to parse Apple ID token claims: {}", e)))?;
+        let claims: AppleIdTokenClaims = serde_json::from_slice(&payload).map_err(|e| {
+            AppError::Internal(format!("Failed to parse Apple ID token claims: {}", e))
+        })?;
 
         Ok(ProviderUserInfo {
             id: claims.sub.clone(),

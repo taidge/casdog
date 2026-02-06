@@ -1,5 +1,6 @@
-use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
+
+use crate::error::{AppError, AppResult};
 
 /// Trait for SMS sending providers
 #[async_trait]
@@ -36,11 +37,7 @@ impl SmsProviderTrait for TwilioSmsProvider {
         let resp = client
             .post(&url)
             .basic_auth(&self.account_sid, Some(&self.auth_token))
-            .form(&[
-                ("To", to),
-                ("From", &self.from_number),
-                ("Body", content),
-            ])
+            .form(&[("To", to), ("From", &self.from_number), ("Body", content)])
             .send()
             .await
             .map_err(|e| AppError::Internal(format!("Twilio SMS send failed: {}", e)))?;

@@ -1,12 +1,15 @@
-use crate::error::{AppError, AppResult};
+use std::net::IpAddr;
+
 use regex::Regex;
 use sqlx::PgPool;
-use std::net::IpAddr;
+
+use crate::error::{AppError, AppResult};
 
 pub struct CheckService;
 
 impl CheckService {
-    /// Username validation: 2-39 chars, alphanumeric + underscore + hyphen + dot, must start with letter
+    /// Username validation: 2-39 chars, alphanumeric + underscore + hyphen + dot, must start with
+    /// letter
     pub fn check_username(username: &str) -> AppResult<()> {
         let len = username.len();
         if len < 2 || len > 39 {
@@ -26,7 +29,8 @@ impl CheckService {
         let re = Regex::new(r"^[a-zA-Z][a-zA-Z0-9_\-\.]*$").unwrap();
         if !re.is_match(username) {
             return Err(AppError::Validation(
-                "Username can only contain letters, numbers, underscores, hyphens, and dots".to_string(),
+                "Username can only contain letters, numbers, underscores, hyphens, and dots"
+                    .to_string(),
             ));
         }
 
@@ -70,7 +74,8 @@ impl CheckService {
                         let has_lower = password.chars().any(|c| c.is_lowercase());
                         if !has_upper || !has_lower {
                             return Err(AppError::Validation(
-                                "Password must contain both uppercase and lowercase letters".to_string(),
+                                "Password must contain both uppercase and lowercase letters"
+                                    .to_string(),
                             ));
                         }
                     }
@@ -150,8 +155,8 @@ impl CheckService {
         Ok(())
     }
 
-    /// Check if user is locked out (signin_wrong_times >= max, and last_signin_wrong_time within frozen period)
-    /// Default: 5 attempts, 15 min freeze
+    /// Check if user is locked out (signin_wrong_times >= max, and last_signin_wrong_time within
+    /// frozen period) Default: 5 attempts, 15 min freeze
     pub fn check_signin_lockout(
         signin_wrong_times: i32,
         last_signin_wrong_time: Option<&str>,
@@ -274,11 +279,7 @@ impl CheckService {
     }
 
     /// Check for duplicate email in database
-    pub async fn check_email_duplicate(
-        pool: &PgPool,
-        owner: &str,
-        email: &str,
-    ) -> AppResult<()> {
+    pub async fn check_email_duplicate(pool: &PgPool, owner: &str, email: &str) -> AppResult<()> {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM users WHERE owner = $1 AND email = $2 AND is_deleted = false)",
         )
@@ -297,11 +298,7 @@ impl CheckService {
     }
 
     /// Check for duplicate phone in database
-    pub async fn check_phone_duplicate(
-        pool: &PgPool,
-        owner: &str,
-        phone: &str,
-    ) -> AppResult<()> {
+    pub async fn check_phone_duplicate(pool: &PgPool, owner: &str, phone: &str) -> AppResult<()> {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM users WHERE owner = $1 AND phone = $2 AND is_deleted = false)",
         )
@@ -341,9 +338,10 @@ impl CheckService {
             // Check if it's a CIDR range (e.g., "192.168.1.0/24")
             if entry.contains('/') {
                 if let Some((network_str, prefix_str)) = entry.split_once('/') {
-                    if let (Ok(network_addr), Ok(prefix_len)) =
-                        (network_str.trim().parse::<IpAddr>(), prefix_str.trim().parse::<u32>())
-                    {
+                    if let (Ok(network_addr), Ok(prefix_len)) = (
+                        network_str.trim().parse::<IpAddr>(),
+                        prefix_str.trim().parse::<u32>(),
+                    ) {
                         if Self::ip_in_cidr(&client_addr, &network_addr, prefix_len) {
                             return Ok(());
                         }
@@ -566,9 +564,8 @@ impl CheckService {
         .fetch_optional(pool)
         .await?;
 
-        let (invitation_id, invitation_app, quota, used_count) = row.ok_or_else(|| {
-            AppError::Validation("Invalid invitation code".to_string())
-        })?;
+        let (invitation_id, invitation_app, quota, used_count) =
+            row.ok_or_else(|| AppError::Validation("Invalid invitation code".to_string()))?;
 
         // Check if the invitation is for the right application
         if let Some(app_name) = application_name {
@@ -644,14 +641,10 @@ impl CheckService {
                     if required {
                         match name {
                             "Email" if email.map_or(true, |e| e.is_empty()) => {
-                                return Err(AppError::Validation(
-                                    "Email is required".to_string(),
-                                ));
+                                return Err(AppError::Validation("Email is required".to_string()));
                             }
                             "Phone" if phone.map_or(true, |p| p.is_empty()) => {
-                                return Err(AppError::Validation(
-                                    "Phone is required".to_string(),
-                                ));
+                                return Err(AppError::Validation("Phone is required".to_string()));
                             }
                             "Display name" if display_name.is_empty() => {
                                 return Err(AppError::Validation(
@@ -671,8 +664,9 @@ impl CheckService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn test_check_username() {
@@ -700,12 +694,20 @@ mod tests {
         let options_no_repeat = json!(["NoRepeat"]);
 
         // AtLeast6
-        assert!(CheckService::check_password_complexity("pass12", Some(&options_at_least_6)).is_ok());
-        assert!(CheckService::check_password_complexity("pass", Some(&options_at_least_6)).is_err());
+        assert!(
+            CheckService::check_password_complexity("pass12", Some(&options_at_least_6)).is_ok()
+        );
+        assert!(
+            CheckService::check_password_complexity("pass", Some(&options_at_least_6)).is_err()
+        );
 
         // AtLeast8
-        assert!(CheckService::check_password_complexity("password", Some(&options_at_least_8)).is_ok());
-        assert!(CheckService::check_password_complexity("pass12", Some(&options_at_least_8)).is_err());
+        assert!(
+            CheckService::check_password_complexity("password", Some(&options_at_least_8)).is_ok()
+        );
+        assert!(
+            CheckService::check_password_complexity("pass12", Some(&options_at_least_8)).is_err()
+        );
 
         // Aa (uppercase and lowercase)
         assert!(CheckService::check_password_complexity("Password", Some(&options_aa)).is_ok());
@@ -718,11 +720,17 @@ mod tests {
 
         // AtLeastOne!@#
         assert!(CheckService::check_password_complexity("pass!", Some(&options_special)).is_ok());
-        assert!(CheckService::check_password_complexity("password", Some(&options_special)).is_err());
+        assert!(
+            CheckService::check_password_complexity("password", Some(&options_special)).is_err()
+        );
 
         // NoRepeat
-        assert!(CheckService::check_password_complexity("password", Some(&options_no_repeat)).is_ok());
-        assert!(CheckService::check_password_complexity("passsword", Some(&options_no_repeat)).is_err());
+        assert!(
+            CheckService::check_password_complexity("password", Some(&options_no_repeat)).is_ok()
+        );
+        assert!(
+            CheckService::check_password_complexity("passsword", Some(&options_no_repeat)).is_err()
+        );
     }
 
     #[test]
@@ -769,37 +777,43 @@ mod tests {
         let password_options = json!(["AtLeast6", "Aa", "AtLeastOneDigit"]);
 
         // Valid signup
-        assert!(CheckService::check_signup(
-            "alice",
-            "Password1",
-            Some("alice@example.com"),
-            Some("+1234567890"),
-            "Alice Smith",
-            Some(&password_options)
-        )
-        .is_ok());
+        assert!(
+            CheckService::check_signup(
+                "alice",
+                "Password1",
+                Some("alice@example.com"),
+                Some("+1234567890"),
+                "Alice Smith",
+                Some(&password_options)
+            )
+            .is_ok()
+        );
 
         // Invalid username
-        assert!(CheckService::check_signup(
-            "a",
-            "Password1",
-            Some("alice@example.com"),
-            Some("+1234567890"),
-            "Alice Smith",
-            Some(&password_options)
-        )
-        .is_err());
+        assert!(
+            CheckService::check_signup(
+                "a",
+                "Password1",
+                Some("alice@example.com"),
+                Some("+1234567890"),
+                "Alice Smith",
+                Some(&password_options)
+            )
+            .is_err()
+        );
 
         // Invalid password
-        assert!(CheckService::check_signup(
-            "alice",
-            "pass",
-            Some("alice@example.com"),
-            Some("+1234567890"),
-            "Alice Smith",
-            Some(&password_options)
-        )
-        .is_err());
+        assert!(
+            CheckService::check_signup(
+                "alice",
+                "pass",
+                Some("alice@example.com"),
+                Some("+1234567890"),
+                "Alice Smith",
+                Some(&password_options)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -822,58 +836,43 @@ mod tests {
         assert!(CheckService::check_ip_whitelist("192.168.1.1", Some("  ")).is_ok());
 
         // Exact IP match
-        assert!(CheckService::check_ip_whitelist(
-            "192.168.1.1",
-            Some("192.168.1.1, 10.0.0.1")
-        )
-        .is_ok());
-        assert!(CheckService::check_ip_whitelist(
-            "10.0.0.1",
-            Some("192.168.1.1, 10.0.0.1")
-        )
-        .is_ok());
-        assert!(CheckService::check_ip_whitelist(
-            "172.16.0.1",
-            Some("192.168.1.1, 10.0.0.1")
-        )
-        .is_err());
+        assert!(
+            CheckService::check_ip_whitelist("192.168.1.1", Some("192.168.1.1, 10.0.0.1")).is_ok()
+        );
+        assert!(
+            CheckService::check_ip_whitelist("10.0.0.1", Some("192.168.1.1, 10.0.0.1")).is_ok()
+        );
+        assert!(
+            CheckService::check_ip_whitelist("172.16.0.1", Some("192.168.1.1, 10.0.0.1")).is_err()
+        );
 
         // CIDR match
-        assert!(CheckService::check_ip_whitelist(
-            "192.168.1.50",
-            Some("192.168.1.0/24")
-        )
-        .is_ok());
-        assert!(CheckService::check_ip_whitelist(
-            "192.168.2.1",
-            Some("192.168.1.0/24")
-        )
-        .is_err());
+        assert!(CheckService::check_ip_whitelist("192.168.1.50", Some("192.168.1.0/24")).is_ok());
+        assert!(CheckService::check_ip_whitelist("192.168.2.1", Some("192.168.1.0/24")).is_err());
 
         // Mixed IP and CIDR
-        assert!(CheckService::check_ip_whitelist(
-            "10.0.0.5",
-            Some("192.168.1.1, 10.0.0.0/24")
-        )
-        .is_ok());
+        assert!(
+            CheckService::check_ip_whitelist("10.0.0.5", Some("192.168.1.1, 10.0.0.0/24")).is_ok()
+        );
     }
 
     #[test]
     fn test_check_password_expired() {
         // No expire days - never expires
         assert!(!CheckService::check_password_expired(Some("2020-01-01T00:00:00Z"), None).unwrap());
-        assert!(!CheckService::check_password_expired(Some("2020-01-01T00:00:00Z"), Some(0)).unwrap());
+        assert!(
+            !CheckService::check_password_expired(Some("2020-01-01T00:00:00Z"), Some(0)).unwrap()
+        );
 
         // No last change time - expired
         assert!(CheckService::check_password_expired(None, Some(90)).unwrap());
         assert!(CheckService::check_password_expired(Some(""), Some(90)).unwrap());
 
         // Old password - expired (set to year 2020, 90-day expiry)
-        assert!(CheckService::check_password_expired(
-            Some("2020-01-01T00:00:00+00:00"),
-            Some(90)
-        )
-        .unwrap());
+        assert!(
+            CheckService::check_password_expired(Some("2020-01-01T00:00:00+00:00"), Some(90))
+                .unwrap()
+        );
 
         // Very recent password - not expired
         let recent = chrono::Utc::now().to_rfc3339();

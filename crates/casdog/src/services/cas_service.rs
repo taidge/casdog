@@ -1,6 +1,7 @@
+use sqlx::PgPool;
+
 use crate::error::{AppError, AppResult};
 use crate::services::TokenService;
-use sqlx::PgPool;
 
 pub struct CasService;
 
@@ -39,7 +40,7 @@ impl CasService {
         service_url: &str,
     ) -> AppResult<CasValidationResult> {
         let token = sqlx::query_as::<_, (String, String, Option<String>, bool)>(
-            "SELECT user_id, application, redirect_uri, code_is_used FROM tokens WHERE code = $1"
+            "SELECT user_id, application, redirect_uri, code_is_used FROM tokens WHERE code = $1",
         )
         .bind(ticket)
         .fetch_optional(pool)
@@ -66,7 +67,7 @@ impl CasService {
 
         // Get user info
         let user: Option<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT id, name, email FROM users WHERE id = $1 AND is_deleted = FALSE"
+            "SELECT id, name, email FROM users WHERE id = $1 AND is_deleted = FALSE",
         )
         .bind(&user_id)
         .fetch_optional(pool)

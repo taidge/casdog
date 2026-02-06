@@ -1,8 +1,11 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{Certificate, CertificateResponse, CreateCertificateRequest, Jwk, UpdateCertificateRequest};
 use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{
+    Certificate, CertificateResponse, CreateCertificateRequest, Jwk, UpdateCertificateRequest,
+};
 
 pub struct CertService;
 
@@ -25,15 +28,16 @@ impl CertService {
             .fetch_all(pool)
             .await?;
 
-            let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM certificates WHERE owner = $1")
-                .bind(owner)
-                .fetch_one(pool)
-                .await?;
+            let total: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM certificates WHERE owner = $1")
+                    .bind(owner)
+                    .fetch_one(pool)
+                    .await?;
 
             (certs, total.0)
         } else {
             let certs = sqlx::query_as::<_, Certificate>(
-                r#"SELECT * FROM certificates ORDER BY created_at DESC LIMIT $1 OFFSET $2"#
+                r#"SELECT * FROM certificates ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
             )
             .bind(page_size)
             .bind(offset)
@@ -60,7 +64,7 @@ impl CertService {
 
     pub async fn get_by_name(pool: &PgPool, owner: &str, name: &str) -> AppResult<Certificate> {
         let cert = sqlx::query_as::<_, Certificate>(
-            "SELECT * FROM certificates WHERE owner = $1 AND name = $2"
+            "SELECT * FROM certificates WHERE owner = $1 AND name = $2",
         )
         .bind(owner)
         .bind(name)
@@ -70,11 +74,15 @@ impl CertService {
         Ok(cert)
     }
 
-    pub async fn create(pool: &PgPool, req: CreateCertificateRequest) -> AppResult<CertificateResponse> {
+    pub async fn create(
+        pool: &PgPool,
+        req: CreateCertificateRequest,
+    ) -> AppResult<CertificateResponse> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        let (certificate, private_key) = Self::generate_key_pair(&req.crypto_algorithm, req.bit_size)?;
+        let (certificate, private_key) =
+            Self::generate_key_pair(&req.crypto_algorithm, req.bit_size)?;
 
         let cert = sqlx::query_as::<_, Certificate>(
             r#"INSERT INTO certificates (
@@ -135,27 +143,32 @@ impl CertService {
         match algorithm {
             "RS256" | "RS384" | "RS512" => Self::generate_rsa_key_pair(bit_size as usize),
             "ES256" | "ES384" | "ES512" => Self::generate_ec_key_pair(algorithm),
-            _ => Err(AppError::Validation(format!("Unsupported algorithm: {}", algorithm))),
+            _ => Err(AppError::Validation(format!(
+                "Unsupported algorithm: {}",
+                algorithm
+            ))),
         }
     }
 
     fn generate_rsa_key_pair(bit_size: usize) -> AppResult<(String, String)> {
-        use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
         use rsa::RsaPrivateKey;
+        use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 
         let bit_size = if bit_size == 0 { 2048 } else { bit_size };
         let mut rng = rand::thread_rng();
         let private_key = RsaPrivateKey::new(&mut rng, bit_size)
             .map_err(|e| AppError::Internal(format!("RSA key generation failed: {}", e)))?;
 
-        let private_pem = private_key
-            .to_pkcs8_pem(LineEnding::LF)
-            .map_err(|e| AppError::Internal(format!("RSA private key PEM encoding failed: {}", e)))?;
+        let private_pem = private_key.to_pkcs8_pem(LineEnding::LF).map_err(|e| {
+            AppError::Internal(format!("RSA private key PEM encoding failed: {}", e))
+        })?;
 
         let public_pem = private_key
             .to_public_key()
             .to_public_key_pem(LineEnding::LF)
-            .map_err(|e| AppError::Internal(format!("RSA public key PEM encoding failed: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("RSA public key PEM encoding failed: {}", e))
+            })?;
 
         Ok((public_pem, private_pem.to_string()))
     }
@@ -167,17 +180,16 @@ impl CertService {
         let signing_key = SigningKey::random(&mut rand::thread_rng());
         let private_pem = signing_key
             .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
-            .map_err(|e| AppError::Internal(format!("EC private key PEM encoding failed: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("EC private key PEM encoding failed: {}", e))
+            })?;
 
         let verifying_key = signing_key.verifying_key();
         let point = verifying_key.to_encoded_point(false);
         // Encode public key as PEM using SEC1 format
         let public_pem = format!(
             "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
-            base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                point.as_bytes()
-            )
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, point.as_bytes())
         );
 
         Ok((public_pem, private_pem.to_string()))
@@ -196,9 +208,9 @@ impl CertService {
     }
 
     fn rsa_cert_to_jwk(cert: &Certificate) -> AppResult<Jwk> {
+        use rsa::RsaPrivateKey;
         use rsa::pkcs8::DecodePrivateKey;
         use rsa::traits::PublicKeyParts;
-        use rsa::RsaPrivateKey;
 
         let private_key = RsaPrivateKey::from_pkcs8_pem(&cert.private_key)
             .map_err(|e| AppError::Internal(format!("Failed to parse RSA private key: {}", e)))?;
@@ -235,8 +247,12 @@ impl CertService {
         let verifying_key = signing_key.verifying_key();
         let point = verifying_key.to_encoded_point(false);
 
-        let x = point.x().ok_or_else(|| AppError::Internal("EC key missing x coordinate".to_string()))?;
-        let y = point.y().ok_or_else(|| AppError::Internal("EC key missing y coordinate".to_string()))?;
+        let x = point
+            .x()
+            .ok_or_else(|| AppError::Internal("EC key missing x coordinate".to_string()))?;
+        let y = point
+            .y()
+            .ok_or_else(|| AppError::Internal("EC key missing y coordinate".to_string()))?;
 
         Ok(Jwk {
             kty: "EC".to_string(),

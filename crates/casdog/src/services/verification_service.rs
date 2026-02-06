@@ -1,8 +1,9 @@
+use rand::Rng;
+use sqlx::PgPool;
+use uuid::Uuid;
+
 use crate::error::{AppError, AppResult};
 use crate::models::{CaptchaResponse, VerificationResponse, VerifyCodeResponse};
-use sqlx::PgPool;
-use rand::Rng;
-use uuid::Uuid;
 
 pub struct VerificationService;
 
@@ -112,10 +113,7 @@ impl VerificationService {
         })
     }
 
-    pub fn verify_captcha(
-        _captcha_id: &str,
-        _captcha_code: &str,
-    ) -> AppResult<bool> {
+    pub fn verify_captcha(_captcha_id: &str, _captcha_code: &str) -> AppResult<bool> {
         // In production, validate against stored captcha
         Ok(true)
     }
@@ -125,12 +123,11 @@ impl VerificationService {
         username: &str,
         _organization: &str,
     ) -> AppResult<(Option<String>, Option<String>)> {
-        let user: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT email, phone FROM users WHERE name = $1",
-        )
-        .bind(username)
-        .fetch_optional(pool)
-        .await?;
+        let user: Option<(Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT email, phone FROM users WHERE name = $1")
+                .bind(username)
+                .fetch_optional(pool)
+                .await?;
 
         match user {
             Some((email, phone)) => Ok((email, phone)),

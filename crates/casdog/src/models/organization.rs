@@ -20,7 +20,7 @@ pub struct Organization {
     // Password Configuration
     pub password_type: String,
     pub password_salt: Option<String>,
-    pub password_options: Option<serde_json::Value>,  // JSON array of strings
+    pub password_options: Option<serde_json::Value>, // JSON array of strings
     pub password_obfuscator_type: Option<String>,
     pub password_obfuscator_key: Option<String>,
     pub password_expire_days: i32,
@@ -31,15 +31,15 @@ pub struct Organization {
     pub master_verification_code: Option<String>,
 
     // User Configuration
-    pub user_types: Option<serde_json::Value>,   // JSON array of strings
-    pub tags: Option<serde_json::Value>,         // JSON array of strings
+    pub user_types: Option<serde_json::Value>, // JSON array of strings
+    pub tags: Option<serde_json::Value>,       // JSON array of strings
     pub country_codes: Option<serde_json::Value>, // JSON array of strings
     pub default_application: Option<String>,
     pub init_score: i32,
 
     // Localization & Theme
-    pub languages: Option<serde_json::Value>,    // JSON array of strings
-    pub theme_data: Option<serde_json::Value>,   // JSON object
+    pub languages: Option<serde_json::Value>, // JSON array of strings
+    pub theme_data: Option<serde_json::Value>, // JSON object
     pub account_menu: Option<String>,
 
     // Features & Behavior
@@ -61,7 +61,7 @@ pub struct Organization {
     pub widget_items: Option<serde_json::Value>,
 
     // MFA
-    pub mfa_items: Option<serde_json::Value>,    // JSON array of {name, rule}
+    pub mfa_items: Option<serde_json::Value>, // JSON array of {name, rule}
     pub mfa_remember_in_hours: i32,
 
     // Financial

@@ -1,9 +1,12 @@
-use crate::config::AppConfig;
-use crate::models::{Certificate, Jwks, OidcDiscovery, UserinfoResponse, WebfingerLink, WebfingerResponse};
-use crate::services::CertService;
 use salvo::oapi::extract::QueryParam;
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::config::AppConfig;
+use crate::models::{
+    Certificate, Jwks, OidcDiscovery, UserinfoResponse, WebfingerLink, WebfingerResponse,
+};
+use crate::services::CertService;
 
 /// OpenID Connect Discovery endpoint
 #[endpoint(tags("oidc"), summary = "OpenID Connect Discovery")]
@@ -14,7 +17,10 @@ pub async fn openid_configuration() -> Json<OidcDiscovery> {
 }
 
 /// Application-specific OpenID Connect Discovery endpoint
-#[endpoint(tags("oidc"), summary = "Application-specific OpenID Connect Discovery")]
+#[endpoint(
+    tags("oidc"),
+    summary = "Application-specific OpenID Connect Discovery"
+)]
 pub async fn app_openid_configuration(
     _application: salvo::oapi::extract::PathParam<String>,
 ) -> Json<OidcDiscovery> {
@@ -31,12 +37,10 @@ pub async fn jwks(depot: &mut Depot) -> Json<Jwks> {
         Err(_) => return Json(Jwks { keys: vec![] }),
     };
 
-    let certs = sqlx::query_as::<_, Certificate>(
-        "SELECT * FROM certificates WHERE scope = 'JWT'"
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
+    let certs = sqlx::query_as::<_, Certificate>("SELECT * FROM certificates WHERE scope = 'JWT'")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
 
     let keys = certs
         .iter()
@@ -60,23 +64,20 @@ pub async fn app_jwks(
     let app_name = application.into_inner();
 
     // Try to find the application's cert
-    let cert_name: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT cert FROM applications WHERE name = $1 AND is_deleted = FALSE"
-    )
-    .bind(&app_name)
-    .fetch_optional(&pool)
-    .await
-    .unwrap_or(None);
+    let cert_name: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT cert FROM applications WHERE name = $1 AND is_deleted = FALSE")
+            .bind(&app_name)
+            .fetch_optional(&pool)
+            .await
+            .unwrap_or(None);
 
     let keys = if let Some((Some(cert_name),)) = cert_name {
         // Get the specific cert for this application
-        let certs = sqlx::query_as::<_, Certificate>(
-            "SELECT * FROM certificates WHERE name = $1"
-        )
-        .bind(&cert_name)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
+        let certs = sqlx::query_as::<_, Certificate>("SELECT * FROM certificates WHERE name = $1")
+            .bind(&cert_name)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
 
         certs
             .iter()
@@ -84,12 +85,11 @@ pub async fn app_jwks(
             .collect()
     } else {
         // Fallback to all JWT certs
-        let certs = sqlx::query_as::<_, Certificate>(
-            "SELECT * FROM certificates WHERE scope = 'JWT'"
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
+        let certs =
+            sqlx::query_as::<_, Certificate>("SELECT * FROM certificates WHERE scope = 'JWT'")
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
 
         certs
             .iter()
@@ -102,9 +102,7 @@ pub async fn app_jwks(
 
 /// WebFinger endpoint for discovery
 #[endpoint(tags("oidc"), summary = "WebFinger")]
-pub async fn webfinger(
-    resource: QueryParam<String, true>,
-) -> Json<WebfingerResponse> {
+pub async fn webfinger(resource: QueryParam<String, true>) -> Json<WebfingerResponse> {
     let config = AppConfig::get();
     let issuer = format!("http://{}:{}", config.server.host, config.server.port);
 
@@ -161,7 +159,11 @@ pub async fn userinfo(depot: &mut Depot) -> Result<Json<UserinfoResponse>, Statu
                 phone_number: phone.clone(),
                 phone_number_verified: phone.as_ref().map(|_| false),
                 picture: avatar,
-                groups: if group_names.is_empty() { None } else { Some(group_names) },
+                groups: if group_names.is_empty() {
+                    None
+                } else {
+                    Some(group_names)
+                },
             }))
         }
         None => Err(StatusCode::NOT_FOUND),
@@ -201,7 +203,10 @@ pub async fn authorize(
         login_url.push_str(&format!("&code_challenge={}", urlencoding::encode(cc)));
     }
     if let Some(ccm) = code_challenge_method.as_deref() {
-        login_url.push_str(&format!("&code_challenge_method={}", urlencoding::encode(ccm)));
+        login_url.push_str(&format!(
+            "&code_challenge_method={}",
+            urlencoding::encode(ccm)
+        ));
     }
     if let Some(n) = nonce.as_deref() {
         login_url.push_str(&format!("&nonce={}", urlencoding::encode(n)));

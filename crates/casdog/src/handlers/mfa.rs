@@ -1,11 +1,12 @@
-use crate::config::AppConfig;
-use crate::error::AppError;
-use crate::services::mfa_service::MfaService;
-use salvo::oapi::extract::*;
 use salvo::oapi::ToSchema;
+use salvo::oapi::extract::*;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres};
+
+use crate::config::AppConfig;
+use crate::error::AppError;
+use crate::services::mfa_service::MfaService;
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MfaSetupResponse {
@@ -43,9 +44,10 @@ pub struct SetPreferredMfaRequest {
     )
 )]
 pub async fn initiate_mfa_setup(depot: &mut Depot) -> Result<Json<MfaSetupResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let user_id = depot
         .get::<String>("user_id")
@@ -79,9 +81,10 @@ pub async fn verify_mfa_setup(
     depot: &mut Depot,
     req: JsonBody<MfaVerifyRequest>,
 ) -> Result<Json<MfaVerifyResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let user_id = depot
         .get::<String>("user_id")
@@ -89,10 +92,14 @@ pub async fn verify_mfa_setup(
         .map_err(|_| AppError::Authentication("Not authenticated".to_string()))?;
 
     let mfa_type = req.mfa_type.as_deref().unwrap_or("totp");
-    let mfa = MfaService::get_user_mfa(&pool, &user_id, mfa_type).await?
-        .ok_or_else(|| AppError::NotFound("MFA setup not found. Initiate setup first.".to_string()))?;
+    let mfa = MfaService::get_user_mfa(&pool, &user_id, mfa_type)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound("MFA setup not found. Initiate setup first.".to_string())
+        })?;
 
-    let secret = mfa.secret
+    let secret = mfa
+        .secret
         .ok_or_else(|| AppError::Internal("MFA secret not found".to_string()))?;
 
     let valid = MfaService::verify_totp(&secret, &req.code)?;
@@ -104,7 +111,8 @@ pub async fn verify_mfa_setup(
     }
 
     // Parse recovery codes to return them
-    let recovery_codes = mfa.recovery_codes
+    let recovery_codes = mfa
+        .recovery_codes
         .and_then(|c| serde_json::from_str::<Vec<String>>(&c).ok());
 
     Ok(Json(MfaVerifyResponse {
@@ -121,9 +129,10 @@ pub async fn verify_mfa_setup(
     )
 )]
 pub async fn enable_mfa(depot: &mut Depot) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let user_id = depot
         .get::<String>("user_id")
@@ -147,9 +156,10 @@ pub async fn delete_mfa(
     depot: &mut Depot,
     req: JsonBody<MfaDeleteRequest>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let user_id = depot
         .get::<String>("user_id")
@@ -173,9 +183,10 @@ pub async fn set_preferred_mfa(
     depot: &mut Depot,
     req: JsonBody<SetPreferredMfaRequest>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let user_id = depot
         .get::<String>("user_id")

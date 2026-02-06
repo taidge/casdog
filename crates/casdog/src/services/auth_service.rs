@@ -1,13 +1,15 @@
-use crate::config::AppConfig;
-use crate::error::{AppError, AppResult};
-use crate::models::UserResponse;
-use crate::services::{AppService, CheckService, OrgService, PasswordService, UserService};
-use crate::services::TokenService;
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use salvo::oapi::ToSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+
+use crate::config::AppConfig;
+use crate::error::{AppError, AppResult};
+use crate::models::UserResponse;
+use crate::services::{
+    AppService, CheckService, OrgService, PasswordService, TokenService, UserService,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct Claims {
@@ -44,8 +46,8 @@ pub struct LoginRequest {
     pub captcha_type: Option<String>,
     pub captcha_token: Option<String>,
     // MFA
-    pub mfa_type: Option<String>,    // "app", "sms", "email"
-    pub passcode: Option<String>,    // MFA passcode
+    pub mfa_type: Option<String>, // "app", "sms", "email"
+    pub passcode: Option<String>, // MFA passcode
     // Auto-signin
     pub auto_signin: Option<bool>,
     // Application context
@@ -130,20 +132,12 @@ impl AuthService {
         let org = OrgService::new(pool.clone())
             .get_internal(&req.owner)
             .await
-            .map_err(|_| {
-                AppError::Validation(format!(
-                    "Organization '{}' not found",
-                    req.owner
-                ))
-            })?;
+            .map_err(|_| AppError::Validation(format!("Organization '{}' not found", req.owner)))?;
 
         // 2. Get application signup_items if application is specified
         let signup_items = if let Some(ref app_name) = req.application {
             let app_service = AppService::new(pool.clone());
-            let application = app_service
-                .get_by_name(&req.owner, app_name)
-                .await
-                .ok();
+            let application = app_service.get_by_name(&req.owner, app_name).await.ok();
             application.and_then(|a| a.signup_items)
         } else {
             None
@@ -231,18 +225,14 @@ impl AuthService {
                 AppService::new(pool.clone())
                     .get_by_client_id(client_id)
                     .await
-                    .map_err(|_| {
-                        AppError::Authentication("Invalid client_id".to_string())
-                    })?,
+                    .map_err(|_| AppError::Authentication("Invalid client_id".to_string()))?,
             )
         } else if let Some(ref app_name) = req.application {
             Some(
                 AppService::new(pool.clone())
                     .get_by_name(&req.owner, app_name)
                     .await
-                    .map_err(|_| {
-                        AppError::Authentication("Application not found".to_string())
-                    })?,
+                    .map_err(|_| AppError::Authentication("Application not found".to_string()))?,
             )
         } else {
             None
@@ -252,9 +242,7 @@ impl AuthService {
         let org = OrgService::new(pool.clone())
             .get_internal(&req.owner)
             .await
-            .map_err(|_| {
-                AppError::Authentication("Organization not found".to_string())
-            })?;
+            .map_err(|_| AppError::Authentication("Organization not found".to_string()))?;
 
         if org.disable_signin {
             return Err(AppError::Authentication(
@@ -323,9 +311,7 @@ impl AuthService {
             if !master_valid {
                 // Record failed attempt
                 CheckService::record_signin_error(pool, &user.id, 5, 15).await?;
-                return Err(AppError::Authentication(
-                    "Invalid credentials".to_string(),
-                ));
+                return Err(AppError::Authentication("Invalid credentials".to_string()));
             }
         }
 
@@ -378,9 +364,7 @@ impl AuthService {
             password_expire_days,
         )?;
 
-        if (password_expired || user.need_update_password)
-            && req.passcode.is_none()
-        {
+        if (password_expired || user.need_update_password) && req.passcode.is_none() {
             // Return response with password_expired flag - user must change password
             let user_response: UserResponse = user.into();
             let token = self.generate_token(&user_response)?;
@@ -413,7 +397,7 @@ impl AuthService {
         let token = self.generate_token(&user_response)?;
 
         // 14. Handle OAuth authorization code flow
-        if let (Some(ref response_type), Some(ref client_id), Some(ref redirect_uri)) =
+        if let (Some(response_type), Some(client_id), Some(redirect_uri)) =
             (&req.response_type, &req.client_id, &req.redirect_uri)
         {
             if response_type == "code" {
@@ -423,9 +407,7 @@ impl AuthService {
                     AppService::new(pool.clone())
                         .get_by_client_id(client_id)
                         .await
-                        .map_err(|_| {
-                            AppError::Authentication("Invalid client_id".to_string())
-                        })?
+                        .map_err(|_| AppError::Authentication("Invalid client_id".to_string()))?
                 };
 
                 let scope = req.scope.as_deref().unwrap_or("openid profile");
@@ -452,11 +434,7 @@ impl AuthService {
                     state: req.state.clone(),
                     mfa_required: None,
                     mfa_types: None,
-                    password_expired: if password_expired {
-                        Some(true)
-                    } else {
-                        None
-                    },
+                    password_expired: if password_expired { Some(true) } else { None },
                 });
             }
         }
@@ -471,11 +449,7 @@ impl AuthService {
             state: None,
             mfa_required: None,
             mfa_types: None,
-            password_expired: if password_expired {
-                Some(true)
-            } else {
-                None
-            },
+            password_expired: if password_expired { Some(true) } else { None },
         })
     }
 
@@ -541,11 +515,7 @@ impl AuthService {
         Ok(())
     }
 
-    pub async fn check_password(
-        &self,
-        user_id: &str,
-        password: &str,
-    ) -> AppResult<bool> {
+    pub async fn check_password(&self, user_id: &str, password: &str) -> AppResult<bool> {
         let user = self.user_service.get_by_id_internal(user_id).await?;
         UserService::verify_password(password, &user.password_hash)
     }

@@ -1,5 +1,6 @@
-use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
+
+use crate::error::{AppError, AppResult};
 
 /// Trait for storage providers
 #[async_trait]

@@ -1,9 +1,11 @@
-use crate::error::{AppError, AppResult};
-use crate::services::providers::storage_provider::StorageProvider;
-use async_trait::async_trait;
 use std::path::PathBuf;
+
+use async_trait::async_trait;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+
+use crate::error::{AppError, AppResult};
+use crate::services::providers::storage_provider::StorageProvider;
 
 /// Local file system storage provider
 pub struct LocalStorageProvider {

@@ -1,11 +1,13 @@
+use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+
 use crate::error::{AppError, AppResult};
 use crate::services::providers::payment_provider::{
     NotifyResult, PayRequest, PayResponse, PaymentProvider,
 };
-use async_trait::async_trait;
-use base64::{engine::general_purpose, Engine as _};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
 
 /// PayPal payment provider
 pub struct PayPalPaymentProvider {
@@ -163,9 +165,10 @@ impl PaymentProvider for PayPalPaymentProvider {
             )));
         }
 
-        let order_response: CreateOrderResponse = response.json().await.map_err(|e| {
-            AppError::Internal(format!("Failed to parse PayPal response: {}", e))
-        })?;
+        let order_response: CreateOrderResponse = response
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to parse PayPal response: {}", e)))?;
 
         // Find the approval URL
         let approval_link = order_response

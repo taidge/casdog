@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateRecordRequest, Record, RecordFilterRequest, RecordResponse};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateRecordRequest, Record, RecordFilterRequest, RecordResponse};
 
 pub struct RecordService;
 

@@ -1,13 +1,14 @@
-use crate::error::AppError;
-use crate::models::{
-    BatchEnforceRequest, BatchEnforceResponse, EnforceRequest, EnforceResponse,
-    PolicyListResponse, PolicyRequest, StringListResponse,
-};
-use crate::services::CasbinService;
 use salvo::oapi::extract::*;
-use salvo::oapi::{endpoint, ToSchema};
+use salvo::oapi::{ToSchema, endpoint};
 use salvo::prelude::*;
 use serde::Serialize;
+
+use crate::error::AppError;
+use crate::models::{
+    BatchEnforceRequest, BatchEnforceResponse, EnforceRequest, EnforceResponse, PolicyListResponse,
+    PolicyRequest, StringListResponse,
+};
+use crate::services::CasbinService;
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PolicyActionResponse {
@@ -118,7 +119,9 @@ pub async fn batch_enforce(
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
 
-    let response = casbin_service.batch_enforce(req.into_inner().requests).await?;
+    let response = casbin_service
+        .batch_enforce(req.into_inner().requests)
+        .await?;
     Ok(Json(response))
 }
 

@@ -1,9 +1,10 @@
-use crate::error::{AppError, AppResult};
-use salvo::oapi::extract::JsonBody;
 use salvo::oapi::ToSchema;
+use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres};
+
+use crate::error::{AppError, AppResult};
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -72,9 +73,10 @@ pub async fn impersonate_user(
     depot: &mut Depot,
     body: JsonBody<ImpersonateUserRequest>,
 ) -> AppResult<Json<ImpersonateUserResponse>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     // Retrieve the authenticated admin's user ID from the depot.
     let admin_user_id = depot
@@ -85,12 +87,11 @@ pub async fn impersonate_user(
     let req = body.into_inner();
 
     // Verify the target user exists.
-    let target_exists: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM users WHERE id = $1 AND is_deleted = FALSE",
-    )
-    .bind(&req.user_id)
-    .fetch_optional(&pool)
-    .await?;
+    let target_exists: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM users WHERE id = $1 AND is_deleted = FALSE")
+            .bind(&req.user_id)
+            .fetch_optional(&pool)
+            .await?;
 
     if target_exists.is_none() {
         return Err(AppError::NotFound(format!(
@@ -100,12 +101,11 @@ pub async fn impersonate_user(
     }
 
     // Verify the caller has admin privileges.
-    let is_admin: Option<(bool,)> = sqlx::query_as(
-        "SELECT is_admin FROM users WHERE id = $1 AND is_deleted = FALSE",
-    )
-    .bind(&admin_user_id)
-    .fetch_optional(&pool)
-    .await?;
+    let is_admin: Option<(bool,)> =
+        sqlx::query_as("SELECT is_admin FROM users WHERE id = $1 AND is_deleted = FALSE")
+            .bind(&admin_user_id)
+            .fetch_optional(&pool)
+            .await?;
 
     match is_admin {
         Some((true,)) => { /* allowed */ }
@@ -170,12 +170,11 @@ pub async fn impersonate_user(
         (status_code = 401, description = "Not authenticated")
     )
 )]
-pub async fn exit_impersonate_user(
-    depot: &mut Depot,
-) -> AppResult<Json<ExitImpersonateResponse>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+pub async fn exit_impersonate_user(depot: &mut Depot) -> AppResult<Json<ExitImpersonateResponse>> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     // In a real implementation the impersonation token would carry both the
     // impersonated user ID and the original admin ID. We would decode the

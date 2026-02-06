@@ -1,20 +1,21 @@
+use salvo::oapi::endpoint;
+use salvo::oapi::extract::*;
+use salvo::prelude::*;
+use sqlx::{PgPool, Pool, Postgres};
+
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     IntrospectRequest, IntrospectResponse, OAuthTokenRequest, OAuthTokenResponse, RevokeRequest,
+    UserResponse,
 };
 use crate::services::auth_service::{
     CheckPasswordRequest, CheckPasswordResponse, Claims, LoginRequest, LoginResponse,
     SetPasswordRequest, SignupRequest,
 };
-use crate::services::token_service::TokenService;
 use crate::services::session_service::SessionService;
+use crate::services::token_service::TokenService;
 use crate::services::{AppService, AuthService, UserService};
-use crate::models::UserResponse;
-use salvo::oapi::extract::*;
-use salvo::oapi::endpoint;
-use salvo::prelude::*;
-use sqlx::{PgPool, Pool, Postgres};
 
 /// User signup
 #[endpoint(
@@ -30,9 +31,10 @@ pub async fn signup(
     depot: &mut Depot,
     req: JsonBody<SignupRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let user_service = UserService::new(pool);
     let auth_service = AuthService::new(user_service);
 
@@ -53,9 +55,10 @@ pub async fn login(
     depot: &mut Depot,
     req: JsonBody<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let user_service = UserService::new(pool.clone());
     let auth_service = AuthService::new(user_service);
 
@@ -81,10 +84,15 @@ pub async fn login(
         (status_code = 302, description = "Redirect after logout")
     )
 )]
-pub async fn logout(depot: &mut Depot, req: &mut Request, res: &mut Response) -> Result<(), AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+pub async fn logout(
+    depot: &mut Depot,
+    req: &mut Request,
+    res: &mut Response,
+) -> Result<(), AppError> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let id_token_hint = req.query::<String>("id_token_hint");
     let post_logout_redirect_uri = req.query::<String>("post_logout_redirect_uri");
@@ -127,7 +135,9 @@ pub async fn logout(depot: &mut Depot, req: &mut Request, res: &mut Response) ->
         }
         res.render(salvo::writing::Redirect::found(redirect));
     } else {
-        res.render(Json(serde_json::json!({"status": "ok", "message": "Logged out successfully"})));
+        res.render(Json(
+            serde_json::json!({"status": "ok", "message": "Logged out successfully"}),
+        ));
     }
 
     Ok(())
@@ -142,9 +152,10 @@ pub async fn logout(depot: &mut Depot, req: &mut Request, res: &mut Response) ->
     )
 )]
 pub async fn get_account(depot: &mut Depot) -> Result<Json<UserResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let user_id = depot
         .get::<String>("user_id")
@@ -172,32 +183,41 @@ pub async fn oauth_access_token(
     depot: &mut Depot,
     req: JsonBody<OAuthTokenRequest>,
 ) -> Result<Json<OAuthTokenResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let req = req.into_inner();
 
     // Authenticate the client
-    let client_id = req.client_id.as_deref()
+    let client_id = req
+        .client_id
+        .as_deref()
         .ok_or_else(|| AppError::Validation("client_id is required".to_string()))?;
 
     let app_service = AppService::new(pool.clone());
-    let application = app_service.get_by_client_id(client_id).await
+    let application = app_service
+        .get_by_client_id(client_id)
+        .await
         .map_err(|_| AppError::Authentication("Invalid client_id".to_string()))?;
 
     // Verify client_secret for confidential clients
     if req.grant_type != "authorization_code" || req.code_verifier.is_none() {
         if let Some(ref secret) = req.client_secret {
             if secret != &application.client_secret {
-                return Err(AppError::Authentication("Invalid client_secret".to_string()));
+                return Err(AppError::Authentication(
+                    "Invalid client_secret".to_string(),
+                ));
             }
         }
     }
 
     let response = match req.grant_type.as_str() {
         "authorization_code" => {
-            let code = req.code.as_deref()
+            let code = req
+                .code
+                .as_deref()
                 .ok_or_else(|| AppError::Validation("code is required".to_string()))?;
             TokenService::exchange_authorization_code(
                 &pool,
@@ -209,7 +229,9 @@ pub async fn oauth_access_token(
             .await?
         }
         "refresh_token" => {
-            let refresh_token = req.refresh_token.as_deref()
+            let refresh_token = req
+                .refresh_token
+                .as_deref()
                 .ok_or_else(|| AppError::Validation("refresh_token is required".to_string()))?;
             TokenService::refresh_access_token(&pool, &application, refresh_token).await?
         }
@@ -218,9 +240,13 @@ pub async fn oauth_access_token(
                 .await?
         }
         "password" => {
-            let username = req.username.as_deref()
+            let username = req
+                .username
+                .as_deref()
                 .ok_or_else(|| AppError::Validation("username is required".to_string()))?;
-            let password = req.password.as_deref()
+            let password = req
+                .password
+                .as_deref()
                 .ok_or_else(|| AppError::Validation("password is required".to_string()))?;
             TokenService::exchange_password(
                 &pool,
@@ -255,18 +281,25 @@ pub async fn oauth_refresh_token(
     depot: &mut Depot,
     req: JsonBody<OAuthTokenRequest>,
 ) -> Result<Json<OAuthTokenResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let req = req.into_inner();
-    let client_id = req.client_id.as_deref()
+    let client_id = req
+        .client_id
+        .as_deref()
         .ok_or_else(|| AppError::Validation("client_id is required".to_string()))?;
-    let refresh_token = req.refresh_token.as_deref()
+    let refresh_token = req
+        .refresh_token
+        .as_deref()
         .ok_or_else(|| AppError::Validation("refresh_token is required".to_string()))?;
 
     let app_service = AppService::new(pool.clone());
-    let application = app_service.get_by_client_id(client_id).await
+    let application = app_service
+        .get_by_client_id(client_id)
+        .await
         .map_err(|_| AppError::Authentication("Invalid client_id".to_string()))?;
 
     let response = TokenService::refresh_access_token(&pool, &application, refresh_token).await?;
@@ -285,17 +318,14 @@ pub async fn oauth_introspect(
     depot: &mut Depot,
     req: JsonBody<IntrospectRequest>,
 ) -> Result<Json<IntrospectResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let req = req.into_inner();
-    let response = TokenService::introspect_token(
-        &pool,
-        &req.token,
-        req.token_type_hint.as_deref(),
-    )
-    .await?;
+    let response =
+        TokenService::introspect_token(&pool, &req.token, req.token_type_hint.as_deref()).await?;
 
     Ok(Json(response))
 }
@@ -312,9 +342,10 @@ pub async fn oauth_revoke(
     depot: &mut Depot,
     req: JsonBody<RevokeRequest>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let req = req.into_inner();
     TokenService::revoke_token(&pool, &req.token, req.token_type_hint.as_deref()).await?;
@@ -335,9 +366,10 @@ pub async fn set_password(
     depot: &mut Depot,
     req: JsonBody<SetPasswordRequest>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let user_id = depot
         .get::<String>("user_id")
@@ -348,7 +380,9 @@ pub async fn set_password(
     let auth_service = AuthService::new(user_service);
 
     let req = req.into_inner();
-    auth_service.set_password(&user_id, &req.old_password, &req.new_password).await?;
+    auth_service
+        .set_password(&user_id, &req.old_password, &req.new_password)
+        .await?;
 
     Ok("Password changed successfully")
 }
@@ -365,9 +399,10 @@ pub async fn check_user_password(
     depot: &mut Depot,
     req: JsonBody<CheckPasswordRequest>,
 ) -> Result<Json<CheckPasswordResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let user_id = depot
         .get::<String>("user_id")
@@ -377,7 +412,9 @@ pub async fn check_user_password(
     let user_service = UserService::new(pool);
     let auth_service = AuthService::new(user_service);
 
-    let valid = auth_service.check_password(&user_id, &req.into_inner().password).await?;
+    let valid = auth_service
+        .check_password(&user_id, &req.into_inner().password)
+        .await?;
 
     Ok(Json(CheckPasswordResponse { valid }))
 }
@@ -398,9 +435,10 @@ pub async fn check_user_password(
     )
 )]
 pub async fn sso_logout(depot: &mut Depot, req: &mut Request) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
 
     let user_id = depot
         .get::<String>("user_id")
@@ -440,7 +478,7 @@ pub async fn sso_logout(depot: &mut Depot, req: &mut Request) -> Result<&'static
 /// This is used during RP-initiated logout where the token may already be expired
 /// but still carries the subject identifier needed to locate the user's sessions.
 fn extract_user_from_token_hint(token: &str) -> Option<String> {
-    use jsonwebtoken::{decode, Algorithm, DecodingKey};
+    use jsonwebtoken::{Algorithm, DecodingKey, decode};
 
     let config = AppConfig::get();
     // Decode WITHOUT validating expiration (token may be expired)
@@ -464,7 +502,7 @@ fn extract_user_from_token_hint(token: &str) -> Option<String> {
 async fn send_sso_logout_notifications(pool: &PgPool, user_id: &str) -> AppResult<()> {
     // Get all distinct application names the user has tokens with
     let app_names: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT application FROM tokens WHERE user_id = $1 AND application IS NOT NULL"
+        "SELECT DISTINCT application FROM tokens WHERE user_id = $1 AND application IS NOT NULL",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -484,13 +522,12 @@ async fn send_sso_logout_notifications(pool: &PgPool, user_id: &str) -> AppResul
 
     for app_name in &app_names {
         // Look up the application to get its logout URL
-        let logout_url: Option<String> = sqlx::query_scalar(
-            "SELECT logout_url FROM applications WHERE name = $1"
-        )
-        .bind(app_name)
-        .fetch_optional(pool)
-        .await?
-        .flatten();
+        let logout_url: Option<String> =
+            sqlx::query_scalar("SELECT logout_url FROM applications WHERE name = $1")
+                .bind(app_name)
+                .fetch_optional(pool)
+                .await?
+                .flatten();
 
         if let Some(url) = logout_url {
             if !url.is_empty() {

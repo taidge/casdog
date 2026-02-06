@@ -1,13 +1,14 @@
+use salvo::oapi::endpoint;
+use salvo::oapi::extract::*;
+use salvo::prelude::*;
+use sqlx::{Pool, Postgres};
+
 use crate::error::AppError;
 use crate::models::{
     AssignRoleRequest, CreateRoleRequest, RoleListResponse, RoleQuery, RoleResponse,
     UpdateRoleRequest,
 };
 use crate::services::RoleService;
-use salvo::oapi::extract::*;
-use salvo::oapi::endpoint;
-use salvo::prelude::*;
-use sqlx::{Pool, Postgres};
 
 /// List roles
 #[endpoint(
@@ -26,9 +27,10 @@ pub async fn list_roles(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<RoleListResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let role_service = RoleService::new(pool);
 
     let query = RoleQuery {
@@ -55,9 +57,10 @@ pub async fn create_role(
     depot: &mut Depot,
     req: JsonBody<CreateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let role_service = RoleService::new(pool);
 
     let response = role_service.create(req.into_inner()).await?;
@@ -79,9 +82,10 @@ pub async fn get_role(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<Json<RoleResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let role_service = RoleService::new(pool);
 
     let response = role_service.get_by_id(&id.into_inner()).await?;
@@ -105,12 +109,15 @@ pub async fn update_role(
     id: PathParam<String>,
     req: JsonBody<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let role_service = RoleService::new(pool);
 
-    let response = role_service.update(&id.into_inner(), req.into_inner()).await?;
+    let response = role_service
+        .update(&id.into_inner(), req.into_inner())
+        .await?;
     Ok(Json(response))
 }
 
@@ -129,9 +136,10 @@ pub async fn delete_role(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let role_service = RoleService::new(pool);
 
     role_service.delete(&id.into_inner()).await?;
@@ -151,9 +159,10 @@ pub async fn assign_role(
     depot: &mut Depot,
     req: JsonBody<AssignRoleRequest>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let role_service = RoleService::new(pool);
 
     role_service.assign_role(req.into_inner()).await?;
@@ -175,9 +184,10 @@ pub async fn get_user_roles(
     depot: &mut Depot,
     user_id: PathParam<String>,
 ) -> Result<Json<Vec<RoleResponse>>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let role_service = RoleService::new(pool);
 
     let response = role_service.get_user_roles(&user_id.into_inner()).await?;

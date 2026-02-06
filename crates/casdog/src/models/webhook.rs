@@ -79,10 +79,4 @@ impl From<Webhook> for WebhookResponse {
 }
 
 // Webhook event types
-pub const WEBHOOK_EVENTS: &[&str] = &[
-    "signup",
-    "login",
-    "logout",
-    "update-user",
-    "delete-user",
-];
+pub const WEBHOOK_EVENTS: &[&str] = &["signup", "login", "logout", "update-user", "delete-user"];

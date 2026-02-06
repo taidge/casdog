@@ -1,7 +1,10 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CasbinAdapter, CasbinAdapterResponse, CreateCasbinAdapterRequest, UpdateCasbinAdapterRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{
+    CasbinAdapter, CasbinAdapterResponse, CreateCasbinAdapterRequest, UpdateCasbinAdapterRequest,
+};
 
 pub struct AdapterService;
 
@@ -77,7 +80,10 @@ impl AdapterService {
         Ok(adapter.into())
     }
 
-    pub async fn create(pool: &PgPool, req: CreateCasbinAdapterRequest) -> AppResult<CasbinAdapterResponse> {
+    pub async fn create(
+        pool: &PgPool,
+        req: CreateCasbinAdapterRequest,
+    ) -> AppResult<CasbinAdapterResponse> {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
         let adapter_type = req.adapter_type.unwrap_or_else(|| "database".to_string());

@@ -1,15 +1,16 @@
-use crate::config::AppConfig;
-use crate::error::{AppError, AppResult};
-use crate::models::{
-    Application, CreateTokenRequest, IntrospectResponse, OAuthTokenResponse,
-    Token, TokenResponse, UpdateTokenRequest,
-};
-use crate::services::id_token_service::IdTokenService;
-use crate::services::UserService;
 use chrono::Utc;
 use rand::Rng;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::config::AppConfig;
+use crate::error::{AppError, AppResult};
+use crate::models::{
+    Application, CreateTokenRequest, IntrospectResponse, OAuthTokenResponse, Token, TokenResponse,
+    UpdateTokenRequest,
+};
+use crate::services::UserService;
+use crate::services::id_token_service::IdTokenService;
 
 pub struct TokenService;
 
@@ -40,7 +41,7 @@ impl TokenService {
             (tokens, total.0)
         } else {
             let tokens = sqlx::query_as::<_, Token>(
-                r#"SELECT * FROM tokens ORDER BY created_at DESC LIMIT $1 OFFSET $2"#
+                r#"SELECT * FROM tokens ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
             )
             .bind(page_size)
             .bind(offset)
@@ -66,31 +67,31 @@ impl TokenService {
     }
 
     pub async fn get_by_access_token(pool: &PgPool, access_token: &str) -> AppResult<Token> {
-        let token =
-            sqlx::query_as::<_, Token>("SELECT * FROM tokens WHERE access_token = $1")
-                .bind(access_token)
-                .fetch_one(pool)
-                .await?;
+        let token = sqlx::query_as::<_, Token>("SELECT * FROM tokens WHERE access_token = $1")
+            .bind(access_token)
+            .fetch_one(pool)
+            .await?;
         Ok(token)
     }
 
     pub async fn get_by_refresh_token(pool: &PgPool, refresh_token: &str) -> AppResult<Token> {
-        let token =
-            sqlx::query_as::<_, Token>("SELECT * FROM tokens WHERE refresh_token = $1")
-                .bind(refresh_token)
-                .fetch_one(pool)
-                .await?;
+        let token = sqlx::query_as::<_, Token>("SELECT * FROM tokens WHERE refresh_token = $1")
+            .bind(refresh_token)
+            .fetch_one(pool)
+            .await?;
         Ok(token)
     }
 
     pub async fn get_by_code(pool: &PgPool, code: &str) -> AppResult<Token> {
         let token = sqlx::query_as::<_, Token>(
-            "SELECT * FROM tokens WHERE code = $1 AND code_is_used = false"
+            "SELECT * FROM tokens WHERE code = $1 AND code_is_used = false",
         )
         .bind(code)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| AppError::Authentication("Invalid or expired authorization code".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Authentication("Invalid or expired authorization code".to_string())
+        })?;
         Ok(token)
     }
 
@@ -126,7 +127,11 @@ impl TokenService {
         Ok(token.into())
     }
 
-    pub async fn update(pool: &PgPool, id: &str, req: UpdateTokenRequest) -> AppResult<TokenResponse> {
+    pub async fn update(
+        pool: &PgPool,
+        id: &str,
+        req: UpdateTokenRequest,
+    ) -> AppResult<TokenResponse> {
         let token = sqlx::query_as::<_, Token>(
             r#"UPDATE tokens SET
                 scope = COALESCE($2, scope),
@@ -221,14 +226,18 @@ impl TokenService {
 
         // Verify the code belongs to this application
         if token.application != application.name {
-            return Err(AppError::Authentication("Code does not match application".to_string()));
+            return Err(AppError::Authentication(
+                "Code does not match application".to_string(),
+            ));
         }
 
         // Verify redirect_uri matches
         if let Some(uri) = redirect_uri {
             if let Some(ref stored_uri) = token.redirect_uri {
                 if uri != stored_uri {
-                    return Err(AppError::Authentication("Redirect URI mismatch".to_string()));
+                    return Err(AppError::Authentication(
+                        "Redirect URI mismatch".to_string(),
+                    ));
                 }
             }
         }
@@ -249,7 +258,9 @@ impl TokenService {
             };
 
             if &computed != challenge {
-                return Err(AppError::Authentication("PKCE verification failed".to_string()));
+                return Err(AppError::Authentication(
+                    "PKCE verification failed".to_string(),
+                ));
             }
         }
 
@@ -258,7 +269,9 @@ impl TokenService {
             let created = token.created_at.timestamp();
             let now = Utc::now().timestamp();
             if now - created > code_expire {
-                return Err(AppError::Authentication("Authorization code expired".to_string()));
+                return Err(AppError::Authentication(
+                    "Authorization code expired".to_string(),
+                ));
             }
         }
 
@@ -313,11 +326,14 @@ impl TokenService {
         application: &Application,
         refresh_token_str: &str,
     ) -> AppResult<OAuthTokenResponse> {
-        let token = Self::get_by_refresh_token(pool, refresh_token_str).await
+        let token = Self::get_by_refresh_token(pool, refresh_token_str)
+            .await
             .map_err(|_| AppError::Authentication("Invalid refresh token".to_string()))?;
 
         if token.application != application.name {
-            return Err(AppError::Authentication("Refresh token does not match application".to_string()));
+            return Err(AppError::Authentication(
+                "Refresh token does not match application".to_string(),
+            ));
         }
 
         let new_access_token = Self::generate_token();
@@ -491,9 +507,7 @@ impl TokenService {
 
         // Try to find by access_token first, then refresh_token
         let token = match token_type_hint {
-            Some("refresh_token") => {
-                Self::get_by_refresh_token(pool, token_str).await.ok()
-            }
+            Some("refresh_token") => Self::get_by_refresh_token(pool, token_str).await.ok(),
             _ => {
                 let t = Self::get_by_access_token(pool, token_str).await.ok();
                 if t.is_none() {
@@ -598,7 +612,7 @@ impl TokenService {
 
     pub fn generate_token() -> String {
         let mut rng = rand::thread_rng();
-        let bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+        let bytes: Vec<u8> = (0..32).map(|_| rng.r#gen()).collect();
         base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &bytes)
     }
 }

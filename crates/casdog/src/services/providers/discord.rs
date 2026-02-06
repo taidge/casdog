@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct DiscordProvider {
     client_id: String,
@@ -10,7 +11,10 @@ pub struct DiscordProvider {
 
 impl DiscordProvider {
     pub fn new(client_id: String, client_secret: String) -> Self {
-        Self { client_id, client_secret }
+        Self {
+            client_id,
+            client_secret,
+        }
     }
 }
 
@@ -80,7 +84,10 @@ impl OAuthProviderTrait for DiscordProvider {
             .map_err(|e| AppError::Internal(format!("Discord user parse failed: {}", e)))?;
 
         let avatar_url = user.avatar.map(|hash| {
-            format!("https://cdn.discordapp.com/avatars/{}/{}.png", user.id, hash)
+            format!(
+                "https://cdn.discordapp.com/avatars/{}/{}.png",
+                user.id, hash
+            )
         });
 
         let display_name = if user.discriminator == "0" {

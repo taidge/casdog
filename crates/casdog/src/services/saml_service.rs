@@ -1,5 +1,6 @@
-use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
+
+use crate::error::{AppError, AppResult};
 
 pub struct SamlService;
 
@@ -33,7 +34,8 @@ impl SamlService {
             url
         )).unwrap_or_default();
 
-        let metadata = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+        let metadata = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{entity_id}">
   <md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
     <md:KeyDescriptor use="signing">
@@ -48,7 +50,8 @@ impl SamlService {
     <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="{sso_url}" />
     <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="{sso_url}" />
   </md:IDPSSODescriptor>
-</md:EntityDescriptor>"#);
+</md:EntityDescriptor>"#
+        );
 
         Ok(metadata)
     }
@@ -70,7 +73,8 @@ impl SamlService {
             format!(r#"<saml:Attribute Name="{name}"><saml:AttributeValue>{value}</saml:AttributeValue></saml:Attribute>"#)
         }).collect::<Vec<_>>().join("\n        ");
 
-        let response = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+        let response = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
     xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
     ID="{id}" Version="2.0" IssueInstant="{now}" Destination="{destination}">
@@ -94,7 +98,8 @@ impl SamlService {
       {attrs}
     </saml:AttributeStatement>
   </saml:Assertion>
-</samlp:Response>"#);
+</samlp:Response>"#
+        );
 
         Ok(response)
     }

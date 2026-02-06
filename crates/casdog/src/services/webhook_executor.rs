@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+
+use crate::error::{AppError, AppResult};
 
 // ---------------------------------------------------------------------------
 // Webhook payload
@@ -57,8 +58,8 @@ struct WebhookInfo {
     url: String,
     method: String,
     content_type: String,
-    headers: Option<String>,  // JSON — either `["H: V", ...]` or `[{"name":"H","value":"V"}, ...]`
-    events: Option<String>,   // JSON array of event type strings
+    headers: Option<String>, // JSON — either `["H: V", ...]` or `[{"name":"H","value":"V"}, ...]`
+    events: Option<String>,  // JSON array of event type strings
     organization: String,
     is_user_extended: bool,
 }
@@ -82,10 +83,7 @@ struct HeaderEntry {
 fn parse_headers(raw: &str) -> Vec<(String, String)> {
     // Try structured format first.
     if let Ok(entries) = serde_json::from_str::<Vec<HeaderEntry>>(raw) {
-        return entries
-            .into_iter()
-            .map(|h| (h.name, h.value))
-            .collect();
+        return entries.into_iter().map(|h| (h.name, h.value)).collect();
     }
 
     // Fall back to plain string array ("Name: Value").
@@ -319,8 +317,8 @@ impl WebhookExecutor {
         webhook: &WebhookInfo,
         payload: &WebhookPayload,
     ) -> Result<u16, String> {
-        let body = serde_json::to_string(payload)
-            .map_err(|e| format!("Serialization error: {}", e))?;
+        let body =
+            serde_json::to_string(payload).map_err(|e| format!("Serialization error: {}", e))?;
 
         // Use the method from the webhook config (default POST).
         let method = match webhook.method.to_uppercase().as_str() {
@@ -372,10 +370,7 @@ impl WebhookExecutor {
         let status = response.status().as_u16();
 
         // Read (and discard) the body so the connection can be reused.
-        let _body = response
-            .text()
-            .await
-            .unwrap_or_default();
+        let _body = response.text().await.unwrap_or_default();
 
         Ok(status)
     }
@@ -388,10 +383,7 @@ mod tests {
     #[test]
     fn test_compute_hmac_sha256() {
         // Known test vector: HMAC-SHA256("key", "The quick brown fox jumps over the lazy dog")
-        let result = compute_hmac_sha256(
-            b"key",
-            b"The quick brown fox jumps over the lazy dog",
-        );
+        let result = compute_hmac_sha256(b"key", b"The quick brown fox jumps over the lazy dog");
         assert_eq!(
             result,
             "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
@@ -410,10 +402,14 @@ mod tests {
 
     #[test]
     fn test_parse_headers_structured() {
-        let json = r#"[{"name":"Authorization","value":"Bearer abc"},{"name":"X-Custom","value":"val"}]"#;
+        let json =
+            r#"[{"name":"Authorization","value":"Bearer abc"},{"name":"X-Custom","value":"val"}]"#;
         let headers = parse_headers(json);
         assert_eq!(headers.len(), 2);
-        assert_eq!(headers[0], ("Authorization".to_string(), "Bearer abc".to_string()));
+        assert_eq!(
+            headers[0],
+            ("Authorization".to_string(), "Bearer abc".to_string())
+        );
         assert_eq!(headers[1], ("X-Custom".to_string(), "val".to_string()));
     }
 
@@ -422,7 +418,10 @@ mod tests {
         let json = r#"["Authorization: Bearer abc","X-Custom: val"]"#;
         let headers = parse_headers(json);
         assert_eq!(headers.len(), 2);
-        assert_eq!(headers[0], ("Authorization".to_string(), "Bearer abc".to_string()));
+        assert_eq!(
+            headers[0],
+            ("Authorization".to_string(), "Bearer abc".to_string())
+        );
         assert_eq!(headers[1], ("X-Custom".to_string(), "val".to_string()));
     }
 

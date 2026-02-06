@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct SteamProvider {
     api_key: String,
@@ -69,7 +70,9 @@ impl OAuthProviderTrait for SteamProvider {
             .map_err(|e| AppError::Internal(format!("Steam response read failed: {}", e)))?;
 
         if !response_text.contains("is_valid:true") {
-            return Err(AppError::Internal("Steam OpenID verification failed".to_string()));
+            return Err(AppError::Internal(
+                "Steam OpenID verification failed".to_string(),
+            ));
         }
 
         // Extract Steam ID from the claimed_id parameter
@@ -88,10 +91,7 @@ impl OAuthProviderTrait for SteamProvider {
         let client = reqwest::Client::new();
         let resp = client
             .get("https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/")
-            .query(&[
-                ("key", self.api_key.as_str()),
-                ("steamids", access_token),
-            ])
+            .query(&[("key", self.api_key.as_str()), ("steamids", access_token)])
             .send()
             .await
             .map_err(|e| AppError::Internal(format!("Steam user info failed: {}", e)))?;
@@ -101,7 +101,9 @@ impl OAuthProviderTrait for SteamProvider {
             .await
             .map_err(|e| AppError::Internal(format!("Steam user parse failed: {}", e)))?;
 
-        let player = player_resp.response.players
+        let player = player_resp
+            .response
+            .players
             .into_iter()
             .next()
             .ok_or_else(|| AppError::Internal("No player data in Steam response".to_string()))?;

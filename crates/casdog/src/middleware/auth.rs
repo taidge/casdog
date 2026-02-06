@@ -1,14 +1,21 @@
+use jsonwebtoken::{DecodingKey, Validation, decode};
+use salvo::prelude::*;
+
 use crate::config::AppConfig;
 use crate::error::ErrorResponse;
 use crate::services::auth_service::Claims;
-use jsonwebtoken::{decode, DecodingKey, Validation};
-use salvo::prelude::*;
 
 pub struct JwtAuth;
 
 #[async_trait]
 impl Handler for JwtAuth {
-    async fn handle(&self, req: &mut Request, depot: &mut Depot, res: &mut Response, ctrl: &mut FlowCtrl) {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        depot: &mut Depot,
+        res: &mut Response,
+        ctrl: &mut FlowCtrl,
+    ) {
         let config = AppConfig::get();
 
         let token = req
@@ -42,7 +49,10 @@ impl Handler for JwtAuth {
             }
             None => {
                 res.status_code(StatusCode::UNAUTHORIZED);
-                res.render(Json(ErrorResponse::new(401, "Missing authorization header")));
+                res.render(Json(ErrorResponse::new(
+                    401,
+                    "Missing authorization header",
+                )));
                 ctrl.skip_rest();
             }
         }
@@ -53,7 +63,13 @@ pub struct OptionalJwtAuth;
 
 #[async_trait]
 impl Handler for OptionalJwtAuth {
-    async fn handle(&self, req: &mut Request, depot: &mut Depot, res: &mut Response, ctrl: &mut FlowCtrl) {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        depot: &mut Depot,
+        res: &mut Response,
+        ctrl: &mut FlowCtrl,
+    ) {
         let config = AppConfig::get();
 
         let token = req

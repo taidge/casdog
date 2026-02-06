@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateTicketRequest, Ticket, TicketResponse, UpdateTicketRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateTicketRequest, Ticket, TicketResponse, UpdateTicketRequest};
 
 pub struct TicketService;
 
@@ -68,7 +69,9 @@ impl TicketService {
                 .map(|i| {
                     if i == 1 && owner.is_some() {
                         "owner = $1".to_string()
-                    } else if (i == 2 && owner.is_some() || i == 1 && owner.is_none()) && status.is_some() {
+                    } else if (i == 2 && owner.is_some() || i == 1 && owner.is_none())
+                        && status.is_some()
+                    {
                         format!("status = ${}", i)
                     } else {
                         format!("assignee = ${}", i)

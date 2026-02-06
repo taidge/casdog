@@ -1,7 +1,10 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CasbinModel, CasbinModelResponse, CreateCasbinModelRequest, UpdateCasbinModelRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{
+    CasbinModel, CasbinModelResponse, CreateCasbinModelRequest, UpdateCasbinModelRequest,
+};
 
 pub struct ModelService;
 
@@ -77,7 +80,10 @@ impl ModelService {
         Ok(model.into())
     }
 
-    pub async fn create(pool: &PgPool, req: CreateCasbinModelRequest) -> AppResult<CasbinModelResponse> {
+    pub async fn create(
+        pool: &PgPool,
+        req: CreateCasbinModelRequest,
+    ) -> AppResult<CasbinModelResponse> {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
         let is_enabled = req.is_enabled.unwrap_or(true);

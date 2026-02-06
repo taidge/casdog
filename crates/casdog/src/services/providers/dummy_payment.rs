@@ -1,8 +1,9 @@
+use async_trait::async_trait;
+
 use crate::error::AppResult;
 use crate::services::providers::payment_provider::{
     NotifyResult, PayRequest, PayResponse, PaymentProvider,
 };
-use async_trait::async_trait;
 
 /// Dummy/test payment provider
 /// Always succeeds and returns mock URLs for testing

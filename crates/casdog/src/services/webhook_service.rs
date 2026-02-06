@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateWebhookRequest, UpdateWebhookRequest, Webhook, WebhookResponse};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateWebhookRequest, UpdateWebhookRequest, Webhook, WebhookResponse};
 
 pub struct WebhookService;
 
@@ -81,8 +82,12 @@ impl WebhookService {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
-        let events_json = req.events.map(|e| serde_json::to_string(&e).unwrap_or_default());
-        let headers_json = req.headers.map(|h| serde_json::to_string(&h).unwrap_or_default());
+        let events_json = req
+            .events
+            .map(|e| serde_json::to_string(&e).unwrap_or_default());
+        let headers_json = req
+            .headers
+            .map(|h| serde_json::to_string(&h).unwrap_or_default());
 
         sqlx::query(
             r#"
@@ -114,8 +119,12 @@ impl WebhookService {
         id: &str,
         req: UpdateWebhookRequest,
     ) -> AppResult<WebhookResponse> {
-        let events_json = req.events.map(|e| serde_json::to_string(&e).unwrap_or_default());
-        let headers_json = req.headers.map(|h| serde_json::to_string(&h).unwrap_or_default());
+        let events_json = req
+            .events
+            .map(|e| serde_json::to_string(&e).unwrap_or_default());
+        let headers_json = req
+            .headers
+            .map(|h| serde_json::to_string(&h).unwrap_or_default());
 
         sqlx::query(
             r#"

@@ -1,23 +1,33 @@
-use crate::error::{AppError, AppResult};
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
 
+use crate::error::{AppError, AppResult};
+
 #[endpoint(tags("Dashboard"), summary = "Get dashboard statistics")]
 pub async fn get_dashboard(depot: &mut Depot) -> AppResult<Json<serde_json::Value>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
-    let org_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM organizations WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
-    let app_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM applications WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
-    let provider_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM providers WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
+        .fetch_one(&pool)
+        .await?;
+    let org_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM organizations WHERE is_deleted = FALSE")
+            .fetch_one(&pool)
+            .await?;
+    let app_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM applications WHERE is_deleted = FALSE")
+            .fetch_one(&pool)
+            .await?;
+    let provider_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM providers WHERE is_deleted = FALSE")
+            .fetch_one(&pool)
+            .await?;
     let session_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions")
-        .fetch_one(&pool).await?;
+        .fetch_one(&pool)
+        .await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -33,16 +43,21 @@ pub async fn get_dashboard(depot: &mut Depot) -> AppResult<Json<serde_json::Valu
 
 #[endpoint(tags("Dashboard"), summary = "Get Prometheus-style metrics")]
 pub async fn get_metrics(depot: &mut Depot) -> AppResult<String> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
-    let org_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM organizations WHERE is_deleted = FALSE")
-        .fetch_one(&pool).await?;
+        .fetch_one(&pool)
+        .await?;
+    let org_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM organizations WHERE is_deleted = FALSE")
+            .fetch_one(&pool)
+            .await?;
     let session_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions")
-        .fetch_one(&pool).await?;
+        .fetch_one(&pool)
+        .await?;
 
     let metrics = format!(
         "# HELP casdog_users_total Total number of users\n\

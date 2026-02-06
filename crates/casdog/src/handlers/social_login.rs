@@ -1,13 +1,13 @@
-use crate::error::{AppError, AppResult};
-use crate::models::UserResponse;
-use crate::services::auth_service::LoginResponse;
-use crate::services::providers::oauth_provider::{create_oauth_provider, ProviderUserInfo};
-use crate::services::{AuthService, ProviderService, UserService};
-use salvo::oapi::endpoint;
-use salvo::oapi::ToSchema;
+use salvo::oapi::{ToSchema, endpoint};
 use salvo::prelude::*;
 use serde::Serialize;
 use sqlx::{Pool, Postgres};
+
+use crate::error::{AppError, AppResult};
+use crate::models::UserResponse;
+use crate::services::auth_service::LoginResponse;
+use crate::services::providers::oauth_provider::{ProviderUserInfo, create_oauth_provider};
+use crate::services::{AuthService, ProviderService, UserService};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuthUrlResponse {
@@ -112,10 +112,7 @@ pub async fn provider_callback(
 
     // Parse application from state if present (format: "uuid:application_name")
     let (original_state, _application_name) = if let Some(idx) = state.rfind(':') {
-        (
-            state[..idx].to_string(),
-            Some(state[idx + 1..].to_string()),
-        )
+        (state[..idx].to_string(), Some(state[idx + 1..].to_string()))
     } else {
         (state, None)
     };
@@ -163,7 +160,10 @@ pub async fn provider_callback(
 
     let user_response = if let Some(user) = existing_user {
         // Existing linked user - update last signin
-        user_service.update_signin_tracking(&user.id, true, None).await.ok();
+        user_service
+            .update_signin_tracking(&user.id, true, None)
+            .await
+            .ok();
         user
     } else {
         // Try to find by email
@@ -179,7 +179,10 @@ pub async fn provider_callback(
             user_service
                 .link_provider(&user_resp.id, &provider.provider_type, &provider_user.id)
                 .await?;
-            user_service.update_signin_tracking(&user_resp.id, true, None).await.ok();
+            user_service
+                .update_signin_tracking(&user_resp.id, true, None)
+                .await
+                .ok();
             user_resp
         } else {
             // Create new user from provider info

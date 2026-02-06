@@ -1,9 +1,11 @@
-use crate::error::{AppError, AppResult};
-use crate::services::providers::storage_provider::StorageProvider;
 use async_trait::async_trait;
-use base64::{engine::general_purpose, Engine as _};
+use base64::Engine as _;
+use base64::engine::general_purpose;
 use reqwest::Client;
 use sha2::{Digest, Sha256};
+
+use crate::error::{AppError, AppResult};
+use crate::services::providers::storage_provider::StorageProvider;
 
 /// S3-compatible storage provider using raw HTTP
 /// This implementation uses simple HTTP operations for S3-compatible storage

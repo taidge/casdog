@@ -1,21 +1,23 @@
+use salvo::oapi::extract::JsonBody;
+use salvo::prelude::*;
+use sqlx::{Pool, Postgres};
+
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CaptchaResponse, EmailAndPhoneResponse, GetEmailAndPhoneRequest, SendVerificationCodeRequest,
     VerifyCaptchaRequest, VerifyCodeRequest, VerifyCodeResponse,
 };
 use crate::services::VerificationService;
-use salvo::oapi::extract::JsonBody;
-use salvo::prelude::*;
-use sqlx::{Pool, Postgres};
 
 #[endpoint(tags("verification"), summary = "Send verification code")]
 pub async fn send_verification_code(
     depot: &mut Depot,
     body: JsonBody<SendVerificationCodeRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let req = body.into_inner();
     let response = VerificationService::send_verification_code(
@@ -38,13 +40,13 @@ pub async fn verify_code(
     depot: &mut Depot,
     body: JsonBody<VerifyCodeRequest>,
 ) -> AppResult<Json<VerifyCodeResponse>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let req = body.into_inner();
-    let response =
-        VerificationService::verify_code(&pool, &req.dest, &req.code).await?;
+    let response = VerificationService::verify_code(&pool, &req.dest, &req.code).await?;
 
     Ok(Json(response))
 }
@@ -68,14 +70,18 @@ pub async fn verify_captcha(
     })))
 }
 
-#[endpoint(tags("verification"), summary = "Get email and phone for password reset")]
+#[endpoint(
+    tags("verification"),
+    summary = "Get email and phone for password reset"
+)]
 pub async fn get_email_and_phone(
     depot: &mut Depot,
     body: JsonBody<GetEmailAndPhoneRequest>,
 ) -> AppResult<Json<EmailAndPhoneResponse>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let req = body.into_inner();
     let (email, phone) =

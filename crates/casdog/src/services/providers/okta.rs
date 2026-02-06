@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct OktaProvider {
     client_id: String,
@@ -51,7 +52,10 @@ impl OAuthProviderTrait for OktaProvider {
         let client = reqwest::Client::new();
 
         // Okta requires Basic Auth
-        let auth = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, format!("{}:{}", self.client_id, self.client_secret));
+        let auth = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("{}:{}", self.client_id, self.client_secret),
+        );
 
         let resp = client
             .post(&format!("https://{}/oauth2/v1/token", self.domain))
@@ -90,7 +94,8 @@ impl OAuthProviderTrait for OktaProvider {
 
         Ok(ProviderUserInfo {
             id: user.sub.clone(),
-            username: user.preferred_username
+            username: user
+                .preferred_username
                 .or_else(|| user.email.clone())
                 .unwrap_or(user.sub),
             display_name: user.name.unwrap_or_default(),

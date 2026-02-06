@@ -1,12 +1,11 @@
-use crate::error::AppError;
-use crate::services::providers::storage_provider::{get_storage_provider, StorageProvider};
-use crate::services::ProviderService;
-use crate::services::ResourceService;
-use salvo::oapi::endpoint;
-use salvo::oapi::ToSchema;
+use salvo::oapi::{ToSchema, endpoint};
 use salvo::prelude::*;
 use serde::Serialize;
 use sqlx::{Pool, Postgres};
+
+use crate::error::AppError;
+use crate::services::providers::storage_provider::{StorageProvider, get_storage_provider};
+use crate::services::{ProviderService, ResourceService};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UploadResponse {
@@ -194,9 +193,11 @@ pub async fn delete_resource_with_file(
                 prov.endpoint.as_deref().unwrap_or(""),
             )
             .unwrap_or_else(|_| {
-                Box::new(crate::services::providers::local_storage::LocalStorageProvider::new(
-                    "./uploads".to_string(),
-                ))
+                Box::new(
+                    crate::services::providers::local_storage::LocalStorageProvider::new(
+                        "./uploads".to_string(),
+                    ),
+                )
             }),
             Err(_) => Box::new(
                 crate::services::providers::local_storage::LocalStorageProvider::new(
@@ -205,9 +206,11 @@ pub async fn delete_resource_with_file(
             ),
         }
     } else {
-        Box::new(crate::services::providers::local_storage::LocalStorageProvider::new(
-            "./uploads".to_string(),
-        ))
+        Box::new(
+            crate::services::providers::local_storage::LocalStorageProvider::new(
+                "./uploads".to_string(),
+            ),
+        )
     };
 
     // Best-effort: try to delete from storage, but always remove the DB record

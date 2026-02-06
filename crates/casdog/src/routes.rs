@@ -1,3 +1,8 @@
+use rust_embed::Embed;
+use salvo::oapi::OpenApi;
+use salvo::prelude::*;
+use salvo::serve_static::static_embed;
+
 use crate::handlers::{
     adapter, app_extra, application, auth, cas, cert, cert_extra, dashboard, enforcer, form, group,
     health, impersonation, invitation, ldap, messaging, mfa, model, oidc, order, org_extra,
@@ -6,10 +11,6 @@ use crate::handlers::{
     syncer, system, ticket, token, transaction, upload, user, user_extra, verification, webhook,
 };
 use crate::middleware::JwtAuth;
-use rust_embed::Embed;
-use salvo::oapi::OpenApi;
-use salvo::prelude::*;
-use salvo::serve_static::static_embed;
 
 #[derive(Embed)]
 #[folder = "../../web/dist"]
@@ -34,7 +35,10 @@ fn wellknown_router() -> Router {
         .push(Router::with_path("openid-configuration").get(oidc::openid_configuration))
         .push(Router::with_path("jwks").get(oidc::jwks))
         .push(Router::with_path("webfinger").get(oidc::webfinger))
-        .push(Router::with_path("<application>/openid-configuration").get(oidc::app_openid_configuration))
+        .push(
+            Router::with_path("<application>/openid-configuration")
+                .get(oidc::app_openid_configuration),
+        )
         .push(Router::with_path("<application>/jwks").get(oidc::app_jwks))
 }
 
@@ -534,10 +538,7 @@ fn swagger_router() -> Router {
     let doc = create_openapi_doc();
     Router::new()
         .push(doc.into_router("/api-doc/openapi.json"))
-        .push(
-            Router::with_path("swagger-ui/<**>")
-                .get(SwaggerUi::new("/api-doc/openapi.json")),
-        )
+        .push(Router::with_path("swagger-ui/<**>").get(SwaggerUi::new("/api-doc/openapi.json")))
 }
 
 pub fn create_openapi_doc() -> OpenApi {

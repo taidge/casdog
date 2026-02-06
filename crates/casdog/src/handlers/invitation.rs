@@ -1,12 +1,13 @@
+use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
+use salvo::prelude::*;
+use sqlx::{Pool, Postgres};
+
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateInvitationRequest, InvitationResponse, SendInvitationRequest, UpdateInvitationRequest,
     VerifyInvitationRequest, VerifyInvitationResponse,
 };
 use crate::services::InvitationService;
-use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
-use salvo::prelude::*;
-use sqlx::{Pool, Postgres};
 
 #[endpoint(tags("invitations"), summary = "List invitations")]
 pub async fn list_invitations(
@@ -15,9 +16,10 @@ pub async fn list_invitations(
     page: QueryParam<i64, false>,
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let owner_ref = owner.as_deref();
     let page_val = page.into_inner().unwrap_or(1);
@@ -38,9 +40,10 @@ pub async fn get_invitation(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> AppResult<Json<InvitationResponse>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let invitation = InvitationService::get_by_id(&pool, &id).await?;
     Ok(Json(invitation))
@@ -51,9 +54,10 @@ pub async fn create_invitation(
     depot: &mut Depot,
     body: JsonBody<CreateInvitationRequest>,
 ) -> AppResult<Json<InvitationResponse>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let invitation = InvitationService::create(&pool, body.into_inner()).await?;
     Ok(Json(invitation))
@@ -65,9 +69,10 @@ pub async fn update_invitation(
     id: PathParam<String>,
     body: JsonBody<UpdateInvitationRequest>,
 ) -> AppResult<Json<InvitationResponse>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let invitation = InvitationService::update(&pool, &id, body.into_inner()).await?;
     Ok(Json(invitation))
@@ -78,9 +83,10 @@ pub async fn delete_invitation(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     InvitationService::delete(&pool, &id).await?;
     Ok(Json(serde_json::json!({
@@ -94,9 +100,10 @@ pub async fn verify_invitation(
     depot: &mut Depot,
     body: JsonBody<VerifyInvitationRequest>,
 ) -> AppResult<Json<VerifyInvitationResponse>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let result = InvitationService::verify(&pool, body.into_inner()).await?;
     Ok(Json(result))
@@ -107,9 +114,10 @@ pub async fn send_invitation(
     depot: &mut Depot,
     body: JsonBody<SendInvitationRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not found".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
 
     let req = body.into_inner();
 

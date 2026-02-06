@@ -1,11 +1,12 @@
+use rand::Rng;
+use sqlx::PgPool;
+use uuid::Uuid;
+
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateInvitationRequest, Invitation, InvitationResponse, UpdateInvitationRequest,
     VerifyInvitationRequest, VerifyInvitationResponse,
 };
-use rand::Rng;
-use sqlx::PgPool;
-use uuid::Uuid;
 
 pub struct InvitationService;
 
@@ -84,7 +85,10 @@ impl InvitationService {
         Ok(invitation.into())
     }
 
-    pub async fn create(pool: &PgPool, req: CreateInvitationRequest) -> AppResult<InvitationResponse> {
+    pub async fn create(
+        pool: &PgPool,
+        req: CreateInvitationRequest,
+    ) -> AppResult<InvitationResponse> {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
@@ -211,7 +215,9 @@ impl InvitationService {
                         if inv_app != app {
                             return Ok(VerifyInvitationResponse {
                                 valid: false,
-                                message: Some("Invitation code is not valid for this application".to_string()),
+                                message: Some(
+                                    "Invitation code is not valid for this application".to_string(),
+                                ),
                             });
                         }
                     }

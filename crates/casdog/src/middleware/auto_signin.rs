@@ -1,9 +1,11 @@
-use crate::config::AppConfig;
-use crate::services::auth_service::Claims;
-use base64::{engine::general_purpose, Engine as _};
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use base64::Engine as _;
+use base64::engine::general_purpose;
+use jsonwebtoken::{DecodingKey, Validation, decode};
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::config::AppConfig;
+use crate::services::auth_service::Claims;
 
 /// Multi-source authentication middleware.
 /// Tries multiple auth methods in order:

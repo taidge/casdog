@@ -1,6 +1,7 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct GenericOAuthProvider {
     provider_type_name: String,
@@ -90,20 +91,21 @@ impl OAuthProviderTrait for GenericOAuthProvider {
             .map_err(|e| AppError::Internal(format!("User info parse failed: {}", e)))?;
 
         Ok(ProviderUserInfo {
-            id: json["sub"].as_str()
+            id: json["sub"]
+                .as_str()
                 .or_else(|| json["id"].as_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            username: json["preferred_username"].as_str()
+            username: json["preferred_username"]
+                .as_str()
                 .or_else(|| json["login"].as_str())
                 .or_else(|| json["email"].as_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            display_name: json["name"].as_str()
-                .unwrap_or("Unknown")
-                .to_string(),
+            display_name: json["name"].as_str().unwrap_or("Unknown").to_string(),
             email: json["email"].as_str().map(|s| s.to_string()),
-            avatar_url: json["picture"].as_str()
+            avatar_url: json["picture"]
+                .as_str()
                 .or_else(|| json["avatar_url"].as_str())
                 .map(|s| s.to_string()),
             provider_type: self.provider_type_name.clone(),

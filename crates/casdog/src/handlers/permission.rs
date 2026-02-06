@@ -1,13 +1,14 @@
+use salvo::oapi::endpoint;
+use salvo::oapi::extract::*;
+use salvo::prelude::*;
+use sqlx::{Pool, Postgres};
+
 use crate::error::AppError;
 use crate::models::{
     AssignPermissionRequest, CreatePermissionRequest, PermissionListResponse, PermissionQuery,
     PermissionResponse, UpdatePermissionRequest,
 };
 use crate::services::PermissionService;
-use salvo::oapi::extract::*;
-use salvo::oapi::endpoint;
-use salvo::prelude::*;
-use sqlx::{Pool, Postgres};
 
 /// List permissions
 #[endpoint(
@@ -26,9 +27,10 @@ pub async fn list_permissions(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<PermissionListResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let permission_service = PermissionService::new(pool);
 
     let query = PermissionQuery {
@@ -55,9 +57,10 @@ pub async fn create_permission(
     depot: &mut Depot,
     req: JsonBody<CreatePermissionRequest>,
 ) -> Result<Json<PermissionResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let permission_service = PermissionService::new(pool);
 
     let response = permission_service.create(req.into_inner()).await?;
@@ -79,9 +82,10 @@ pub async fn get_permission(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<Json<PermissionResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let permission_service = PermissionService::new(pool);
 
     let response = permission_service.get_by_id(&id.into_inner()).await?;
@@ -105,12 +109,15 @@ pub async fn update_permission(
     id: PathParam<String>,
     req: JsonBody<UpdatePermissionRequest>,
 ) -> Result<Json<PermissionResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let permission_service = PermissionService::new(pool);
 
-    let response = permission_service.update(&id.into_inner(), req.into_inner()).await?;
+    let response = permission_service
+        .update(&id.into_inner(), req.into_inner())
+        .await?;
     Ok(Json(response))
 }
 
@@ -129,9 +136,10 @@ pub async fn delete_permission(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let permission_service = PermissionService::new(pool);
 
     permission_service.delete(&id.into_inner()).await?;
@@ -151,12 +159,15 @@ pub async fn assign_permission(
     depot: &mut Depot,
     req: JsonBody<AssignPermissionRequest>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let permission_service = PermissionService::new(pool);
 
-    permission_service.assign_permission(req.into_inner()).await?;
+    permission_service
+        .assign_permission(req.into_inner())
+        .await?;
     Ok("Permission assigned")
 }
 
@@ -175,11 +186,14 @@ pub async fn get_role_permissions(
     depot: &mut Depot,
     role_id: PathParam<String>,
 ) -> Result<Json<Vec<PermissionResponse>>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let permission_service = PermissionService::new(pool);
 
-    let response = permission_service.get_role_permissions(&role_id.into_inner()).await?;
+    let response = permission_service
+        .get_role_permissions(&role_id.into_inner())
+        .await?;
     Ok(Json(response))
 }

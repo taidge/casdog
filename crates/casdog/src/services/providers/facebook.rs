@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
 use async_trait::async_trait;
 use serde::Deserialize;
+
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
+use crate::error::{AppError, AppResult};
 
 pub struct FacebookProvider {
     client_id: String,
@@ -10,7 +11,10 @@ pub struct FacebookProvider {
 
 impl FacebookProvider {
     pub fn new(client_id: String, client_secret: String) -> Self {
-        Self { client_id, client_secret }
+        Self {
+            client_id,
+            client_secret,
+        }
     }
 }
 
@@ -89,9 +93,7 @@ impl OAuthProviderTrait for FacebookProvider {
             .await
             .map_err(|e| AppError::Internal(format!("Facebook user parse failed: {}", e)))?;
 
-        let avatar_url = user.picture
-            .and_then(|p| p.data)
-            .and_then(|d| d.url);
+        let avatar_url = user.picture.and_then(|p| p.data).and_then(|d| d.url);
 
         Ok(ProviderUserInfo {
             id: user.id.clone(),

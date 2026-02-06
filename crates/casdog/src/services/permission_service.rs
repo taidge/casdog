@@ -1,11 +1,12 @@
+use chrono::Utc;
+use sqlx::{Pool, Postgres};
+use uuid::Uuid;
+
 use crate::error::{AppError, AppResult};
 use crate::models::{
     AssignPermissionRequest, CreatePermissionRequest, Permission, PermissionListResponse,
     PermissionQuery, PermissionResponse, UpdatePermissionRequest,
 };
-use chrono::Utc;
-use sqlx::{Pool, Postgres};
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct PermissionService {
@@ -96,11 +97,10 @@ impl PermissionService {
             .fetch_all(&self.pool)
             .await?;
 
-            let total: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM permissions WHERE is_deleted = FALSE",
-            )
-            .fetch_one(&self.pool)
-            .await?;
+            let total: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM permissions WHERE is_deleted = FALSE")
+                    .fetch_one(&self.pool)
+                    .await?;
 
             (permissions, total.0)
         };
@@ -113,7 +113,11 @@ impl PermissionService {
         })
     }
 
-    pub async fn update(&self, id: &str, req: UpdatePermissionRequest) -> AppResult<PermissionResponse> {
+    pub async fn update(
+        &self,
+        id: &str,
+        req: UpdatePermissionRequest,
+    ) -> AppResult<PermissionResponse> {
         let mut permission = sqlx::query_as::<_, Permission>(
             "SELECT * FROM permissions WHERE id = $1 AND is_deleted = FALSE",
         )

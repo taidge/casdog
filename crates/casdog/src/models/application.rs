@@ -30,7 +30,7 @@ pub struct Application {
     pub signin_html: Option<String>,
 
     // Items configuration (JSON arrays)
-    pub signup_items: Option<serde_json::Value>,   // [{name, visible, required, prompted, rule}]
+    pub signup_items: Option<serde_json::Value>, // [{name, visible, required, prompted, rule}]
     pub signin_items: Option<serde_json::Value>,
     pub signin_methods: Option<serde_json::Value>, // [{name, displayName, rule}]
     pub grant_types: Option<serde_json::Value>,    // ["authorization_code", "implicit", ...]

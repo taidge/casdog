@@ -1,9 +1,10 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateFormRequest, FormResponse, UpdateFormRequest};
-use crate::services::FormService;
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateFormRequest, FormResponse, UpdateFormRequest};
+use crate::services::FormService;
 
 #[endpoint(tags("Form"), summary = "List forms")]
 pub async fn get_forms(
@@ -31,10 +32,7 @@ pub async fn get_forms(
 }
 
 #[endpoint(tags("Form"), summary = "Get form by ID")]
-pub async fn get_form(
-    depot: &mut Depot,
-    id: PathParam<String>,
-) -> AppResult<Json<FormResponse>> {
+pub async fn get_form(depot: &mut Depot, id: PathParam<String>) -> AppResult<Json<FormResponse>> {
     let pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?

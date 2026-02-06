@@ -1,8 +1,9 @@
-use crate::error::{AppError, AppResult};
-use crate::services::providers::email_provider::EmailProviderTrait;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
+
+use crate::error::{AppError, AppResult};
+use crate::services::providers::email_provider::EmailProviderTrait;
 
 /// SendGrid email provider
 pub struct SendGridEmailProvider {
@@ -131,10 +132,7 @@ impl CustomHttpEmailProvider {
 
     /// Create provider from database record fields
     pub fn from_provider_record(endpoint_url: &str, api_key: Option<&str>) -> Self {
-        Self::new(
-            endpoint_url.to_string(),
-            api_key.map(|s| s.to_string()),
-        )
+        Self::new(endpoint_url.to_string(), api_key.map(|s| s.to_string()))
     }
 }
 
@@ -159,9 +157,10 @@ impl EmailProviderTrait for CustomHttpEmailProvider {
             req_builder = req_builder.bearer_auth(api_key);
         }
 
-        let response = req_builder.send().await.map_err(|e| {
-            AppError::Internal(format!("Custom HTTP email request failed: {}", e))
-        })?;
+        let response = req_builder
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Custom HTTP email request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();

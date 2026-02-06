@@ -39,7 +39,7 @@ pub struct User {
     pub country_code: Option<String>,
     pub region: Option<String>,
     pub location: Option<String>,
-    pub address: Option<serde_json::Value>,       // JSON array of strings
+    pub address: Option<serde_json::Value>, // JSON array of strings
     pub affiliation: Option<String>,
     pub title: Option<String>,
     pub homepage: Option<String>,
@@ -97,8 +97,8 @@ pub struct User {
     pub ip_whitelist: Option<String>,
 
     // Properties & Custom
-    pub properties: Option<serde_json::Value>,     // JSON map: key -> value
-    pub custom: Option<serde_json::Value>,         // JSON map for custom1-10 fields
+    pub properties: Option<serde_json::Value>, // JSON map: key -> value
+    pub custom: Option<serde_json::Value>,     // JSON map for custom1-10 fields
 
     // LDAP
     pub ldap: Option<String>,

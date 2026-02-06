@@ -1,13 +1,14 @@
-use crate::error::AppError;
-use crate::models::{
-    CreateOrganizationRequest, OrganizationListResponse, OrganizationQuery,
-    OrganizationResponse, UpdateOrganizationRequest,
-};
-use crate::services::OrgService;
-use salvo::oapi::extract::*;
 use salvo::oapi::endpoint;
+use salvo::oapi::extract::*;
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
+
+use crate::error::AppError;
+use crate::models::{
+    CreateOrganizationRequest, OrganizationListResponse, OrganizationQuery, OrganizationResponse,
+    UpdateOrganizationRequest,
+};
+use crate::services::OrgService;
 
 /// List organizations
 #[endpoint(
@@ -26,9 +27,10 @@ pub async fn list_organizations(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<OrganizationListResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let org_service = OrgService::new(pool);
 
     let query = OrganizationQuery {
@@ -55,9 +57,10 @@ pub async fn create_organization(
     depot: &mut Depot,
     req: JsonBody<CreateOrganizationRequest>,
 ) -> Result<Json<OrganizationResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let org_service = OrgService::new(pool);
 
     let response = org_service.create(req.into_inner()).await?;
@@ -79,9 +82,10 @@ pub async fn get_organization(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<Json<OrganizationResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let org_service = OrgService::new(pool);
 
     let response = org_service.get_by_id(&id.into_inner()).await?;
@@ -105,12 +109,15 @@ pub async fn update_organization(
     id: PathParam<String>,
     req: JsonBody<UpdateOrganizationRequest>,
 ) -> Result<Json<OrganizationResponse>, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let org_service = OrgService::new(pool);
 
-    let response = org_service.update(&id.into_inner(), req.into_inner()).await?;
+    let response = org_service
+        .update(&id.into_inner(), req.into_inner())
+        .await?;
     Ok(Json(response))
 }
 
@@ -129,9 +136,10 @@ pub async fn delete_organization(
     depot: &mut Depot,
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
-    let pool = depot.obtain::<Pool<Postgres>>().map_err(|_| {
-        AppError::Internal("Database pool not available".to_string())
-    })?.clone();
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let org_service = OrgService::new(pool);
 
     org_service.delete(&id.into_inner()).await?;

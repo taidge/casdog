@@ -1,13 +1,15 @@
+use std::sync::Arc;
+
+use casbin::{CoreApi, DefaultModel, Enforcer, MgmtApi, RbacApi};
+use sqlx_adapter::SqlxAdapter;
+use tokio::sync::RwLock;
+
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    BatchEnforceResponse, EnforceRequest, EnforceRequestItem, EnforceResponse,
-    EnforceResultItem, PolicyListResponse, PolicyRequest, PolicyResponse,
+    BatchEnforceResponse, EnforceRequest, EnforceRequestItem, EnforceResponse, EnforceResultItem,
+    PolicyListResponse, PolicyRequest, PolicyResponse,
 };
-use casbin::{CoreApi, DefaultModel, Enforcer, MgmtApi, RbacApi};
-use sqlx_adapter::SqlxAdapter;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct CasbinService {
@@ -63,7 +65,10 @@ impl CasbinService {
         } else if req.ptype == "g" {
             vec![req.v0, req.v1]
         } else {
-            return Err(AppError::Validation(format!("Invalid policy type: {}", req.ptype)));
+            return Err(AppError::Validation(format!(
+                "Invalid policy type: {}",
+                req.ptype
+            )));
         };
 
         let added = if req.ptype == "p" {
@@ -89,7 +94,10 @@ impl CasbinService {
         } else if req.ptype == "g" {
             vec![req.v0, req.v1]
         } else {
-            return Err(AppError::Validation(format!("Invalid policy type: {}", req.ptype)));
+            return Err(AppError::Validation(format!(
+                "Invalid policy type: {}",
+                req.ptype
+            )));
         };
 
         let removed = if req.ptype == "p" {
@@ -177,7 +185,10 @@ impl CasbinService {
         Ok(())
     }
 
-    pub async fn batch_enforce(&self, reqs: Vec<EnforceRequestItem>) -> AppResult<BatchEnforceResponse> {
+    pub async fn batch_enforce(
+        &self,
+        reqs: Vec<EnforceRequestItem>,
+    ) -> AppResult<BatchEnforceResponse> {
         let enforcer = self.enforcer.read().await;
         let mut results = Vec::with_capacity(reqs.len());
 

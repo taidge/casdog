@@ -1,8 +1,9 @@
-use crate::error::AppResult;
-use crate::models::{CreateSessionRequest, Session, SessionResponse, UpdateSessionRequest};
 use chrono::{Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::AppResult;
+use crate::models::{CreateSessionRequest, Session, SessionResponse, UpdateSessionRequest};
 
 pub struct SessionService;
 
@@ -33,7 +34,7 @@ impl SessionService {
             (sessions, total.0)
         } else {
             let sessions = sqlx::query_as::<_, Session>(
-                r#"SELECT * FROM sessions ORDER BY created_at DESC LIMIT $1 OFFSET $2"#
+                r#"SELECT * FROM sessions ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
             )
             .bind(page_size)
             .bind(offset)
@@ -121,13 +122,12 @@ impl SessionService {
         user_id: &str,
         session_id: &str,
     ) -> AppResult<bool> {
-        let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM sessions WHERE user_id = $1 AND session_id != $2",
-        )
-        .bind(user_id)
-        .bind(session_id)
-        .fetch_one(pool)
-        .await?;
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM sessions WHERE user_id = $1 AND session_id != $2")
+                .bind(user_id)
+                .bind(session_id)
+                .fetch_one(pool)
+                .await?;
 
         Ok(count.0 > 0)
     }

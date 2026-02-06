@@ -1,12 +1,13 @@
+use chrono::Utc;
+use rand::Rng;
+use sqlx::{Pool, Postgres};
+use uuid::Uuid;
+
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Application, ApplicationListResponse, ApplicationQuery, ApplicationResponse,
     CreateApplicationRequest, UpdateApplicationRequest,
 };
-use chrono::Utc;
-use rand::Rng;
-use sqlx::{Pool, Postgres};
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppService {
@@ -20,13 +21,13 @@ impl AppService {
 
     fn generate_client_id() -> String {
         let mut rng = rand::thread_rng();
-        let bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+        let bytes: Vec<u8> = (0..32).map(|_| rng.r#gen()).collect();
         base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &bytes)
     }
 
     fn generate_client_secret() -> String {
         let mut rng = rand::thread_rng();
-        let bytes: Vec<u8> = (0..48).map(|_| rng.gen()).collect();
+        let bytes: Vec<u8> = (0..48).map(|_| rng.r#gen()).collect();
         base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &bytes)
     }
 
@@ -113,7 +114,12 @@ impl AppService {
         .bind(client_id)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| AppError::NotFound(format!("Application with client_id '{}' not found", client_id)))?;
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Application with client_id '{}' not found",
+                client_id
+            ))
+        })?;
 
         Ok(app)
     }
@@ -205,11 +211,10 @@ impl AppService {
                 .fetch_all(&self.pool)
                 .await?;
 
-                let total: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM applications WHERE is_deleted = FALSE",
-                )
-                .fetch_one(&self.pool)
-                .await?;
+                let total: (i64,) =
+                    sqlx::query_as("SELECT COUNT(*) FROM applications WHERE is_deleted = FALSE")
+                        .fetch_one(&self.pool)
+                        .await?;
 
                 (apps, total.0)
             }
@@ -223,7 +228,11 @@ impl AppService {
         })
     }
 
-    pub async fn update(&self, id: &str, req: UpdateApplicationRequest) -> AppResult<ApplicationResponse> {
+    pub async fn update(
+        &self,
+        id: &str,
+        req: UpdateApplicationRequest,
+    ) -> AppResult<ApplicationResponse> {
         let mut app = sqlx::query_as::<_, Application>(
             "SELECT * FROM applications WHERE id = $1 AND is_deleted = FALSE",
         )
@@ -232,44 +241,120 @@ impl AppService {
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Application with id '{}' not found", id)))?;
 
-        if let Some(v) = req.display_name { app.display_name = v; }
-        if let Some(v) = req.logo { app.logo = Some(v); }
-        if let Some(v) = req.homepage_url { app.homepage_url = Some(v); }
-        if let Some(v) = req.description { app.description = Some(v); }
-        if let Some(v) = req.redirect_uris { app.redirect_uris = v; }
-        if let Some(v) = req.token_format { app.token_format = v; }
-        if let Some(v) = req.expire_in_hours { app.expire_in_hours = v; }
-        if let Some(v) = req.refresh_expire_in_hours { app.refresh_expire_in_hours = v; }
-        if let Some(v) = req.cert { app.cert = Some(v); }
-        if let Some(v) = req.signup_url { app.signup_url = Some(v); }
-        if let Some(v) = req.signin_url { app.signin_url = Some(v); }
-        if let Some(v) = req.forget_url { app.forget_url = Some(v); }
-        if let Some(v) = req.terms_of_use { app.terms_of_use = Some(v); }
-        if let Some(v) = req.signup_html { app.signup_html = Some(v); }
-        if let Some(v) = req.signin_html { app.signin_html = Some(v); }
-        if let Some(v) = req.signup_items { app.signup_items = Some(v); }
-        if let Some(v) = req.signin_items { app.signin_items = Some(v); }
-        if let Some(v) = req.signin_methods { app.signin_methods = Some(v); }
-        if let Some(v) = req.grant_types { app.grant_types = Some(v); }
-        if let Some(v) = req.providers { app.providers = Some(v); }
-        if let Some(v) = req.saml_reply_url { app.saml_reply_url = Some(v); }
-        if let Some(v) = req.enable_password { app.enable_password = v; }
-        if let Some(v) = req.enable_signin_session { app.enable_signin_session = v; }
-        if let Some(v) = req.enable_auto_signin { app.enable_auto_signin = v; }
-        if let Some(v) = req.enable_code_signin { app.enable_code_signin = v; }
-        if let Some(v) = req.enable_saml_compress { app.enable_saml_compress = v; }
-        if let Some(v) = req.enable_web_authn { app.enable_web_authn = v; }
-        if let Some(v) = req.enable_link_with_email { app.enable_link_with_email = v; }
-        if let Some(v) = req.enable_internal_signup { app.enable_internal_signup = v; }
-        if let Some(v) = req.enable_idp_signup { app.enable_idp_signup = v; }
-        if let Some(v) = req.form_offset { app.form_offset = v; }
-        if let Some(v) = req.form_side_html { app.form_side_html = Some(v); }
-        if let Some(v) = req.form_background_url { app.form_background_url = Some(v); }
-        if let Some(v) = req.form_css { app.form_css = Some(v); }
-        if let Some(v) = req.tags { app.tags = Some(v); }
-        if let Some(v) = req.footer_text { app.footer_text = Some(v); }
-        if let Some(v) = req.logout_url { app.logout_url = Some(v); }
-        if let Some(v) = req.logout_redirect_uris { app.logout_redirect_uris = Some(v); }
+        if let Some(v) = req.display_name {
+            app.display_name = v;
+        }
+        if let Some(v) = req.logo {
+            app.logo = Some(v);
+        }
+        if let Some(v) = req.homepage_url {
+            app.homepage_url = Some(v);
+        }
+        if let Some(v) = req.description {
+            app.description = Some(v);
+        }
+        if let Some(v) = req.redirect_uris {
+            app.redirect_uris = v;
+        }
+        if let Some(v) = req.token_format {
+            app.token_format = v;
+        }
+        if let Some(v) = req.expire_in_hours {
+            app.expire_in_hours = v;
+        }
+        if let Some(v) = req.refresh_expire_in_hours {
+            app.refresh_expire_in_hours = v;
+        }
+        if let Some(v) = req.cert {
+            app.cert = Some(v);
+        }
+        if let Some(v) = req.signup_url {
+            app.signup_url = Some(v);
+        }
+        if let Some(v) = req.signin_url {
+            app.signin_url = Some(v);
+        }
+        if let Some(v) = req.forget_url {
+            app.forget_url = Some(v);
+        }
+        if let Some(v) = req.terms_of_use {
+            app.terms_of_use = Some(v);
+        }
+        if let Some(v) = req.signup_html {
+            app.signup_html = Some(v);
+        }
+        if let Some(v) = req.signin_html {
+            app.signin_html = Some(v);
+        }
+        if let Some(v) = req.signup_items {
+            app.signup_items = Some(v);
+        }
+        if let Some(v) = req.signin_items {
+            app.signin_items = Some(v);
+        }
+        if let Some(v) = req.signin_methods {
+            app.signin_methods = Some(v);
+        }
+        if let Some(v) = req.grant_types {
+            app.grant_types = Some(v);
+        }
+        if let Some(v) = req.providers {
+            app.providers = Some(v);
+        }
+        if let Some(v) = req.saml_reply_url {
+            app.saml_reply_url = Some(v);
+        }
+        if let Some(v) = req.enable_password {
+            app.enable_password = v;
+        }
+        if let Some(v) = req.enable_signin_session {
+            app.enable_signin_session = v;
+        }
+        if let Some(v) = req.enable_auto_signin {
+            app.enable_auto_signin = v;
+        }
+        if let Some(v) = req.enable_code_signin {
+            app.enable_code_signin = v;
+        }
+        if let Some(v) = req.enable_saml_compress {
+            app.enable_saml_compress = v;
+        }
+        if let Some(v) = req.enable_web_authn {
+            app.enable_web_authn = v;
+        }
+        if let Some(v) = req.enable_link_with_email {
+            app.enable_link_with_email = v;
+        }
+        if let Some(v) = req.enable_internal_signup {
+            app.enable_internal_signup = v;
+        }
+        if let Some(v) = req.enable_idp_signup {
+            app.enable_idp_signup = v;
+        }
+        if let Some(v) = req.form_offset {
+            app.form_offset = v;
+        }
+        if let Some(v) = req.form_side_html {
+            app.form_side_html = Some(v);
+        }
+        if let Some(v) = req.form_background_url {
+            app.form_background_url = Some(v);
+        }
+        if let Some(v) = req.form_css {
+            app.form_css = Some(v);
+        }
+        if let Some(v) = req.tags {
+            app.tags = Some(v);
+        }
+        if let Some(v) = req.footer_text {
+            app.footer_text = Some(v);
+        }
+        if let Some(v) = req.logout_url {
+            app.logout_url = Some(v);
+        }
+        if let Some(v) = req.logout_redirect_uris {
+            app.logout_redirect_uris = Some(v);
+        }
         app.updated_at = Utc::now();
 
         let updated_app = sqlx::query_as::<_, Application>(

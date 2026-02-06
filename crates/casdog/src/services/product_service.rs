@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateProductRequest, Product, ProductResponse, UpdateProductRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreateProductRequest, Product, ProductResponse, UpdateProductRequest};
 
 pub struct ProductService;
 
@@ -48,10 +49,12 @@ impl ProductService {
         };
 
         let total: i64 = if let Some(owner) = owner {
-            sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE owner = $1 AND is_deleted = false")
-                .bind(owner)
-                .fetch_one(pool)
-                .await?
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM products WHERE owner = $1 AND is_deleted = false",
+            )
+            .bind(owner)
+            .fetch_one(pool)
+            .await?
         } else {
             sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE is_deleted = false")
                 .fetch_one(pool)

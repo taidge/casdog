@@ -107,14 +107,14 @@ pub struct Jwks {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct Jwk {
-    pub kty: String, // Key type (RSA, EC)
-    pub alg: String, // Algorithm (RS256, ES256)
-    pub use_: String, // public key use (sig)
-    pub kid: String, // Key ID
-    pub n: Option<String>, // RSA modulus
-    pub e: Option<String>, // RSA exponent
-    pub x: Option<String>, // EC x coordinate
-    pub y: Option<String>, // EC y coordinate
+    pub kty: String,         // Key type (RSA, EC)
+    pub alg: String,         // Algorithm (RS256, ES256)
+    pub use_: String,        // public key use (sig)
+    pub kid: String,         // Key ID
+    pub n: Option<String>,   // RSA modulus
+    pub e: Option<String>,   // RSA exponent
+    pub x: Option<String>,   // EC x coordinate
+    pub y: Option<String>,   // EC y coordinate
     pub crv: Option<String>, // EC curve
 }
 

@@ -1,7 +1,8 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreatePlanRequest, Plan, PlanResponse, UpdatePlanRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{CreatePlanRequest, Plan, PlanResponse, UpdatePlanRequest};
 
 pub struct PlanService;
 

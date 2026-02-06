@@ -1,12 +1,14 @@
-use crate::error::{AppError, AppResult};
-use crate::models::{CreateUserRequest, UpdateUserRequest, User, UserListResponse, UserQuery, UserResponse};
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
+use argon2::Argon2;
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use chrono::Utc;
 use sqlx::{Pool, Postgres};
 use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::models::{
+    CreateUserRequest, UpdateUserRequest, User, UserListResponse, UserQuery, UserResponse,
+};
 
 #[derive(Clone)]
 pub struct UserService {
@@ -102,7 +104,10 @@ impl UserService {
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-                AppError::Conflict(format!("User '{}' already exists in organization '{}'", req.name, req.owner))
+                AppError::Conflict(format!(
+                    "User '{}' already exists in organization '{}'",
+                    req.name, req.owner
+                ))
             }
             _ => AppError::Database(e),
         })?;
@@ -111,25 +116,23 @@ impl UserService {
     }
 
     pub async fn get_by_id(&self, id: &str) -> AppResult<UserResponse> {
-        let user = sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
+        let user =
+            sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
 
         Ok(user.into())
     }
 
     pub async fn get_by_id_internal(&self, id: &str) -> AppResult<User> {
-        let user = sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
+        let user =
+            sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
 
         Ok(user)
     }
@@ -201,11 +204,10 @@ impl UserService {
             .fetch_all(&self.pool)
             .await?;
 
-            let total: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM users WHERE is_deleted = FALSE",
-            )
-            .fetch_one(&self.pool)
-            .await?;
+            let total: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_deleted = FALSE")
+                    .fetch_one(&self.pool)
+                    .await?;
 
             (users, total.0)
         };
@@ -219,51 +221,122 @@ impl UserService {
     }
 
     pub async fn update(&self, id: &str, req: UpdateUserRequest) -> AppResult<UserResponse> {
-        let mut user = sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
+        let mut user =
+            sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
 
         // Apply partial updates
-        if let Some(v) = req.display_name { user.display_name = v; }
-        if let Some(v) = req.email { user.email = Some(v); }
-        if let Some(v) = req.phone { user.phone = Some(v); }
-        if let Some(v) = req.avatar { user.avatar = Some(v); }
-        if let Some(v) = req.is_admin { user.is_admin = v; }
-        if let Some(v) = req.first_name { user.first_name = Some(v); }
-        if let Some(v) = req.last_name { user.last_name = Some(v); }
-        if let Some(v) = req.avatar_type { user.avatar_type = Some(v); }
-        if let Some(v) = req.permanent_avatar { user.permanent_avatar = Some(v); }
-        if let Some(v) = req.country_code { user.country_code = Some(v); }
-        if let Some(v) = req.region { user.region = Some(v); }
-        if let Some(v) = req.location { user.location = Some(v); }
-        if let Some(v) = req.address { user.address = Some(v); }
-        if let Some(v) = req.affiliation { user.affiliation = Some(v); }
-        if let Some(v) = req.title { user.title = Some(v); }
-        if let Some(v) = req.homepage { user.homepage = Some(v); }
-        if let Some(v) = req.bio { user.bio = Some(v); }
-        if let Some(v) = req.id_card_type { user.id_card_type = Some(v); }
-        if let Some(v) = req.id_card { user.id_card = Some(v); }
-        if let Some(v) = req.real_name { user.real_name = Some(v); }
-        if let Some(v) = req.tag { user.tag = Some(v); }
-        if let Some(v) = req.language { user.language = Some(v); }
-        if let Some(v) = req.gender { user.gender = Some(v); }
-        if let Some(v) = req.birthday { user.birthday = Some(v); }
-        if let Some(v) = req.education { user.education = Some(v); }
-        if let Some(v) = req.score { user.score = v; }
-        if let Some(v) = req.karma { user.karma = v; }
-        if let Some(v) = req.is_forbidden { user.is_forbidden = v; }
-        if let Some(v) = req.is_verified { user.is_verified = v; }
-        if let Some(v) = req.signup_application { user.signup_application = Some(v); }
-        if let Some(v) = req.properties { user.properties = Some(v); }
-        if let Some(v) = req.custom { user.custom = Some(v); }
-        if let Some(v) = req.groups { user.groups = Some(v); }
-        if let Some(v) = req.managed_accounts { user.managed_accounts = Some(v); }
-        if let Some(v) = req.ip_whitelist { user.ip_whitelist = Some(v); }
-        if let Some(v) = req.need_update_password { user.need_update_password = v; }
+        if let Some(v) = req.display_name {
+            user.display_name = v;
+        }
+        if let Some(v) = req.email {
+            user.email = Some(v);
+        }
+        if let Some(v) = req.phone {
+            user.phone = Some(v);
+        }
+        if let Some(v) = req.avatar {
+            user.avatar = Some(v);
+        }
+        if let Some(v) = req.is_admin {
+            user.is_admin = v;
+        }
+        if let Some(v) = req.first_name {
+            user.first_name = Some(v);
+        }
+        if let Some(v) = req.last_name {
+            user.last_name = Some(v);
+        }
+        if let Some(v) = req.avatar_type {
+            user.avatar_type = Some(v);
+        }
+        if let Some(v) = req.permanent_avatar {
+            user.permanent_avatar = Some(v);
+        }
+        if let Some(v) = req.country_code {
+            user.country_code = Some(v);
+        }
+        if let Some(v) = req.region {
+            user.region = Some(v);
+        }
+        if let Some(v) = req.location {
+            user.location = Some(v);
+        }
+        if let Some(v) = req.address {
+            user.address = Some(v);
+        }
+        if let Some(v) = req.affiliation {
+            user.affiliation = Some(v);
+        }
+        if let Some(v) = req.title {
+            user.title = Some(v);
+        }
+        if let Some(v) = req.homepage {
+            user.homepage = Some(v);
+        }
+        if let Some(v) = req.bio {
+            user.bio = Some(v);
+        }
+        if let Some(v) = req.id_card_type {
+            user.id_card_type = Some(v);
+        }
+        if let Some(v) = req.id_card {
+            user.id_card = Some(v);
+        }
+        if let Some(v) = req.real_name {
+            user.real_name = Some(v);
+        }
+        if let Some(v) = req.tag {
+            user.tag = Some(v);
+        }
+        if let Some(v) = req.language {
+            user.language = Some(v);
+        }
+        if let Some(v) = req.gender {
+            user.gender = Some(v);
+        }
+        if let Some(v) = req.birthday {
+            user.birthday = Some(v);
+        }
+        if let Some(v) = req.education {
+            user.education = Some(v);
+        }
+        if let Some(v) = req.score {
+            user.score = v;
+        }
+        if let Some(v) = req.karma {
+            user.karma = v;
+        }
+        if let Some(v) = req.is_forbidden {
+            user.is_forbidden = v;
+        }
+        if let Some(v) = req.is_verified {
+            user.is_verified = v;
+        }
+        if let Some(v) = req.signup_application {
+            user.signup_application = Some(v);
+        }
+        if let Some(v) = req.properties {
+            user.properties = Some(v);
+        }
+        if let Some(v) = req.custom {
+            user.custom = Some(v);
+        }
+        if let Some(v) = req.groups {
+            user.groups = Some(v);
+        }
+        if let Some(v) = req.managed_accounts {
+            user.managed_accounts = Some(v);
+        }
+        if let Some(v) = req.ip_whitelist {
+            user.ip_whitelist = Some(v);
+        }
+        if let Some(v) = req.need_update_password {
+            user.need_update_password = v;
+        }
         if let Some(password) = req.password {
             user.password_hash = Self::hash_password(&password)?;
         }
@@ -340,14 +413,22 @@ impl UserService {
         .await?;
 
         if result.rows_affected() == 0 {
-            return Err(AppError::NotFound(format!("User with id '{}' not found", id)));
+            return Err(AppError::NotFound(format!(
+                "User with id '{}' not found",
+                id
+            )));
         }
 
         Ok(())
     }
 
     /// Update sign-in tracking fields after login attempt
-    pub async fn update_signin_tracking(&self, id: &str, success: bool, ip: Option<&str>) -> AppResult<()> {
+    pub async fn update_signin_tracking(
+        &self,
+        id: &str,
+        success: bool,
+        ip: Option<&str>,
+    ) -> AppResult<()> {
         let now = Utc::now().to_rfc3339();
         if success {
             sqlx::query(
@@ -392,7 +473,12 @@ impl UserService {
     }
 
     /// Link a social provider to a user
-    pub async fn link_provider(&self, id: &str, provider_name: &str, provider_user_id: &str) -> AppResult<()> {
+    pub async fn link_provider(
+        &self,
+        id: &str,
+        provider_name: &str,
+        provider_user_id: &str,
+    ) -> AppResult<()> {
         sqlx::query(
             r#"
             UPDATE users SET

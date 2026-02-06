@@ -1,9 +1,10 @@
+use sqlx::PgPool;
+use uuid::Uuid;
+
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateSubscriptionRequest, Subscription, SubscriptionResponse, UpdateSubscriptionRequest,
 };
-use sqlx::PgPool;
-use uuid::Uuid;
 
 pub struct SubscriptionService;
 
@@ -62,10 +63,7 @@ impl SubscriptionService {
                 .await?
         };
 
-        Ok((
-            subscriptions.into_iter().map(|s| s.into()).collect(),
-            total,
-        ))
+        Ok((subscriptions.into_iter().map(|s| s.into()).collect(), total))
     }
 
     pub async fn get_by_id(pool: &PgPool, id: &str) -> AppResult<SubscriptionResponse> {

@@ -1,11 +1,13 @@
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+
 use crate::error::{AppError, AppResult};
 use crate::services::providers::payment_provider::{
     NotifyResult, PayRequest, PayResponse, PaymentProvider,
 };
-use async_trait::async_trait;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Stripe payment provider
 pub struct StripePaymentProvider {
@@ -125,9 +127,10 @@ impl PaymentProvider for StripePaymentProvider {
             )));
         }
 
-        let session: CheckoutSession = response.json().await.map_err(|e| {
-            AppError::Internal(format!("Failed to parse Stripe response: {}", e))
-        })?;
+        let session: CheckoutSession = response
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to parse Stripe response: {}", e)))?;
 
         let pay_url = session
             .url

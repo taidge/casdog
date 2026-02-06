@@ -1,5 +1,6 @@
-use crate::error::{AppError, AppResult};
 use async_trait::async_trait;
+
+use crate::error::{AppError, AppResult};
 
 /// Trait for CAPTCHA verification providers
 #[async_trait]
@@ -22,10 +23,7 @@ impl ReCaptchaProvider {
 impl CaptchaProviderTrait for ReCaptchaProvider {
     async fn verify(&self, token: &str, remote_ip: Option<&str>) -> AppResult<bool> {
         let client = reqwest::Client::new();
-        let mut params = vec![
-            ("secret", self.secret_key.as_str()),
-            ("response", token),
-        ];
+        let mut params = vec![("secret", self.secret_key.as_str()), ("response", token)];
         if let Some(ip) = remote_ip {
             params.push(("remoteip", ip));
         }
@@ -61,10 +59,7 @@ impl HCaptchaProvider {
 impl CaptchaProviderTrait for HCaptchaProvider {
     async fn verify(&self, token: &str, remote_ip: Option<&str>) -> AppResult<bool> {
         let client = reqwest::Client::new();
-        let mut params = vec![
-            ("secret", self.secret_key.as_str()),
-            ("response", token),
-        ];
+        let mut params = vec![("secret", self.secret_key.as_str()), ("response", token)];
         if let Some(ip) = remote_ip {
             params.push(("remoteip", ip));
         }
@@ -125,10 +120,7 @@ impl CaptchaProviderTrait for TurnstileProvider {
 }
 
 /// Factory to create a captcha provider from provider record
-pub fn create_captcha_provider(
-    sub_type: &str,
-    secret_key: &str,
-) -> Box<dyn CaptchaProviderTrait> {
+pub fn create_captcha_provider(sub_type: &str, secret_key: &str) -> Box<dyn CaptchaProviderTrait> {
     match sub_type {
         "reCAPTCHA" | "recaptcha" => Box::new(ReCaptchaProvider::new(secret_key.to_string())),
         "hCaptcha" | "hcaptcha" => Box::new(HCaptchaProvider::new(secret_key.to_string())),

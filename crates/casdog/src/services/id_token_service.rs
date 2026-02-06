@@ -1,10 +1,11 @@
+use chrono::{Duration, Utc};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::models::Certificate;
-use chrono::{Duration, Utc};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IdTokenClaims {
@@ -50,17 +51,21 @@ impl IdTokenService {
         let issuer = format!("http://{}:{}", config.server.host, config.server.port);
 
         // Fetch user details
-        let user: Option<(String, String, Option<String>, Option<String>, Option<String>)> =
-            sqlx::query_as(
-                "SELECT id, name, email, phone, avatar FROM users WHERE id = $1 AND is_deleted = FALSE",
-            )
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
+        let user: Option<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT id, name, email, phone, avatar FROM users WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
 
-        let (uid, uname, email, phone, avatar) = user.unwrap_or_else(|| {
-            (user_id.to_string(), user_name.to_string(), None, None, None)
-        });
+        let (uid, uname, email, phone, avatar) =
+            user.unwrap_or_else(|| (user_id.to_string(), user_name.to_string(), None, None, None));
 
         let now = Utc::now();
         let exp = now + Duration::hours(config.jwt.expiration_hours);
@@ -92,15 +97,13 @@ impl IdTokenService {
 
         // Try to find a certificate for signing
         let cert = if let Some(cert_name) = cert_name {
-            sqlx::query_as::<_, Certificate>(
-                "SELECT * FROM certificates WHERE name = $1"
-            )
-            .bind(cert_name)
-            .fetch_optional(pool)
-            .await?
+            sqlx::query_as::<_, Certificate>("SELECT * FROM certificates WHERE name = $1")
+                .bind(cert_name)
+                .fetch_optional(pool)
+                .await?
         } else {
             sqlx::query_as::<_, Certificate>(
-                "SELECT * FROM certificates WHERE scope = 'JWT' ORDER BY created_at DESC LIMIT 1"
+                "SELECT * FROM certificates WHERE scope = 'JWT' ORDER BY created_at DESC LIMIT 1",
             )
             .fetch_optional(pool)
             .await?

@@ -1,8 +1,9 @@
+use async_trait::async_trait;
+
 use crate::error::{AppError, AppResult};
 use crate::services::providers::payment_provider::{
     NotifyResult, PayRequest, PayResponse, PaymentProvider,
 };
-use async_trait::async_trait;
 
 /// Internal balance payment provider
 /// This provider deducts payment from the user's internal balance
