@@ -467,7 +467,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "casdog-server"
+name = "casdog"
 version = "0.1.0"
 dependencies = [
  "argon2",
@@ -476,11 +476,13 @@ dependencies = [
  "casbin",
  "chrono",
  "config",
+ "hex",
  "jsonwebtoken 9.3.1",
  "lettre",
  "once_cell",
  "p256",
  "rand 0.8.5",
+ "regex",
  "reqwest 0.12.28",
  "rsa",
  "rust-embed",

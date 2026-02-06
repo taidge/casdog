@@ -1,0 +1,50 @@
+[package]
+name = "casdog"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Casdog IAM/SSO server - Casdoor-compatible identity and access management"
+
+[[bin]]
+name = "casdog"
+path = "src/main.rs"
+
+[dependencies]
+salvo.workspace = true
+rust-embed.workspace = true
+sqlx.workspace = true
+jsonwebtoken.workspace = true
+argon2.workspace = true
+casbin.workspace = true
+sqlx-adapter.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+config.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+once_cell.workspace = true
+rand.workspace = true
+base64.workspace = true
+urlencoding.workspace = true
+regex.workspace = true
+hex.workspace = true
+
+async-trait.workspace = true
+rsa.workspace = true
+p256.workspace = true
+sha2.workspace = true
+reqwest.workspace = true
+lettre.workspace = true
+totp-rs.workspace = true
+webauthn-rs.workspace = true
+webauthn-rs-proto.workspace = true
+
+[dev-dependencies]

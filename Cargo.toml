@@ -1,27 +1,37 @@
 [workspace]
-resolver = "2"
-members = [
-    "crates/server",
-]
+resolver = "3"
+members = ["crates/casdog"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Casdog Team"]
 license = "MIT"
-repository = "https://github.com/nichetool/casdog"
-homepage = "https://github.com/nichetool/casdog"
-rust-version = "1.80"
+repository = "https://github.com/taidge/casdog"
+homepage = "https://github.com/taidge/casdog"
+rust-version = "1.93"
 
 [workspace.dependencies]
 # Web framework
-salvo = { version = "0.89", features = ["oapi", "jwt-auth", "cors", "logging", "affix-state", "serve-static"] }
+salvo = { version = "0.89", features = [
+    "oapi",
+    "jwt-auth",
+    "cors",
+    "logging",
+    "affix-state",
+    "serve-static",
+] }
 
 # Embed static files
 rust-embed = "8"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "postgres",
+    "chrono",
+    "uuid",
+] }
 
 # Authentication & Security
 jsonwebtoken = "9"
@@ -29,7 +39,10 @@ argon2 = "0.5"
 
 # Casbin for authorization
 casbin = "2"
-sqlx-adapter = { version = "1", default-features = false, features = ["postgres", "runtime-tokio"] }
+sqlx-adapter = { version = "1", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -50,6 +63,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 rand = "0.8"
 base64 = "0.22"
+regex = "1"
+hex = "0.4"
 
 # Async trait
 async-trait = "0.1"
@@ -66,11 +81,18 @@ sha2 = "0.10"
 reqwest = { version = "0.12", features = ["json"] }
 
 # Email
-lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "smtp-transport", "builder"] }
+lettre = { version = "0.11", default-features = false, features = [
+    "tokio1",
+    "tokio1-rustls-tls",
+    "smtp-transport",
+    "builder",
+] }
 
 # TOTP
 totp-rs = { version = "5", features = ["qr", "gen_secret"] }
 
 # WebAuthn
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs = { version = "0.5", features = [
+    "danger-allow-state-serialisation",
+] }
 webauthn-rs-proto = "0.5"
