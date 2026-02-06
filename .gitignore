@@ -33,6 +33,7 @@ flycheck*
 # Frontend (Vite/React) in web/
 web/node_modules/
 web/dist/
+crates/casdog/web-dist/
 web/.vite/
 web/.cache/
 web/coverage/

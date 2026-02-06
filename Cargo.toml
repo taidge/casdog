@@ -23,7 +23,7 @@ salvo = { version = "0.89", features = [
 ] }
 
 # Embed static files
-rust-embed = "8"
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 
 # Database
 sqlx = { version = "0.8", features = [

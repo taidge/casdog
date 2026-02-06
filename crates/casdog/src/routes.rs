@@ -13,7 +13,7 @@ use crate::handlers::{
 use crate::middleware::JwtAuth;
 
 #[derive(Embed)]
-#[folder = "../../web/dist"]
+#[folder = "$CASDOG_WEB_DIST"]
 struct Assets;
 
 pub fn create_router() -> Router {
