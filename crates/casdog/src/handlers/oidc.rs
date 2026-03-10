@@ -4,15 +4,25 @@ use sqlx::{Pool, Postgres};
 
 use crate::config::AppConfig;
 use crate::models::{
-    Certificate, Jwks, OidcDiscovery, UserinfoResponse, WebfingerLink, WebfingerResponse,
+    Certificate, Jwks, OauthProtectedResourceMetadata, OidcDiscovery, UserinfoResponse,
+    WebfingerLink, WebfingerResponse,
 };
 use crate::services::CertService;
+
+fn issuer_for(application: Option<&str>) -> String {
+    let config = AppConfig::get();
+    let issuer = format!("http://{}:{}", config.server.host, config.server.port);
+    if let Some(application) = application {
+        format!("{issuer}/.well-known/{application}")
+    } else {
+        issuer
+    }
+}
 
 /// OpenID Connect Discovery endpoint
 #[endpoint(tags("oidc"), summary = "OpenID Connect Discovery")]
 pub async fn openid_configuration() -> Json<OidcDiscovery> {
-    let config = AppConfig::get();
-    let issuer = format!("http://{}:{}", config.server.host, config.server.port);
+    let issuer = issuer_for(None);
     Json(OidcDiscovery::new(&issuer))
 }
 
@@ -22,10 +32,10 @@ pub async fn openid_configuration() -> Json<OidcDiscovery> {
     summary = "Application-specific OpenID Connect Discovery"
 )]
 pub async fn app_openid_configuration(
-    _application: salvo::oapi::extract::PathParam<String>,
+    application: salvo::oapi::extract::PathParam<String>,
 ) -> Json<OidcDiscovery> {
-    let config = AppConfig::get();
-    let issuer = format!("http://{}:{}", config.server.host, config.server.port);
+    let application = application.into_inner();
+    let issuer = issuer_for(Some(&application));
     Json(OidcDiscovery::new(&issuer))
 }
 
@@ -103,8 +113,7 @@ pub async fn app_jwks(
 /// WebFinger endpoint for discovery
 #[endpoint(tags("oidc"), summary = "WebFinger")]
 pub async fn webfinger(resource: QueryParam<String, true>) -> Json<WebfingerResponse> {
-    let config = AppConfig::get();
-    let issuer = format!("http://{}:{}", config.server.host, config.server.port);
+    let issuer = issuer_for(None);
 
     Json(WebfingerResponse {
         subject: resource.into_inner(),
@@ -112,6 +121,90 @@ pub async fn webfinger(resource: QueryParam<String, true>) -> Json<WebfingerResp
             rel: "http://openid.net/specs/connect/1.0/issuer".to_string(),
             href: issuer,
         }],
+    })
+}
+
+/// Application-specific WebFinger endpoint for discovery.
+#[endpoint(tags("oidc"), summary = "Application-specific WebFinger")]
+pub async fn app_webfinger(
+    application: salvo::oapi::extract::PathParam<String>,
+    resource: QueryParam<String, true>,
+) -> Json<WebfingerResponse> {
+    let application = application.into_inner();
+    let issuer = issuer_for(Some(&application));
+
+    Json(WebfingerResponse {
+        subject: resource.into_inner(),
+        links: vec![WebfingerLink {
+            rel: "http://openid.net/specs/connect/1.0/issuer".to_string(),
+            href: issuer,
+        }],
+    })
+}
+
+/// OAuth 2.0 Authorization Server Metadata (RFC 8414).
+#[endpoint(tags("oauth"), summary = "OAuth authorization server metadata")]
+pub async fn oauth_server_metadata() -> Json<OidcDiscovery> {
+    let issuer = issuer_for(None);
+    Json(OidcDiscovery::new(&issuer))
+}
+
+/// Application-specific OAuth 2.0 Authorization Server Metadata (RFC 8414).
+#[endpoint(
+    tags("oauth"),
+    summary = "Application-specific OAuth authorization server metadata"
+)]
+pub async fn app_oauth_server_metadata(
+    application: salvo::oapi::extract::PathParam<String>,
+) -> Json<OidcDiscovery> {
+    let application = application.into_inner();
+    let issuer = issuer_for(Some(&application));
+    Json(OidcDiscovery::new(&issuer))
+}
+
+/// OAuth 2.0 Protected Resource Metadata (RFC 9728).
+#[endpoint(tags("oauth"), summary = "OAuth protected resource metadata")]
+pub async fn oauth_protected_resource_metadata() -> Json<OauthProtectedResourceMetadata> {
+    let issuer = issuer_for(None);
+    Json(OauthProtectedResourceMetadata {
+        resource: issuer.clone(),
+        authorization_servers: vec![issuer],
+        bearer_methods_supported: vec!["header".to_string()],
+        scopes_supported: vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+            "read".to_string(),
+            "write".to_string(),
+        ],
+        resource_signing_alg_values_supported: vec!["RS256".to_string()],
+        resource_documentation: None,
+    })
+}
+
+/// Application-specific OAuth 2.0 Protected Resource Metadata (RFC 9728).
+#[endpoint(
+    tags("oauth"),
+    summary = "Application-specific OAuth protected resource metadata"
+)]
+pub async fn app_oauth_protected_resource_metadata(
+    application: salvo::oapi::extract::PathParam<String>,
+) -> Json<OauthProtectedResourceMetadata> {
+    let application = application.into_inner();
+    let resource = issuer_for(Some(&application));
+    Json(OauthProtectedResourceMetadata {
+        resource: resource.clone(),
+        authorization_servers: vec![resource],
+        bearer_methods_supported: vec!["header".to_string()],
+        scopes_supported: vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+            "read".to_string(),
+            "write".to_string(),
+        ],
+        resource_signing_alg_values_supported: vec!["RS256".to_string()],
+        resource_documentation: None,
     })
 }
 

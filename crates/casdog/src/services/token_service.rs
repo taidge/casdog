@@ -163,6 +163,44 @@ impl TokenService {
         Ok(())
     }
 
+    pub async fn persist_issued_access_token(
+        pool: &PgPool,
+        owner: &str,
+        name: &str,
+        application: &str,
+        organization: &str,
+        user_id: &str,
+        access_token: &str,
+        expires_in: i64,
+        scope: Option<&str>,
+    ) -> AppResult<TokenResponse> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let scope = scope.unwrap_or("openid profile");
+
+        let token = sqlx::query_as::<_, Token>(
+            r#"INSERT INTO tokens (
+                id, owner, name, created_at, application, organization, user_id,
+                access_token, expires_in, scope, token_type, code_is_used
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Bearer', false)
+            RETURNING *"#,
+        )
+        .bind(&id)
+        .bind(owner)
+        .bind(name)
+        .bind(now)
+        .bind(application)
+        .bind(organization)
+        .bind(user_id)
+        .bind(access_token)
+        .bind(expires_in)
+        .bind(scope)
+        .fetch_one(pool)
+        .await?;
+
+        Ok(token.into())
+    }
+
     pub async fn delete_by_user(pool: &PgPool, user_id: &str) -> AppResult<u64> {
         let result = sqlx::query("DELETE FROM tokens WHERE user_id = $1")
             .bind(user_id)

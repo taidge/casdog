@@ -42,9 +42,9 @@ const PUBLIC_EXACT: &[&str] = &[
     "/api/get-app-login",
 ];
 
-/// Comprehensive authorization filter middleware.
+/// Comprehensive authorization filter hoop.
 ///
-/// Based on Casdoor's `routers/authz_filter.go` (`ApiFilter`), this middleware:
+/// Based on Casdoor's `routers/authz_filter.go` (`ApiFilter`), this hoop:
 ///
 /// 1. Extracts the subject identity from multiple sources (JWT in depot, Basic Auth,
 ///    clientId/clientSecret query params, accessKey/accessSecret query params, or anonymous).
@@ -208,7 +208,7 @@ fn is_public_path(path: &str) -> bool {
 /// Extracts the subject (owner, name) from the depot or request.
 ///
 /// Priority order:
-/// 1. JWT claims already in depot (set by JwtAuth middleware)
+/// 1. JWT claims already in depot (set by the JwtAuth hoop)
 /// 2. ClientId + ClientSecret from Basic Auth header or query params
 /// 3. AccessKey + AccessSecret from query params
 /// 4. Falls back to ("anonymous", "anonymous")
@@ -339,7 +339,7 @@ fn extract_object(req: &Request, path: &str, method: &str) -> (String, String) {
             }
         }
 
-        // For body-based extraction, we cannot consume the body in middleware
+        // For body-based extraction, we cannot consume the body in a hoop
         // without breaking downstream handlers. Use query params as the primary source.
         // The owner/name can also come from the URL path for RESTful routes.
 

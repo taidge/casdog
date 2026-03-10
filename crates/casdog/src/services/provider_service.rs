@@ -2,7 +2,7 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::models::{CreateProviderRequest, Provider, ProviderResponse, UpdateProviderRequest};
 
 pub struct ProviderService;
@@ -57,6 +57,15 @@ impl ProviderService {
             .fetch_one(pool)
             .await?;
         Ok(provider.into())
+    }
+
+    pub async fn get_by_id_internal(pool: &PgPool, id: &str) -> AppResult<Provider> {
+        let provider = sqlx::query_as::<_, Provider>("SELECT * FROM providers WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Provider '{}' not found", id)))?;
+        Ok(provider)
     }
 
     pub async fn create(pool: &PgPool, req: CreateProviderRequest) -> AppResult<ProviderResponse> {

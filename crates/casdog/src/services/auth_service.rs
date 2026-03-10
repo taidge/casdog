@@ -17,6 +17,16 @@ pub struct Claims {
     pub owner: String,
     pub name: String,
     pub is_admin: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impersonator_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impersonator_owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impersonator_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impersonation_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impersonation_application: Option<String>,
     pub exp: i64,
     pub iat: i64,
     pub iss: String,
@@ -454,19 +464,31 @@ impl AuthService {
     }
 
     pub fn generate_token(&self, user: &UserResponse) -> AppResult<String> {
+        let claims = self.claims_for_user(user);
+        self.generate_token_from_claims(&claims)
+    }
+
+    pub fn claims_for_user(&self, user: &UserResponse) -> Claims {
         let now = Utc::now();
         let exp = now + Duration::hours(self.jwt_expiration_hours);
 
-        let claims = Claims {
+        Claims {
             sub: user.id.clone(),
             owner: user.owner.clone(),
             name: user.name.clone(),
             is_admin: user.is_admin,
+            impersonator_user_id: None,
+            impersonator_owner: None,
+            impersonator_name: None,
+            impersonation_session_id: None,
+            impersonation_application: None,
             exp: exp.timestamp(),
             iat: now.timestamp(),
             iss: self.jwt_issuer.clone(),
-        };
+        }
+    }
 
+    pub fn generate_token_from_claims(&self, claims: &Claims) -> AppResult<String> {
         let token = encode(
             &Header::default(),
             &claims,
@@ -474,6 +496,14 @@ impl AuthService {
         )?;
 
         Ok(token)
+    }
+
+    pub fn expires_in_seconds(&self) -> i64 {
+        self.jwt_expiration_hours * 3600
+    }
+
+    pub fn expiration_hours(&self) -> i64 {
+        self.jwt_expiration_hours
     }
 
     pub fn verify_token(&self, token: &str) -> AppResult<Claims> {

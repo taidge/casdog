@@ -1,7 +1,7 @@
 mod config;
 mod error;
 mod handlers;
-mod middleware;
+mod hoops;
 mod models;
 mod routes;
 mod services;
@@ -16,6 +16,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::AppConfig;
+use crate::services::syncer_executor::SyncerExecutor;
 use crate::services::{CasbinService, InitService};
 
 #[tokio::main]
@@ -53,6 +54,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let casbin_service = CasbinService::new().await?;
     tracing::info!("Casbin authorization service initialized");
 
+    let syncer_pool = pool.clone();
+    tokio::spawn(async move {
+        SyncerExecutor::start_scheduler(syncer_pool, tokio::time::Duration::from_secs(60)).await;
+    });
+
     let cors = Cors::new()
         .allow_origin("*")
         .allow_methods(vec![
@@ -71,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .hoop(Logger::new())
         .hoop(cors)
         .hoop(AffixList::new().inject(pool).inject(casbin_service))
-        .hoop(middleware::RecordFilter);
+        .hoop(hoops::RecordFilter);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     tracing::info!("Server listening on http://{}", addr);

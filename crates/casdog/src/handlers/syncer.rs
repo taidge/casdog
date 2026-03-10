@@ -94,10 +94,12 @@ pub async fn run_syncer(
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
-    SyncerService::run_sync(&pool, &id).await?;
+    let result = SyncerService::run_sync(&pool, &id).await?;
 
     Ok(Json(serde_json::json!({
-        "status": "ok",
-        "msg": "Sync completed"
+        "status": if result.success { "ok" } else { "error" },
+        "msg": result.message,
+        "syncerId": result.syncer_id,
+        "recordsSynced": result.records_synced
     })))
 }

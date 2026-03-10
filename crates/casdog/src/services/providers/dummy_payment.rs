@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::collections::HashMap;
 
 use crate::error::AppResult;
 use crate::services::providers::payment_provider::{
@@ -48,14 +49,26 @@ impl PaymentProvider for DummyPaymentProvider {
         })
     }
 
-    async fn notify(&self, _body: &[u8], order_id: &str) -> AppResult<NotifyResult> {
+    async fn notify(
+        &self,
+        _body: &[u8],
+        _headers: &HashMap<String, String>,
+        expected_order_id: Option<&str>,
+    ) -> AppResult<NotifyResult> {
         // Always return success
-        tracing::info!("Dummy payment notification: order_id={}", order_id);
+        tracing::info!(
+            "Dummy payment notification: order_id={}",
+            expected_order_id.unwrap_or_default()
+        );
 
         Ok(NotifyResult {
-            order_id: order_id.to_string(),
+            order_id: expected_order_id.unwrap_or_default().to_string(),
             payment_status: "Paid".to_string(),
             payment_name: "Dummy".to_string(),
+            amount: None,
+            currency: None,
+            invoice_url: None,
+            raw_state: Some("paid".to_string()),
         })
     }
 

@@ -32,6 +32,19 @@ pub struct CreateRecordRequest {
     pub object: Option<String>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateRecordRequest {
+    pub owner: String,
+    pub name: String,
+    pub organization: Option<String>,
+    pub client_ip: Option<String>,
+    pub user: Option<String>,
+    pub method: String,
+    pub request_uri: String,
+    pub action: String,
+    pub object: Option<String>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RecordResponse {
     pub id: String,

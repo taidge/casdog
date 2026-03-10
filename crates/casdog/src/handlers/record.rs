@@ -3,7 +3,9 @@ use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{RecordFilterRequest, RecordResponse};
+use crate::models::{
+    CreateRecordRequest, RecordFilterRequest, RecordResponse, UpdateRecordRequest,
+};
 use crate::services::RecordService;
 
 #[endpoint(tags("records"), summary = "List records")]
@@ -67,6 +69,35 @@ pub async fn get_record(
         .clone();
 
     let record = RecordService::get_by_id(&pool, &id).await?;
+    Ok(Json(record))
+}
+
+#[endpoint(tags("records"), summary = "Create record")]
+pub async fn create_record(
+    depot: &mut Depot,
+    body: JsonBody<CreateRecordRequest>,
+) -> AppResult<Json<RecordResponse>> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
+
+    let record = RecordService::create(&pool, body.into_inner()).await?;
+    Ok(Json(record))
+}
+
+#[endpoint(tags("records"), summary = "Update record")]
+pub async fn update_record(
+    depot: &mut Depot,
+    id: PathParam<String>,
+    body: JsonBody<UpdateRecordRequest>,
+) -> AppResult<Json<RecordResponse>> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
+        .clone();
+
+    let record = RecordService::update(&pool, &id, body.into_inner()).await?;
     Ok(Json(record))
 }
 

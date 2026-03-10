@@ -13,7 +13,8 @@ pub struct Verification {
     #[sqlx(rename = "type")]
     #[serde(rename = "type")]
     pub verification_type: String, // email, phone
-    pub user: String,
+    #[sqlx(rename = "user_id")]
+    pub user_id: String,
     pub provider: String,
     pub receiver: String,
     pub code: String,
@@ -27,6 +28,10 @@ pub struct SendVerificationCodeRequest {
     pub dest: String, // email address or phone number
     pub application: Option<String>,
     pub check_user: Option<bool>,
+    pub provider: Option<String>,
+    pub method: Option<String>,
+    #[serde(rename = "countryCode")]
+    pub country_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -51,6 +56,7 @@ pub struct VerificationResponse {
     #[serde(rename = "type")]
     pub verification_type: String,
     pub user: String,
+    pub provider: String,
     pub receiver: String,
     pub is_used: bool,
 }
@@ -62,7 +68,8 @@ impl From<Verification> for VerificationResponse {
             owner: v.owner,
             created_at: v.created_at,
             verification_type: v.verification_type,
-            user: v.user,
+            user: v.user_id,
+            provider: v.provider,
             receiver: v.receiver,
             is_used: v.is_used,
         }
@@ -73,13 +80,20 @@ impl From<Verification> for VerificationResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CaptchaResponse {
     pub captcha_id: String,
-    pub captcha_image: String, // Base64 encoded image
+    pub captcha_image: Option<String>, // Base64 encoded image or local SVG data URI
+    pub external: bool,
+    pub provider: Option<String>,
+    pub captcha_type: Option<String>,
+    pub site_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct VerifyCaptchaRequest {
     pub captcha_id: String,
-    pub captcha_code: String,
+    pub captcha_code: Option<String>,
+    pub captcha_token: Option<String>,
+    pub application: Option<String>,
+    pub provider: Option<String>,
 }
 
 // Email/Phone retrieval

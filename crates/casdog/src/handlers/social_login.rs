@@ -1,6 +1,7 @@
+use salvo::oapi::extract::JsonBody;
 use salvo::oapi::{ToSchema, endpoint};
 use salvo::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres};
 
 use crate::error::{AppError, AppResult};
@@ -12,6 +13,14 @@ use crate::services::{AuthService, ProviderService, UserService};
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuthUrlResponse {
     pub url: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UnlinkRequest {
+    #[serde(rename = "providerType")]
+    pub provider_type: String,
+    #[serde(rename = "userId")]
+    pub user_id: Option<String>,
 }
 
 /// Get OAuth provider auth URL for redirect
@@ -284,6 +293,43 @@ pub async fn unlink_provider(
         .unlink_provider(&user_id, &provider_type)
         .await?;
     Ok("Provider unlinked successfully")
+}
+
+/// Casdoor-compatible unlink endpoint using a JSON body.
+#[endpoint(tags("Social Login"), summary = "Unlink provider")]
+pub async fn unlink_provider_compat(
+    depot: &mut Depot,
+    body: JsonBody<UnlinkRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let current_user_id = depot
+        .get::<String>("user_id")
+        .cloned()
+        .map_err(|_| AppError::Authentication("Not authenticated".to_string()))?;
+    let is_admin = depot.get::<bool>("is_admin").copied().unwrap_or(false);
+    let req = body.into_inner();
+    let target_user_id = req.user_id.unwrap_or_else(|| current_user_id.clone());
+
+    if target_user_id != current_user_id && !is_admin {
+        return Err(AppError::Authentication(
+            "Only admins can unlink providers for another user".to_string(),
+        ));
+    }
+
+    let user_service = UserService::new(pool);
+    user_service
+        .unlink_provider(&target_user_id, &req.provider_type)
+        .await?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "msg": "Provider unlinked successfully",
+        "userId": target_user_id,
+        "providerType": req.provider_type
+    })))
 }
 
 /// Find user by provider ID stored in the JSONB `provider_ids` field

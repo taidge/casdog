@@ -175,7 +175,7 @@ pub const RESOURCES: &[ResourceConfig] = &[
         label: "Records",
         group: "Automation",
         endpoint: "/api/records",
-        description: "Audit records collected from middleware and handlers.",
+        description: "Audit records collected from hoops and handlers.",
         template: r#"{}"#,
     },
     ResourceConfig {

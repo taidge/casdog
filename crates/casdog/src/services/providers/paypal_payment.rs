@@ -3,6 +3,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
 use crate::services::providers::payment_provider::{
@@ -15,6 +16,13 @@ pub struct PayPalPaymentProvider {
     client_id: String,
     client_secret: String,
     api_base: String,
+    webhook_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PayPalProviderMetadata {
+    #[serde(default, alias = "webhookId", alias = "webhook_id")]
+    webhook_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,23 +66,48 @@ struct Link {
 #[derive(Debug, Deserialize)]
 struct AccessTokenResponse {
     access_token: String,
-    expires_in: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct VerifyWebhookRequest<'a> {
+    auth_algo: &'a str,
+    cert_url: &'a str,
+    transmission_id: &'a str,
+    transmission_sig: &'a str,
+    transmission_time: &'a str,
+    webhook_id: &'a str,
+    webhook_event: &'a serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyWebhookResponse {
+    verification_status: String,
 }
 
 impl PayPalPaymentProvider {
     /// Create a new PayPal payment provider
-    pub fn new(client_id: String, client_secret: String, sandbox: String) -> Self {
+    pub fn new(
+        client_id: String,
+        client_secret: String,
+        sandbox: String,
+        metadata: Option<String>,
+    ) -> Self {
         let api_base = if sandbox.to_lowercase() == "sandbox" || sandbox.to_lowercase() == "true" {
             "https://api-m.sandbox.paypal.com".to_string()
         } else {
             "https://api-m.paypal.com".to_string()
         };
+        let webhook_id = metadata
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<PayPalProviderMetadata>(raw).ok())
+            .and_then(|parsed| parsed.webhook_id);
 
         Self {
             client: Client::new(),
             client_id,
             client_secret,
             api_base,
+            webhook_id,
         }
     }
 
@@ -114,6 +147,88 @@ impl PayPalPaymentProvider {
         })?;
 
         Ok(token_response.access_token)
+    }
+
+    async fn verify_signature(
+        &self,
+        headers: &HashMap<String, String>,
+        webhook_event: &serde_json::Value,
+    ) -> AppResult<()> {
+        let Some(webhook_id) = self.webhook_id.as_deref() else {
+            return Ok(());
+        };
+
+        let transmission_id = headers.get("paypal-transmission-id").ok_or_else(|| {
+            AppError::Authentication("Missing PayPal transmission id".to_string())
+        })?;
+        let transmission_time = headers.get("paypal-transmission-time").ok_or_else(|| {
+            AppError::Authentication("Missing PayPal transmission time".to_string())
+        })?;
+        let transmission_sig = headers.get("paypal-transmission-sig").ok_or_else(|| {
+            AppError::Authentication("Missing PayPal transmission signature".to_string())
+        })?;
+        let cert_url = headers.get("paypal-cert-url").ok_or_else(|| {
+            AppError::Authentication("Missing PayPal certificate URL".to_string())
+        })?;
+        let auth_algo = headers
+            .get("paypal-auth-algo")
+            .ok_or_else(|| AppError::Authentication("Missing PayPal auth algorithm".to_string()))?;
+
+        let access_token = self.get_access_token().await?;
+        let url = format!(
+            "{}/v1/notifications/verify-webhook-signature",
+            self.api_base
+        );
+        let payload = VerifyWebhookRequest {
+            auth_algo,
+            cert_url,
+            transmission_id,
+            transmission_sig,
+            transmission_time,
+            webhook_id,
+            webhook_event,
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&access_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "PayPal signature verification request failed: {}",
+                    e
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(AppError::Authentication(format!(
+                "PayPal webhook verification failed with status {}: {}",
+                status, body
+            )));
+        }
+
+        let verification: VerifyWebhookResponse = response.json().await.map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to parse PayPal webhook verification response: {}",
+                e
+            ))
+        })?;
+        if verification.verification_status != "SUCCESS" {
+            return Err(AppError::Authentication(format!(
+                "PayPal webhook verification returned '{}'",
+                verification.verification_status
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -183,13 +298,16 @@ impl PaymentProvider for PayPalPaymentProvider {
         })
     }
 
-    async fn notify(&self, body: &[u8], order_id: &str) -> AppResult<NotifyResult> {
+    async fn notify(
+        &self,
+        body: &[u8],
+        headers: &HashMap<String, String>,
+        expected_order_id: Option<&str>,
+    ) -> AppResult<NotifyResult> {
         // Parse PayPal webhook event
-        let body_str = std::str::from_utf8(body)
-            .map_err(|e| AppError::Internal(format!("Invalid UTF-8 in webhook body: {}", e)))?;
-
-        let event: serde_json::Value = serde_json::from_str(body_str)
+        let event: serde_json::Value = serde_json::from_slice(body)
             .map_err(|e| AppError::Internal(format!("Failed to parse PayPal event: {}", e)))?;
+        self.verify_signature(headers, &event).await?;
 
         // Determine payment status based on event type
         let event_type = event["event_type"].as_str().unwrap_or("");
@@ -200,11 +318,41 @@ impl PaymentProvider for PayPalPaymentProvider {
             "CHECKOUT.ORDER.VOIDED" => "Failed",
             _ => "Pending",
         };
+        let provider_order_id = event["resource"]["supplementary_data"]["related_ids"]["order_id"]
+            .as_str()
+            .or_else(|| event["resource"]["id"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        if let Some(expected_order_id) = expected_order_id {
+            let matches_expected = provider_order_id == expected_order_id
+                || event["resource"]["supplementary_data"]["related_ids"]["capture_id"]
+                    .as_str()
+                    .map(|value| value == expected_order_id)
+                    .unwrap_or(false);
+            if !matches_expected {
+                return Err(AppError::Authentication(
+                    "PayPal webhook order reference does not match payment".to_string(),
+                ));
+            }
+        }
+
+        let amount = event["resource"]["amount"]["value"]
+            .as_str()
+            .or_else(|| event["resource"]["purchase_units"][0]["amount"]["value"].as_str())
+            .and_then(|value| value.parse::<f64>().ok());
+        let currency = event["resource"]["amount"]["currency_code"]
+            .as_str()
+            .or_else(|| event["resource"]["purchase_units"][0]["amount"]["currency_code"].as_str())
+            .map(ToOwned::to_owned);
 
         Ok(NotifyResult {
-            order_id: order_id.to_string(),
+            order_id: provider_order_id,
             payment_status: payment_status.to_string(),
             payment_name: "PayPal".to_string(),
+            amount,
+            currency,
+            invoice_url: None,
+            raw_state: Some(event_type.to_string()),
         })
     }
 

@@ -20,7 +20,7 @@ impl PaymentService {
                 r#"
                 SELECT id, owner, name, display_name, description, provider_id, payment_type,
                        product_id, product_name, user_id, amount, currency, state, message,
-                       invoice_url, return_url, is_deleted, created_at, updated_at
+                       out_order_id, pay_url, invoice_url, return_url, is_deleted, created_at, updated_at
                 FROM payments
                 WHERE owner = $1 AND is_deleted = false
                 ORDER BY created_at DESC
@@ -37,7 +37,7 @@ impl PaymentService {
                 r#"
                 SELECT id, owner, name, display_name, description, provider_id, payment_type,
                        product_id, product_name, user_id, amount, currency, state, message,
-                       invoice_url, return_url, is_deleted, created_at, updated_at
+                       out_order_id, pay_url, invoice_url, return_url, is_deleted, created_at, updated_at
                 FROM payments
                 WHERE is_deleted = false
                 ORDER BY created_at DESC
@@ -71,7 +71,7 @@ impl PaymentService {
             r#"
             SELECT id, owner, name, display_name, description, provider_id, payment_type,
                    product_id, product_name, user_id, amount, currency, state, message,
-                   invoice_url, return_url, is_deleted, created_at, updated_at
+                   out_order_id, pay_url, invoice_url, return_url, is_deleted, created_at, updated_at
             FROM payments
             WHERE id = $1 AND is_deleted = false
             "#,
@@ -92,10 +92,10 @@ impl PaymentService {
             r#"
             INSERT INTO payments (id, owner, name, display_name, description, provider_id,
                                   payment_type, product_id, product_name, user_id, amount,
-                                  currency, state, message, invoice_url, return_url,
-                                  is_deleted, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                    false, $17, $18)
+                                  currency, state, message, out_order_id, pay_url, invoice_url,
+                                  return_url, is_deleted, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                    $18, false, $19, $20)
             "#,
         )
         .bind(&id)
@@ -112,6 +112,8 @@ impl PaymentService {
         .bind(&req.currency.unwrap_or_else(|| "USD".to_string()))
         .bind(&req.state.unwrap_or_else(|| "created".to_string()))
         .bind(&req.message)
+        .bind(&req.out_order_id)
+        .bind(&req.pay_url)
         .bind(&req.invoice_url)
         .bind(&req.return_url)
         .bind(now)
@@ -143,10 +145,12 @@ impl PaymentService {
                 currency = COALESCE($9, currency),
                 state = COALESCE($10, state),
                 message = COALESCE($11, message),
-                invoice_url = COALESCE($12, invoice_url),
-                return_url = COALESCE($13, return_url),
-                updated_at = $14
-            WHERE id = $15 AND is_deleted = false
+                out_order_id = COALESCE($12, out_order_id),
+                pay_url = COALESCE($13, pay_url),
+                invoice_url = COALESCE($14, invoice_url),
+                return_url = COALESCE($15, return_url),
+                updated_at = $16
+            WHERE id = $17 AND is_deleted = false
             "#,
         )
         .bind(&req.display_name)
@@ -160,6 +164,8 @@ impl PaymentService {
         .bind(&req.currency)
         .bind(&req.state)
         .bind(&req.message)
+        .bind(&req.out_order_id)
+        .bind(&req.pay_url)
         .bind(&req.invoice_url)
         .bind(&req.return_url)
         .bind(now)

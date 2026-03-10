@@ -26,6 +26,27 @@ pub struct PrometheusInfoResponse {
     pub metrics: String,
 }
 
+fn build_system_info_response() -> SystemInfoResponse {
+    let version = env!("CARGO_PKG_VERSION").to_string();
+
+    let commit_id = std::env::var("CASDOG_COMMIT_ID").unwrap_or_else(|_| "unknown".to_string());
+
+    let build_time = std::env::var("CASDOG_BUILD_TIME").unwrap_or_else(|_| "unknown".to_string());
+
+    // Casdoor returns the Go version here; we return the Rust toolchain info instead.
+    let rust_version = format!(
+        "rust-{}",
+        option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("stable")
+    );
+
+    SystemInfoResponse {
+        version,
+        commit_id,
+        go_version: rust_version,
+        build_time,
+    }
+}
+
 /// Returns system version and build metadata.
 ///
 /// The commit hash and build time are read from the `CASDOG_COMMIT_ID` and
@@ -39,24 +60,19 @@ pub struct PrometheusInfoResponse {
     )
 )]
 pub async fn get_system_info() -> AppResult<Json<SystemInfoResponse>> {
-    let version = env!("CARGO_PKG_VERSION").to_string();
+    Ok(Json(build_system_info_response()))
+}
 
-    let commit_id = std::env::var("CASDOG_COMMIT_ID").unwrap_or_else(|_| "unknown".to_string());
-
-    let build_time = std::env::var("CASDOG_BUILD_TIME").unwrap_or_else(|_| "unknown".to_string());
-
-    // Casdoor returns the Go version here; we return the Rust toolchain info instead.
-    let rust_version = format!(
-        "rust-{}",
-        option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("stable")
-    );
-
-    Ok(Json(SystemInfoResponse {
-        version,
-        commit_id,
-        go_version: rust_version,
-        build_time,
-    }))
+/// Returns version and build metadata using Casdoor's `get-version-info` naming.
+#[endpoint(
+    tags("System"),
+    summary = "Get version info",
+    responses(
+        (status_code = 200, description = "Version information", body = SystemInfoResponse)
+    )
+)]
+pub async fn get_version_info() -> AppResult<Json<SystemInfoResponse>> {
+    Ok(Json(build_system_info_response()))
 }
 
 /// Returns Prometheus-compatible metrics text.

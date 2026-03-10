@@ -117,6 +117,14 @@ impl SessionService {
         Ok(())
     }
 
+    pub async fn delete_by_session_id(pool: &PgPool, session_id: &str) -> AppResult<()> {
+        sqlx::query("DELETE FROM sessions WHERE session_id = $1")
+            .bind(session_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn is_session_duplicated(
         pool: &PgPool,
         user_id: &str,

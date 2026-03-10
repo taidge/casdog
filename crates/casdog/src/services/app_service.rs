@@ -107,6 +107,51 @@ impl AppService {
         Ok(app.into())
     }
 
+    pub async fn get_internal_by_id(&self, id: &str) -> AppResult<Application> {
+        let app = sqlx::query_as::<_, Application>(
+            "SELECT * FROM applications WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Application with id '{}' not found", id)))?;
+
+        Ok(app)
+    }
+
+    pub async fn find_internal(
+        &self,
+        reference: &str,
+        owner: Option<&str>,
+    ) -> AppResult<Application> {
+        if let Some((parsed_owner, name)) = reference.split_once('/') {
+            return self.get_by_name(parsed_owner, name).await;
+        }
+
+        if let Some(owner) = owner {
+            if let Ok(app) = self.get_by_name(owner, reference).await {
+                return Ok(app);
+            }
+        }
+
+        let app = sqlx::query_as::<_, Application>(
+            r#"
+            SELECT *
+            FROM applications
+            WHERE is_deleted = FALSE
+              AND (id = $1 OR name = $1)
+            ORDER BY CASE WHEN id = $1 THEN 0 ELSE 1 END, created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(reference)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Application '{}' not found", reference)))?;
+
+        Ok(app)
+    }
+
     pub async fn get_by_client_id(&self, client_id: &str) -> AppResult<Application> {
         let app = sqlx::query_as::<_, Application>(
             "SELECT * FROM applications WHERE client_id = $1 AND is_deleted = FALSE",

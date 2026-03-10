@@ -2,7 +2,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{CreateRecordRequest, Record, RecordFilterRequest, RecordResponse};
+use crate::models::{
+    CreateRecordRequest, Record, RecordFilterRequest, RecordResponse, UpdateRecordRequest,
+};
 
 pub struct RecordService;
 
@@ -208,6 +210,46 @@ impl RecordService {
         .await?;
 
         Self::get_by_id(pool, &id).await
+    }
+
+    pub async fn update(
+        pool: &PgPool,
+        id: &str,
+        req: UpdateRecordRequest,
+    ) -> AppResult<RecordResponse> {
+        let result = sqlx::query(
+            r#"
+            UPDATE records
+            SET owner = $2,
+                name = $3,
+                organization = $4,
+                client_ip = $5,
+                "user" = $6,
+                method = $7,
+                request_uri = $8,
+                action = $9,
+                object = $10
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(&req.owner)
+        .bind(&req.name)
+        .bind(&req.organization)
+        .bind(&req.client_ip)
+        .bind(&req.user)
+        .bind(&req.method)
+        .bind(&req.request_uri)
+        .bind(&req.action)
+        .bind(&req.object)
+        .execute(pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound("Record not found".to_string()));
+        }
+
+        Self::get_by_id(pool, id).await
     }
 
     pub async fn delete(pool: &PgPool, id: &str) -> AppResult<()> {

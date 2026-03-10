@@ -249,7 +249,7 @@ impl CasbinService {
         Ok(roles)
     }
 
-    /// Enforces a 6-tuple authorization check used by the `AuthzFilter` middleware.
+    /// Enforces a 6-tuple authorization check used by the `AuthzFilter` hoop.
     ///
     /// The tuple follows Casdoor's API authorization model:
     /// `(sub_owner, sub_name, method, url_path, obj_owner, obj_name)`

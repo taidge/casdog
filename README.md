@@ -139,7 +139,7 @@ casdog/
 │   ├── services/        # Business logic layer (40+ services)
 │   │   └── providers/   # Provider implementations (40+ files)
 │   ├── models/          # Data models (27 modules)
-│   └── middleware/      # Middleware (auth, authorization)
+│   └── hoops/           # Salvo hoops (auth, authorization, auditing)
 ├── migrations/          # Database migrations
 ├── config/              # Configuration files
 └── web/                 # Frontend assets

@@ -144,3 +144,13 @@ pub struct WebfingerLink {
     pub rel: String,
     pub href: String,
 }
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OauthProtectedResourceMetadata {
+    pub resource: String,
+    pub authorization_servers: Vec<String>,
+    pub bearer_methods_supported: Vec<String>,
+    pub scopes_supported: Vec<String>,
+    pub resource_signing_alg_values_supported: Vec<String>,
+    pub resource_documentation: Option<String>,
+}

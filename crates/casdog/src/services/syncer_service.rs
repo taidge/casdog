@@ -3,8 +3,17 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{CreateSyncerRequest, Syncer, SyncerResponse, UpdateSyncerRequest};
+use crate::services::syncer_executor::SyncRunResult;
 
 pub struct SyncerService;
+
+const SYNCER_SELECT: &str = r#"
+    SELECT id, owner, name, created_at, organization, "type" as syncer_type,
+           database_type, ssl_mode, host, port, "user", password, "database",
+           "table" as table_name, table_columns, affiliation_table, avatar_base_url,
+           error_text, sync_interval, is_read_only, is_enabled
+    FROM syncers
+"#;
 
 impl SyncerService {
     pub async fn list(
@@ -16,35 +25,20 @@ impl SyncerService {
         let offset = (page - 1) * page_size;
 
         let syncers: Vec<Syncer> = if let Some(owner) = owner {
-            sqlx::query_as(
-                r#"
-                SELECT id, owner, name, created_at, organization, "type" as syncer_type,
-                       database_type, ssl_mode, host, port, "user", password, "database",
-                       "table" as table_name, table_columns, affiliation_table, avatar_base_url,
-                       error_text, sync_interval, is_read_only, is_enabled
-                FROM syncers
-                WHERE owner = $1
-                ORDER BY created_at DESC
-                LIMIT $2 OFFSET $3
-                "#,
-            )
+            sqlx::query_as(&format!(
+                "{} WHERE owner = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+                SYNCER_SELECT
+            ))
             .bind(owner)
             .bind(page_size)
             .bind(offset)
             .fetch_all(pool)
             .await?
         } else {
-            sqlx::query_as(
-                r#"
-                SELECT id, owner, name, created_at, organization, "type" as syncer_type,
-                       database_type, ssl_mode, host, port, "user", password, "database",
-                       "table" as table_name, table_columns, affiliation_table, avatar_base_url,
-                       error_text, sync_interval, is_read_only, is_enabled
-                FROM syncers
-                ORDER BY created_at DESC
-                LIMIT $1 OFFSET $2
-                "#,
-            )
+            sqlx::query_as(&format!(
+                "{} ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                SYNCER_SELECT
+            ))
             .bind(page_size)
             .bind(offset)
             .fetch_all(pool)
@@ -66,22 +60,18 @@ impl SyncerService {
     }
 
     pub async fn get_by_id(pool: &PgPool, id: &str) -> AppResult<SyncerResponse> {
-        let syncer: Syncer = sqlx::query_as(
-            r#"
-            SELECT id, owner, name, created_at, organization, "type" as syncer_type,
-                   database_type, ssl_mode, host, port, "user", password, "database",
-                   "table" as table_name, table_columns, affiliation_table, avatar_base_url,
-                   error_text, sync_interval, is_read_only, is_enabled
-            FROM syncers
-            WHERE id = $1
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Syncer not found".to_string()))?;
-
+        let syncer = Self::get_by_id_internal(pool, id).await?;
         Ok(syncer.into())
+    }
+
+    pub async fn get_by_id_internal(pool: &PgPool, id: &str) -> AppResult<Syncer> {
+        let syncer: Syncer = sqlx::query_as(&format!("{} WHERE id = $1", SYNCER_SELECT))
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Syncer not found".to_string()))?;
+
+        Ok(syncer)
     }
 
     pub async fn create(pool: &PgPool, req: CreateSyncerRequest) -> AppResult<SyncerResponse> {
@@ -184,17 +174,7 @@ impl SyncerService {
         Ok(())
     }
 
-    pub async fn run_sync(pool: &PgPool, id: &str) -> AppResult<()> {
-        // Get syncer configuration
-        let syncer = Self::get_by_id(pool, id).await?;
-
-        if !syncer.is_enabled {
-            return Err(AppError::Validation("Syncer is disabled".to_string()));
-        }
-
-        // In production, implement actual LDAP/AD/DB sync here
-        // For now, return success
-
-        Ok(())
+    pub async fn run_sync(pool: &PgPool, id: &str) -> AppResult<SyncRunResult> {
+        crate::services::syncer_executor::SyncerExecutor::execute_syncer(pool, id).await
     }
 }

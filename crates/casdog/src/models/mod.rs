@@ -1,6 +1,7 @@
 pub mod application;
 pub mod casbin_model;
 pub mod cert;
+pub mod consent;
 pub mod group;
 pub mod invitation;
 pub mod oidc;
@@ -22,6 +23,7 @@ pub mod webhook;
 pub use application::*;
 pub use casbin_model::*;
 pub use cert::*;
+pub use consent::*;
 pub use group::*;
 pub use invitation::*;
 pub use oidc::*;

@@ -4,14 +4,14 @@ use salvo::prelude::*;
 use salvo::serve_static::static_embed;
 
 use crate::handlers::{
-    adapter, app_extra, application, auth, cas, cert, cert_extra, dashboard, enforcer, form, group,
-    health, impersonation, invitation, ldap, messaging, mfa, model, oidc, order, org_extra,
-    organization, payment, permission, permission_extra, plan, policy, pricing, product, provider,
-    provider_extra, record, resource, role, rule, saml, scim, session, site, social_login,
-    subscription, syncer, system, ticket, token, transaction, upload, user, user_extra,
-    verification, webhook,
+    adapter, app_extra, application, auth, cas, casbin_cli, cert, cert_extra, consent, dashboard,
+    enforcer, form, group, health, impersonation, invitation, ldap, login_compat, messaging, mfa,
+    model, oidc, order, org_extra, organization, payment, permission, permission_extra, plan,
+    policy, pricing, product, provider, provider_extra, record, resource, role, rule, saml, scim,
+    session, site, social_login, subscription, syncer, system, ticket, token, transaction, upload,
+    user, user_extra, verification, webauthn, webhook,
 };
-use crate::middleware::JwtAuth;
+use crate::hoops::{AutoSigninFilter, JwtAuth, OptionalJwtAuth};
 
 #[derive(Embed)]
 #[folder = "$CASDOG_WEB_DIST"]
@@ -20,6 +20,7 @@ struct Assets;
 pub fn create_router() -> Router {
     Router::new()
         .push(wellknown_router())
+        .push(cas_root_router())
         .push(api_router())
         .push(oauth_router())
         .push(swagger_router())
@@ -34,13 +35,27 @@ fn static_router() -> Router {
 fn wellknown_router() -> Router {
     Router::with_path(".well-known")
         .push(Router::with_path("openid-configuration").get(oidc::openid_configuration))
+        .push(Router::with_path("oauth-authorization-server").get(oidc::oauth_server_metadata))
+        .push(
+            Router::with_path("oauth-protected-resource")
+                .get(oidc::oauth_protected_resource_metadata),
+        )
         .push(Router::with_path("jwks").get(oidc::jwks))
         .push(Router::with_path("webfinger").get(oidc::webfinger))
         .push(
             Router::with_path("{application}/openid-configuration")
                 .get(oidc::app_openid_configuration),
         )
+        .push(
+            Router::with_path("{application}/oauth-authorization-server")
+                .get(oidc::app_oauth_server_metadata),
+        )
+        .push(
+            Router::with_path("{application}/oauth-protected-resource")
+                .get(oidc::app_oauth_protected_resource_metadata),
+        )
         .push(Router::with_path("{application}/jwks").get(oidc::app_jwks))
+        .push(Router::with_path("{application}/webfinger").get(oidc::app_webfinger))
 }
 
 fn oauth_router() -> Router {
@@ -50,6 +65,31 @@ fn oauth_router() -> Router {
         .push(Router::with_path("refresh_token").post(auth::oauth_refresh_token))
         .push(Router::with_path("introspect").post(auth::oauth_introspect))
         .push(Router::with_path("revoke").post(auth::oauth_revoke))
+}
+
+fn public_webauthn_routes() -> Router {
+    Router::with_path("webauthn")
+        .push(Router::with_path("signin/begin").get(webauthn::signin_begin))
+        .push(Router::with_path("signin/finish").post(webauthn::signin_finish))
+}
+
+fn protected_webauthn_routes() -> Router {
+    Router::with_path("webauthn")
+        .push(Router::with_path("signup/begin").get(webauthn::signup_begin))
+        .push(Router::with_path("signup/finish").post(webauthn::signup_finish))
+        .push(Router::with_path("credentials").get(webauthn::list_credentials))
+        .push(Router::with_path("credentials/{id}").delete(webauthn::delete_credential))
+}
+
+fn cas_root_router() -> Router {
+    Router::with_path("cas/{organization}/{application}")
+        .push(Router::with_path("serviceValidate").get(cas::service_validate))
+        .push(Router::with_path("proxyValidate").get(cas::proxy_validate))
+        .push(Router::with_path("proxy").get(cas::proxy))
+        .push(Router::with_path("validate").get(cas::validate))
+        .push(Router::with_path("p3/serviceValidate").get(cas::service_validate))
+        .push(Router::with_path("p3/proxyValidate").get(cas::proxy_validate))
+        .push(Router::with_path("samlValidate").post(cas::saml_validate))
 }
 
 fn api_router() -> Router {
@@ -63,10 +103,35 @@ fn public_routes() -> Router {
         .push(Router::with_path("health").get(health::health_check))
         .push(Router::with_path("signup").post(auth::signup))
         .push(Router::with_path("login").post(auth::login))
+        .push(Router::with_path("get-app-login").get(auth::get_app_login))
         .push(Router::with_path("userinfo").get(oidc::userinfo))
         .push(Router::with_path("captcha").get(verification::get_captcha))
+        .push(Router::with_path("get-captcha-status").get(auth::get_captcha_status))
         .push(Router::with_path("verify-captcha").post(verification::verify_captcha))
         .push(Router::with_path("get-email-and-phone").post(verification::get_email_and_phone))
+        .push(Router::with_path("callback").get(auth::callback).post(auth::callback))
+        .push(Router::with_path("device-auth").post(auth::device_auth))
+        .push(Router::with_path("kerberos-login").get(login_compat::kerberos_login))
+        .push(Router::with_path("oauth/register").post(auth::oauth_register))
+        .push(Router::with_path("get-qrcode").get(auth::get_qrcode))
+        .push(Router::with_path("get-webhook-event").get(auth::get_webhook_event))
+        .push(Router::with_path("faceid-signin-begin").get(login_compat::faceid_signin_begin))
+        .push(
+            Router::new()
+                .hoop(OptionalJwtAuth)
+                .push(Router::with_path("send-email").post(messaging::send_email))
+                .push(Router::with_path("send-sms").post(messaging::send_sms))
+                .push(Router::with_path("send-notification").post(messaging::send_notification)),
+        )
+        .push(public_webauthn_routes())
+        .push(saml_routes())
+        .push(Router::with_path("get-saml-login").get(saml::get_saml_login))
+        .push(Router::with_path("acs").post(saml::saml_acs).get(saml::saml_acs))
+        .push(
+            Router::with_path("saml/redirect/{owner}/{application}")
+                .hoop(AutoSigninFilter)
+                .get(saml::saml_redirect),
+        )
         // Social login (OAuth provider callbacks)
         .push(Router::with_path("auth/{provider}").get(social_login::get_provider_auth_url))
         .push(Router::with_path("auth/{provider}/callback").get(social_login::provider_callback))
@@ -79,7 +144,12 @@ fn protected_routes() -> Router {
         .push(Router::with_path("get-account").get(auth::get_account))
         .push(Router::with_path("set-password").post(auth::set_password))
         .push(Router::with_path("check-user-password").post(auth::check_user_password))
+        .push(Router::with_path("reset-email-or-phone").post(verification::reset_email_or_phone))
+        .push(Router::with_path("grant-consent").post(consent::grant_consent))
+        .push(Router::with_path("revoke-consent").post(consent::revoke_consent))
         .push(Router::with_path("sso-logout").get(auth::sso_logout).post(auth::sso_logout))
+        .push(Router::with_path("unlink").post(social_login::unlink_provider_compat))
+        .push(protected_webauthn_routes())
         // Social login provider unlink
         .push(Router::with_path("auth/{provider}/unlink").post(social_login::unlink_provider))
         .push(mfa_routes())
@@ -100,7 +170,6 @@ fn protected_routes() -> Router {
         .push(syncer_routes())
         .push(invitation_routes())
         .push(record_routes())
-        .push(saml_routes())
         .push(cas_routes())
         .push(scim_routes())
         .push(ldap_routes())
@@ -128,8 +197,27 @@ fn protected_routes() -> Router {
         .push(Router::with_path("send-email").post(messaging::send_email))
         .push(Router::with_path("send-sms").post(messaging::send_sms))
         .push(Router::with_path("send-notification").post(messaging::send_notification))
+        .push(Router::with_path("run-casbin-command").get(casbin_cli::run_casbin_command))
+        .push(Router::with_path("refresh-engines").post(casbin_cli::refresh_engines))
+        .push(Router::with_path("get-verifications").get(verification::list_verifications))
+        .push(Router::with_path("get-verification").get(verification::get_verification_by_query))
+        .push(Router::with_path("get-ldaps").get(ldap::get_ldaps))
+        .push(Router::with_path("get-ldap").get(ldap::get_ldap))
+        .push(Router::with_path("add-ldap").post(ldap::add_ldap))
+        .push(Router::with_path("update-ldap").post(ldap::update_ldap))
+        .push(Router::with_path("delete-ldap").post(ldap::delete_ldap))
+        .push(Router::with_path("get-ldap-users").get(ldap::get_ldap_users))
+        .push(Router::with_path("sync-ldap-users").post(ldap::sync_ldap_users))
+        .push(Router::with_path("notify-payment").post(payment::notify_payment))
+        .push(
+            Router::with_path("notify-payment/{owner}/{payment}").post(payment::notify_payment),
+        )
+        .push(Router::with_path("invoice-payment").post(payment::invoice_payment))
+        .push(Router::with_path("pay-order").post(order::pay_order))
+        .push(Router::with_path("cancel-order").post(order::cancel_order))
         // System info
         .push(Router::with_path("get-system-info").get(system::get_system_info))
+        .push(Router::with_path("get-version-info").get(system::get_version_info))
         .push(Router::with_path("get-prometheus-info").get(system::get_prometheus_info))
         // Impersonation
         .push(Router::with_path("impersonate-user").post(impersonation::impersonate_user))
@@ -144,6 +232,10 @@ fn protected_routes() -> Router {
         .push(order_routes())
         .push(ticket_routes())
         .push(form_routes())
+        .push(Router::with_path("upload-users").post(upload::upload_users))
+        .push(Router::with_path("upload-groups").post(upload::upload_groups))
+        .push(Router::with_path("upload-roles").post(upload::upload_roles))
+        .push(Router::with_path("upload-permissions").post(upload::upload_permissions))
         // File upload/download/delete with storage provider integration
         .push(Router::with_path("upload-resource").post(upload::upload_resource))
         .push(Router::with_path("download-resource/{id}").get(upload::download_resource))
@@ -309,6 +401,12 @@ fn verification_routes() -> Router {
     Router::with_path("verification")
         .push(Router::with_path("send-code").post(verification::send_verification_code))
         .push(Router::with_path("verify-code").post(verification::verify_code))
+        .push(Router::with_path("reset-email-or-phone").post(verification::reset_email_or_phone))
+        .push(
+            Router::with_path("entries")
+                .get(verification::list_verifications)
+                .push(Router::with_path("{id}").get(verification::get_verification)),
+        )
 }
 
 fn webhook_routes() -> Router {
@@ -362,10 +460,12 @@ fn mfa_routes() -> Router {
 fn record_routes() -> Router {
     Router::with_path("records")
         .get(record::list_records)
+        .post(record::create_record)
         .push(Router::with_path("filter").post(record::filter_records))
         .push(
             Router::with_path("{id}")
                 .get(record::get_record)
+                .put(record::update_record)
                 .delete(record::delete_record),
         )
 }
@@ -374,7 +474,11 @@ fn saml_routes() -> Router {
     Router::with_path("saml")
         .push(Router::with_path("metadata").get(saml::saml_metadata))
         .push(Router::with_path("login").get(saml::get_saml_login))
-        .push(Router::with_path("acs").post(saml::saml_acs))
+        .push(
+            Router::with_path("acs")
+                .post(saml::saml_acs)
+                .get(saml::saml_acs),
+        )
 }
 
 fn cas_routes() -> Router {
@@ -391,7 +495,11 @@ fn scim_routes() -> Router {
 
 fn ldap_routes() -> Router {
     Router::with_path("ldap")
+        .get(ldap::get_ldaps)
+        .post(ldap::add_ldap)
+        .push(Router::with_path("{id}").get(ldap::get_ldap_provider_public))
         .push(Router::with_path("sync-users").post(ldap::sync_ldap_users))
+        .push(Router::with_path("users").get(ldap::get_ldap_users))
         .push(Router::with_path("test-connection").post(ldap::test_ldap_connection))
 }
 
@@ -507,6 +615,8 @@ fn payment_routes() -> Router {
     Router::with_path("payments")
         .get(payment::list_payments)
         .post(payment::create_payment)
+        .push(Router::with_path("notify").post(payment::notify_payment))
+        .push(Router::with_path("invoice").post(payment::invoice_payment))
         .push(
             Router::with_path("{id}")
                 .get(payment::get_payment)
@@ -531,6 +641,8 @@ fn order_routes() -> Router {
     Router::with_path("orders")
         .get(order::get_orders)
         .post(order::add_order)
+        .push(Router::with_path("{id}/pay").post(order::pay_order))
+        .push(Router::with_path("{id}/cancel").post(order::cancel_order))
         .push(
             Router::with_path("{id}")
                 .get(order::get_order)
@@ -582,11 +694,16 @@ fn api_router_for_openapi() -> Router {
             .push(Router::with_path("health").get(health::health_check))
             .push(Router::with_path("signup").post(auth::signup))
             .push(Router::with_path("login").post(auth::login))
+            .push(Router::with_path("get-app-login").get(auth::get_app_login))
             .push(Router::with_path("logout").get(auth::logout).post(auth::logout))
             .push(Router::with_path("get-account").get(auth::get_account))
             .push(Router::with_path("set-password").post(auth::set_password))
             .push(Router::with_path("check-user-password").post(auth::check_user_password))
+            .push(Router::with_path("reset-email-or-phone").post(verification::reset_email_or_phone))
+            .push(Router::with_path("grant-consent").post(consent::grant_consent))
+            .push(Router::with_path("revoke-consent").post(consent::revoke_consent))
             .push(Router::with_path("sso-logout").get(auth::sso_logout).post(auth::sso_logout))
+            .push(Router::with_path("unlink").post(social_login::unlink_provider_compat))
             .push(
                 Router::with_path("mfa")
                     .push(Router::with_path("setup/initiate").post(mfa::initiate_mfa_setup))
@@ -597,11 +714,41 @@ fn api_router_for_openapi() -> Router {
             )
             .push(Router::with_path("userinfo").get(oidc::userinfo))
             .push(Router::with_path("captcha").get(verification::get_captcha))
+            .push(Router::with_path("get-captcha-status").get(auth::get_captcha_status))
             .push(Router::with_path("verify-captcha").post(verification::verify_captcha))
             .push(Router::with_path("get-email-and-phone").post(verification::get_email_and_phone))
+            .push(Router::with_path("callback").get(auth::callback).post(auth::callback))
+            .push(Router::with_path("device-auth").post(auth::device_auth))
+            .push(Router::with_path("kerberos-login").get(login_compat::kerberos_login))
+            .push(Router::with_path("oauth/register").post(auth::oauth_register))
+            .push(Router::with_path("get-qrcode").get(auth::get_qrcode))
+            .push(Router::with_path("get-webhook-event").get(auth::get_webhook_event))
+            .push(Router::with_path("faceid-signin-begin").get(login_compat::faceid_signin_begin))
+            .push(
+                Router::with_path("saml")
+                    .push(Router::with_path("metadata").get(saml::saml_metadata))
+                    .push(Router::with_path("login").get(saml::get_saml_login))
+                    .push(Router::with_path("acs").post(saml::saml_acs).get(saml::saml_acs))
+                    .push(
+                        Router::with_path("redirect/{owner}/{application}")
+                            .get(saml::saml_redirect),
+                    ),
+            )
+            .push(Router::with_path("get-saml-login").get(saml::get_saml_login))
+            .push(Router::with_path("acs").post(saml::saml_acs).get(saml::saml_acs))
+            .push(Router::with_path("webauthn/signup/begin").get(webauthn::signup_begin))
+            .push(Router::with_path("webauthn/signup/finish").post(webauthn::signup_finish))
+            .push(Router::with_path("webauthn/signin/begin").get(webauthn::signin_begin))
+            .push(Router::with_path("webauthn/signin/finish").post(webauthn::signin_finish))
+            .push(Router::with_path("webauthn/credentials").get(webauthn::list_credentials))
+            .push(
+                Router::with_path("webauthn/credentials/{id}")
+                    .delete(webauthn::delete_credential),
+            )
             // Social login endpoints
             .push(Router::with_path("auth/{provider}").get(social_login::get_provider_auth_url))
             .push(Router::with_path("auth/{provider}/callback").get(social_login::provider_callback))
+            .push(Router::with_path("unlink").post(social_login::unlink_provider_compat))
             .push(Router::with_path("auth/{provider}/unlink").post(social_login::unlink_provider))
             // OAuth endpoints
             .push(
@@ -756,7 +903,13 @@ fn api_router_for_openapi() -> Router {
             .push(
                 Router::with_path("verification")
                     .push(Router::with_path("send-code").post(verification::send_verification_code))
-                    .push(Router::with_path("verify-code").post(verification::verify_code)),
+                    .push(Router::with_path("verify-code").post(verification::verify_code))
+                    .push(Router::with_path("reset-email-or-phone").post(verification::reset_email_or_phone))
+                    .push(
+                        Router::with_path("entries")
+                            .get(verification::list_verifications)
+                            .push(Router::with_path("{id}").get(verification::get_verification)),
+                    ),
             )
             .push(
                 Router::with_path("webhooks")
@@ -797,10 +950,12 @@ fn api_router_for_openapi() -> Router {
             .push(
                 Router::with_path("records")
                     .get(record::list_records)
+                    .post(record::create_record)
                     .push(Router::with_path("filter").post(record::filter_records))
                     .push(
                         Router::with_path("{id}")
                             .get(record::get_record)
+                            .put(record::update_record)
                             .delete(record::delete_record),
                     ),
             )
@@ -878,7 +1033,26 @@ fn api_router_for_openapi() -> Router {
             .push(Router::with_path("send-email").post(messaging::send_email))
             .push(Router::with_path("send-sms").post(messaging::send_sms))
             .push(Router::with_path("send-notification").post(messaging::send_notification))
+            .push(Router::with_path("run-casbin-command").get(casbin_cli::run_casbin_command))
+            .push(Router::with_path("refresh-engines").post(casbin_cli::refresh_engines))
+            .push(Router::with_path("get-verifications").get(verification::list_verifications))
+            .push(Router::with_path("get-verification").get(verification::get_verification_by_query))
+            .push(Router::with_path("get-ldaps").get(ldap::get_ldaps))
+            .push(Router::with_path("get-ldap").get(ldap::get_ldap))
+            .push(Router::with_path("add-ldap").post(ldap::add_ldap))
+            .push(Router::with_path("update-ldap").post(ldap::update_ldap))
+            .push(Router::with_path("delete-ldap").post(ldap::delete_ldap))
+            .push(Router::with_path("get-ldap-users").get(ldap::get_ldap_users))
+            .push(Router::with_path("sync-ldap-users").post(ldap::sync_ldap_users))
+            .push(Router::with_path("notify-payment").post(payment::notify_payment))
+            .push(
+                Router::with_path("notify-payment/{owner}/{payment}").post(payment::notify_payment),
+            )
+            .push(Router::with_path("invoice-payment").post(payment::invoice_payment))
+            .push(Router::with_path("pay-order").post(order::pay_order))
+            .push(Router::with_path("cancel-order").post(order::cancel_order))
             .push(Router::with_path("get-system-info").get(system::get_system_info))
+            .push(Router::with_path("get-version-info").get(system::get_version_info))
             .push(Router::with_path("get-prometheus-info").get(system::get_prometheus_info))
             .push(Router::with_path("impersonate-user").post(impersonation::impersonate_user))
             .push(Router::with_path("exit-impersonate-user").post(impersonation::exit_impersonate_user))
@@ -930,6 +1104,8 @@ fn api_router_for_openapi() -> Router {
                 Router::with_path("payments")
                     .get(payment::list_payments)
                     .post(payment::create_payment)
+                    .push(Router::with_path("notify").post(payment::notify_payment))
+                    .push(Router::with_path("invoice").post(payment::invoice_payment))
                     .push(
                         Router::with_path("{id}")
                             .get(payment::get_payment)
@@ -952,6 +1128,8 @@ fn api_router_for_openapi() -> Router {
                 Router::with_path("orders")
                     .get(order::get_orders)
                     .post(order::add_order)
+                    .push(Router::with_path("{id}/pay").post(order::pay_order))
+                    .push(Router::with_path("{id}/cancel").post(order::cancel_order))
                     .push(
                         Router::with_path("{id}")
                             .get(order::get_order)
@@ -981,6 +1159,10 @@ fn api_router_for_openapi() -> Router {
                             .delete(form::delete_form),
                     ),
             )
+            .push(Router::with_path("upload-users").post(upload::upload_users))
+            .push(Router::with_path("upload-groups").post(upload::upload_groups))
+            .push(Router::with_path("upload-roles").post(upload::upload_roles))
+            .push(Router::with_path("upload-permissions").post(upload::upload_permissions))
             // File upload/download/delete with storage provider integration
             .push(Router::with_path("upload-resource").post(upload::upload_resource))
             .push(Router::with_path("download-resource/{id}").get(upload::download_resource))

@@ -1,13 +1,18 @@
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+use salvo::oapi::ToSchema;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::*;
 use salvo::prelude::*;
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Pool, Postgres};
 
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    IntrospectRequest, IntrospectResponse, OAuthTokenRequest, OAuthTokenResponse, RevokeRequest,
-    UserResponse,
+    ApplicationResponse, CreateApplicationRequest, IntrospectRequest, IntrospectResponse,
+    OAuthTokenRequest, OAuthTokenResponse, RevokeRequest, UserResponse,
 };
 use crate::services::auth_service::{
     CheckPasswordRequest, CheckPasswordResponse, Claims, LoginRequest, LoginResponse,
@@ -15,7 +20,120 @@ use crate::services::auth_service::{
 };
 use crate::services::session_service::SessionService;
 use crate::services::token_service::TokenService;
-use crate::services::{AppService, AuthService, UserService};
+use crate::services::{AppService, AuthService, OrgService, ProviderService, UserService};
+
+#[derive(Debug, Clone)]
+struct DeviceAuthCache {
+    application_id: String,
+    scope: String,
+}
+
+static DEVICE_AUTH_CODES: LazyLock<Mutex<HashMap<String, DeviceAuthCache>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static QR_TICKETS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CaptchaStatusResponse {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeviceAuthResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: i32,
+    pub interval: i32,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct QrCodeResponse {
+    pub code: String,
+    pub ticket: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WebhookEventResponse {
+    pub event: String,
+    pub ticket: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DynamicClientRegistrationRequest {
+    pub client_name: Option<String>,
+    pub redirect_uris: Vec<String>,
+    pub grant_types: Option<Vec<String>>,
+    pub response_types: Option<Vec<String>>,
+    pub token_endpoint_auth_method: Option<String>,
+    pub application_type: Option<String>,
+    pub contacts: Option<Vec<String>>,
+    pub logo_uri: Option<String>,
+    pub client_uri: Option<String>,
+    pub policy_uri: Option<String>,
+    pub tos_uri: Option<String>,
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DynamicClientRegistrationResponse {
+    pub client_id: String,
+    pub client_secret: String,
+    pub client_id_issued_at: i64,
+    pub client_secret_expires_at: i64,
+    pub client_name: String,
+    pub redirect_uris: Vec<String>,
+    pub grant_types: Vec<String>,
+    pub response_types: Vec<String>,
+    pub token_endpoint_auth_method: String,
+    pub application_type: String,
+    pub contacts: Vec<String>,
+    pub logo_uri: Option<String>,
+    pub client_uri: Option<String>,
+    pub policy_uri: Option<String>,
+    pub tos_uri: Option<String>,
+    pub scope: Option<String>,
+}
+
+fn redirect_uri_allowed(allowed_uris: &str, redirect_uri: &str) -> bool {
+    allowed_uris
+        .split(|c| c == ',' || c == '\n' || c == ' ')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .any(|value| value == redirect_uri)
+}
+
+fn mask_application(mut response: ApplicationResponse) -> ApplicationResponse {
+    response.client_secret.clear();
+    response
+}
+
+fn generate_user_code() -> String {
+    let raw = uuid::Uuid::new_v4().simple().to_string().to_uppercase();
+    format!("{}-{}", &raw[..4], &raw[4..8])
+}
+
+fn captcha_enabled_for_application(application: &crate::models::Application) -> bool {
+    application
+        .providers
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .map(|providers| {
+            providers.iter().any(|provider| {
+                let is_captcha = provider
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|name| name.to_ascii_lowercase().contains("captcha"))
+                    .unwrap_or(false);
+                let rule = provider
+                    .get("rule")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                is_captcha && !rule.trim().is_empty() && !rule.eq_ignore_ascii_case("none")
+            })
+        })
+        .unwrap_or(false)
+}
 
 /// User signup
 #[endpoint(
@@ -64,6 +182,312 @@ pub async fn login(
 
     let response = auth_service.login(&pool, req.into_inner()).await?;
     Ok(Json(response))
+}
+
+/// Get masked application login configuration for OAuth, CAS, or device flows.
+#[endpoint(
+    tags("Authentication"),
+    parameters(
+        ("clientId" = Option<String>, Query, description = "OAuth client ID"),
+        ("responseType" = Option<String>, Query, description = "OAuth response type"),
+        ("redirectUri" = Option<String>, Query, description = "OAuth redirect URI"),
+        ("scope" = Option<String>, Query, description = "OAuth scope"),
+        ("state" = Option<String>, Query, description = "OAuth state"),
+        ("id" = Option<String>, Query, description = "Application ID for CAS flow"),
+        ("type" = Option<String>, Query, description = "Login type: code, cas, device"),
+        ("userCode" = Option<String>, Query, description = "Device user code"),
+    )
+)]
+pub async fn get_app_login(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> AppResult<Json<ApplicationResponse>> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let app_service = AppService::new(pool.clone());
+    let login_type = req
+        .query::<String>("type")
+        .unwrap_or_else(|| "code".to_string());
+
+    let application = match login_type.as_str() {
+        "cas" => {
+            let id = req
+                .query::<String>("id")
+                .ok_or_else(|| AppError::Validation("id is required for CAS login".to_string()))?;
+            app_service.get_by_id(&id).await?
+        }
+        "device" => {
+            let user_code = req.query::<String>("userCode").ok_or_else(|| {
+                AppError::Validation("userCode is required for device login".to_string())
+            })?;
+
+            let cache = DEVICE_AUTH_CODES
+                .lock()
+                .map_err(|_| AppError::Internal("Device auth cache unavailable".to_string()))?
+                .get(&user_code)
+                .cloned()
+                .ok_or_else(|| AppError::Authentication("Invalid device user code".to_string()))?;
+
+            let _ = cache.scope;
+            app_service.get_by_id(&cache.application_id).await?
+        }
+        _ => {
+            let client_id = req.query::<String>("clientId").ok_or_else(|| {
+                AppError::Validation("clientId is required for OAuth login".to_string())
+            })?;
+            let response_type = req.query::<String>("responseType").ok_or_else(|| {
+                AppError::Validation("responseType is required for OAuth login".to_string())
+            })?;
+            let redirect_uri = req.query::<String>("redirectUri").ok_or_else(|| {
+                AppError::Validation("redirectUri is required for OAuth login".to_string())
+            })?;
+
+            if !matches!(response_type.as_str(), "code" | "token" | "id_token") {
+                return Err(AppError::Validation(format!(
+                    "Unsupported responseType: {}",
+                    response_type
+                )));
+            }
+
+            let application = app_service.get_by_client_id(&client_id).await?;
+            if !application.redirect_uris.is_empty()
+                && !redirect_uri_allowed(&application.redirect_uris, &redirect_uri)
+            {
+                return Err(AppError::Authentication(
+                    "Redirect URI mismatch".to_string(),
+                ));
+            }
+
+            mask_application(application.into())
+        }
+    };
+
+    Ok(Json(mask_application(application)))
+}
+
+/// Returns whether the login page should show a captcha challenge.
+#[endpoint(tags("Authentication"), summary = "Get captcha status")]
+pub async fn get_captcha_status(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> AppResult<Json<CaptchaStatusResponse>> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+
+    let application_name = req
+        .query::<String>("application")
+        .ok_or_else(|| AppError::Validation("application is required".to_string()))?;
+    let app_service = AppService::new(pool);
+    let application = app_service.get_by_name("admin", &application_name).await?;
+
+    Ok(Json(CaptchaStatusResponse {
+        enabled: captcha_enabled_for_application(&application),
+    }))
+}
+
+/// Provider callback relay for auth flows that expect a frontend redirect.
+#[endpoint(tags("Authentication"), summary = "Callback relay")]
+pub async fn callback(req: &mut Request, res: &mut Response) -> AppResult<()> {
+    let code = req.query::<String>("code").unwrap_or_default();
+    let state = req.query::<String>("state").unwrap_or_default();
+    let redirect = format!(
+        "/callback?code={}&state={}",
+        urlencoding::encode(&code),
+        urlencoding::encode(&state)
+    );
+    res.render(salvo::writing::Redirect::found(redirect));
+    Ok(())
+}
+
+/// Device authorization endpoint (RFC 8628) initial step.
+#[endpoint(tags("OAuth"), summary = "Device authorization")]
+pub async fn device_auth(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> AppResult<Json<DeviceAuthResponse>> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+
+    let client_id = req
+        .query::<String>("client_id")
+        .ok_or_else(|| AppError::Validation("client_id is required".to_string()))?;
+    let scope = req
+        .query::<String>("scope")
+        .unwrap_or_else(|| "openid".to_string());
+
+    let app_service = AppService::new(pool);
+    let application = app_service.get_by_client_id(&client_id).await?;
+    let device_code = uuid::Uuid::new_v4().to_string();
+    let user_code = generate_user_code();
+
+    let mut cache = DEVICE_AUTH_CODES
+        .lock()
+        .map_err(|_| AppError::Internal("Device auth cache unavailable".to_string()))?;
+    cache.insert(
+        device_code.clone(),
+        DeviceAuthCache {
+            application_id: application.id.clone(),
+            scope: scope.clone(),
+        },
+    );
+    cache.insert(
+        user_code.clone(),
+        DeviceAuthCache {
+            application_id: application.id,
+            scope,
+        },
+    );
+    drop(cache);
+
+    let config = AppConfig::get();
+    let base_url = format!("http://{}:{}", config.server.host, config.server.port);
+
+    Ok(Json(DeviceAuthResponse {
+        device_code,
+        user_code: user_code.clone(),
+        verification_uri: format!("{}/login/oauth/device/{}", base_url, user_code),
+        expires_in: 120,
+        interval: 5,
+    }))
+}
+
+/// OAuth dynamic client registration endpoint (RFC 7591 compatible shape).
+#[endpoint(tags("OAuth"), summary = "Dynamic client registration")]
+pub async fn oauth_register(
+    depot: &mut Depot,
+    req: &mut Request,
+    body: JsonBody<DynamicClientRegistrationRequest>,
+) -> AppResult<Json<DynamicClientRegistrationResponse>> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+
+    let organization = req
+        .query::<String>("organization")
+        .unwrap_or_else(|| "built-in".to_string());
+    let org_service = OrgService::new(pool.clone());
+    let _ = org_service.get_by_name(&organization).await?;
+
+    let request = body.into_inner();
+    if request.redirect_uris.is_empty() {
+        return Err(AppError::Validation(
+            "redirect_uris must contain at least one URI".to_string(),
+        ));
+    }
+
+    let grant_types = request
+        .grant_types
+        .clone()
+        .unwrap_or_else(|| vec!["authorization_code".to_string()]);
+    let response_types = request
+        .response_types
+        .clone()
+        .unwrap_or_else(|| vec!["code".to_string()]);
+    let client_name = request.client_name.clone().unwrap_or_else(|| {
+        format!(
+            "DCR Client {}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        )
+    });
+
+    let create_request = CreateApplicationRequest {
+        owner: "admin".to_string(),
+        name: format!("dcr_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+        display_name: client_name.clone(),
+        logo: request.logo_uri.clone(),
+        homepage_url: request.client_uri.clone(),
+        description: request.policy_uri.clone(),
+        organization: organization.clone(),
+        redirect_uris: Some(request.redirect_uris.join(",")),
+        token_format: Some("JWT".to_string()),
+        expire_in_hours: Some(168),
+        cert: None,
+        signup_items: None,
+        signin_items: None,
+        signin_methods: None,
+        grant_types: Some(serde_json::json!(grant_types)),
+        providers: None,
+        enable_password: Some(false),
+        enable_signin_session: Some(false),
+        enable_code_signin: Some(true),
+        enable_web_authn: Some(false),
+        enable_internal_signup: Some(false),
+        enable_idp_signup: Some(false),
+    };
+
+    let app_service = AppService::new(pool);
+    let application = app_service.create(create_request).await?;
+
+    Ok(Json(DynamicClientRegistrationResponse {
+        client_id: application.client_id,
+        client_secret: application.client_secret,
+        client_id_issued_at: chrono::Utc::now().timestamp(),
+        client_secret_expires_at: 0,
+        client_name,
+        redirect_uris: request.redirect_uris,
+        grant_types,
+        response_types,
+        token_endpoint_auth_method: request
+            .token_endpoint_auth_method
+            .unwrap_or_else(|| "client_secret_basic".to_string()),
+        application_type: request
+            .application_type
+            .unwrap_or_else(|| "web".to_string()),
+        contacts: request.contacts.unwrap_or_default(),
+        logo_uri: request.logo_uri,
+        client_uri: request.client_uri,
+        policy_uri: request.policy_uri,
+        tos_uri: request.tos_uri,
+        scope: request.scope,
+    }))
+}
+
+/// Placeholder QR code endpoint for provider-based sign-in flows.
+#[endpoint(tags("Authentication"), summary = "Get QR code")]
+pub async fn get_qrcode(depot: &mut Depot, req: &mut Request) -> AppResult<Json<QrCodeResponse>> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+
+    let id = req
+        .query::<String>("id")
+        .ok_or_else(|| AppError::Validation("id is required".to_string()))?;
+    let _provider = ProviderService::get_by_id(&pool, &id).await?;
+    let ticket = uuid::Uuid::new_v4().to_string();
+    QR_TICKETS
+        .lock()
+        .map_err(|_| AppError::Internal("QR ticket cache unavailable".to_string()))?
+        .insert(ticket.clone(), "SCAN".to_string());
+
+    Ok(Json(QrCodeResponse {
+        code: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==".to_string(),
+        ticket,
+    }))
+}
+
+/// Query the current event state for a QR-code ticket.
+#[endpoint(tags("Authentication"), summary = "Get webhook event")]
+pub async fn get_webhook_event(req: &mut Request) -> AppResult<Json<WebhookEventResponse>> {
+    let ticket = req
+        .query::<String>("ticket")
+        .ok_or_else(|| AppError::Validation("ticket is required".to_string()))?;
+
+    let event = QR_TICKETS
+        .lock()
+        .map_err(|_| AppError::Internal("QR ticket cache unavailable".to_string()))?
+        .get(&ticket)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound("ticket not found".to_string()))?;
+
+    Ok(Json(WebhookEventResponse { event, ticket }))
 }
 
 /// User logout - supports OIDC RP-initiated logout

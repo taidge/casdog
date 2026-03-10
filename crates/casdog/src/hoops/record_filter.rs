@@ -6,7 +6,7 @@ use crate::services::RecordService;
 /// Paths that should not be logged (static files, health checks, swagger docs).
 const SKIP_LOG_PREFIXES: &[&str] = &["/swagger-ui/", "/api-doc/", "/api/health", "/.well-known/"];
 
-/// Global audit record middleware.
+/// Global audit record hoop.
 ///
 /// Logs ALL API requests to the records table after the response has been produced.
 /// Based on Casdoor's `routers/record.go` (`RecordMessage` / `AfterRecordMessage`).
@@ -36,7 +36,7 @@ impl Handler for RecordFilter {
             return;
         }
 
-        // Extract user info from depot (set by JwtAuth or OptionalJwtAuth)
+        // Extract user info from depot (set by JwtAuth or OptionalJwtAuth hoops)
         let user_owner = depot
             .get::<String>("user_owner")
             .cloned()

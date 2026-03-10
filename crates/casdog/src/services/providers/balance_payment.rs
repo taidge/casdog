@@ -1,6 +1,7 @@
 use async_trait::async_trait;
+use std::collections::HashMap;
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::services::providers::payment_provider::{
     NotifyResult, PayRequest, PayResponse, PaymentProvider,
 };
@@ -31,8 +32,6 @@ impl PaymentProvider for BalancePaymentProvider {
         // The payment is handled internally by deducting from user's balance
         // We return a local confirmation URL
 
-        let total_amount = req.price * req.quantity as f64;
-
         // In a real implementation, you would:
         // 1. Check if user has sufficient balance
         // 2. Deduct the amount from user's balance
@@ -51,13 +50,22 @@ impl PaymentProvider for BalancePaymentProvider {
         })
     }
 
-    async fn notify(&self, _body: &[u8], order_id: &str) -> AppResult<NotifyResult> {
+    async fn notify(
+        &self,
+        _body: &[u8],
+        _headers: &HashMap<String, String>,
+        expected_order_id: Option<&str>,
+    ) -> AppResult<NotifyResult> {
         // For balance payment, the notification is handled internally
         // We assume the payment is completed immediately
         Ok(NotifyResult {
-            order_id: order_id.to_string(),
+            order_id: expected_order_id.unwrap_or_default().to_string(),
             payment_status: "Paid".to_string(),
             payment_name: "Balance".to_string(),
+            amount: None,
+            currency: None,
+            invoice_url: None,
+            raw_state: Some("paid".to_string()),
         })
     }
 
