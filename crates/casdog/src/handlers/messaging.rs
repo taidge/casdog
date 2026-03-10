@@ -5,6 +5,7 @@ use salvo::prelude::*;
 use serde::Deserialize;
 use sqlx::{Pool, Postgres};
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::services::{AppService, ProviderDispatchService};
 
@@ -97,11 +98,13 @@ async fn ensure_service_auth(
             (client_id, client_secret)
         };
 
-    let pool = depot
-        .obtain::<Pool<Postgres>>()
+    let diesel_pool = depot
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
-    let application = AppService::new(pool).get_by_client_id(&client_id).await?;
+    let application = AppService::new(diesel_pool)
+        .get_by_client_id(&client_id)
+        .await?;
     if application.client_secret != client_secret {
         return Err(AppError::Authentication(
             "Invalid client_secret".to_string(),
@@ -120,11 +123,15 @@ pub async fn send_email(
     let app_identity = ensure_service_auth(depot, req).await?;
     let req = body.into_inner();
     let receivers = request_receivers(&req.to, &req.receivers);
+    let diesel_pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
-    let service = ProviderDispatchService::new(pool);
+    let service = ProviderDispatchService::new(pool).with_diesel_pool(diesel_pool);
     let subject = req
         .title
         .clone()
@@ -163,11 +170,15 @@ pub async fn send_sms(
     let app_identity = ensure_service_auth(depot, req).await?;
     let req = body.into_inner();
     let receivers = request_receivers(&req.to, &req.receivers);
+    let diesel_pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
-    let service = ProviderDispatchService::new(pool);
+    let service = ProviderDispatchService::new(pool).with_diesel_pool(diesel_pool);
     let delivery = service
         .send_sms(
             req.provider.as_deref(),
@@ -199,11 +210,15 @@ pub async fn send_notification(
     let app_identity = ensure_service_auth(depot, req).await?;
     let req = body.into_inner();
     let receivers = request_receivers(&req.to, &req.receivers);
+    let diesel_pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
-    let service = ProviderDispatchService::new(pool);
+    let service = ProviderDispatchService::new(pool).with_diesel_pool(diesel_pool);
     let title = req
         .title
         .clone()

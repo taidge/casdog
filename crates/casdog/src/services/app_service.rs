@@ -1,21 +1,24 @@
 use chrono::Utc;
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use rand::Rng;
-use sqlx::{Pool, Postgres};
 use uuid::Uuid;
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Application, ApplicationListResponse, ApplicationQuery, ApplicationResponse,
     CreateApplicationRequest, UpdateApplicationRequest,
 };
+use crate::schema::applications;
 
 #[derive(Clone)]
 pub struct AppService {
-    pool: Pool<Postgres>,
+    pool: DieselPool,
 }
 
 impl AppService {
-    pub fn new(pool: Pool<Postgres>) -> Self {
+    pub fn new(pool: DieselPool) -> Self {
         Self { pool }
     }
 
@@ -37,84 +40,92 @@ impl AppService {
         let client_secret = Self::generate_client_secret();
         let now = Utc::now();
 
-        let app = sqlx::query_as::<_, Application>(
-            r#"
-            INSERT INTO applications (
-                id, owner, name, display_name, logo, homepage_url, description, organization,
-                client_id, client_secret, redirect_uris, token_format, expire_in_hours, cert,
-                signup_items, signin_items, signin_methods, grant_types, providers,
-                enable_password, enable_signin_session, enable_code_signin, enable_web_authn,
-                enable_internal_signup, enable_idp_signup, created_at, updated_at
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8,
-                $9, $10, $11, $12, $13, $14,
-                $15, $16, $17, $18, $19,
-                $20, $21, $22, $23,
-                $24, $25, $26, $27
-            )
-            RETURNING *
-            "#,
-        )
-        .bind(&id)
-        .bind(&req.owner)
-        .bind(&req.name)
-        .bind(&req.display_name)
-        .bind(&req.logo)
-        .bind(&req.homepage_url)
-        .bind(&req.description)
-        .bind(&req.organization)
-        .bind(&client_id)
-        .bind(&client_secret)
-        .bind(req.redirect_uris.unwrap_or_default())
-        .bind(req.token_format.unwrap_or_else(|| "JWT".to_string()))
-        .bind(req.expire_in_hours.unwrap_or(24))
-        .bind(&req.cert)
-        .bind(&req.signup_items)
-        .bind(&req.signin_items)
-        .bind(&req.signin_methods)
-        .bind(&req.grant_types)
-        .bind(&req.providers)
-        .bind(req.enable_password.unwrap_or(true))
-        .bind(req.enable_signin_session.unwrap_or(false))
-        .bind(req.enable_code_signin.unwrap_or(false))
-        .bind(req.enable_web_authn.unwrap_or(false))
-        .bind(req.enable_internal_signup.unwrap_or(true))
-        .bind(req.enable_idp_signup.unwrap_or(true))
-        .bind(now)
-        .bind(now)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-                AppError::Conflict(format!("Application '{}' already exists", req.name))
-            }
-            _ => AppError::Database(e),
-        })?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let app = diesel::insert_into(applications::table)
+            .values((
+                applications::id.eq(&id),
+                applications::owner.eq(&req.owner),
+                applications::name.eq(&req.name),
+                applications::display_name.eq(&req.display_name),
+                applications::logo.eq(&req.logo),
+                applications::homepage_url.eq(&req.homepage_url),
+                applications::description.eq(&req.description),
+                applications::organization.eq(&req.organization),
+                applications::client_id.eq(&client_id),
+                applications::client_secret.eq(&client_secret),
+                applications::redirect_uris.eq(req.redirect_uris.as_deref().unwrap_or("")),
+                applications::token_format.eq(req.token_format.as_deref().unwrap_or("JWT")),
+                applications::expire_in_hours.eq(req.expire_in_hours.unwrap_or(24)),
+                applications::cert.eq(&req.cert),
+                applications::signup_items.eq(&req.signup_items),
+                applications::signin_items.eq(&req.signin_items),
+                applications::signin_methods.eq(&req.signin_methods),
+                applications::grant_types.eq(&req.grant_types),
+                applications::providers.eq(&req.providers),
+                applications::enable_password.eq(req.enable_password.unwrap_or(true)),
+                applications::enable_signin_session.eq(req.enable_signin_session.unwrap_or(false)),
+                applications::enable_code_signin.eq(req.enable_code_signin.unwrap_or(false)),
+                applications::enable_web_authn.eq(req.enable_web_authn.unwrap_or(false)),
+                applications::enable_internal_signup.eq(req.enable_internal_signup.unwrap_or(true)),
+                applications::enable_idp_signup.eq(req.enable_idp_signup.unwrap_or(true)),
+                applications::created_at.eq(now),
+                applications::updated_at.eq(now),
+            ))
+            .returning(Application::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| match e {
+                diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                ) => AppError::Conflict(format!("Application '{}' already exists", req.name)),
+                _ => AppError::Internal(e.to_string()),
+            })?;
 
         Ok(app.into())
     }
 
     pub async fn get_by_id(&self, id: &str) -> AppResult<ApplicationResponse> {
-        let app = sqlx::query_as::<_, Application>(
-            "SELECT * FROM applications WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Application with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let app = applications::table
+            .filter(applications::id.eq(id))
+            .filter(applications::is_deleted.eq(false))
+            .select(Application::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Application with id '{}' not found", id)))?;
 
         Ok(app.into())
     }
 
     pub async fn get_internal_by_id(&self, id: &str) -> AppResult<Application> {
-        let app = sqlx::query_as::<_, Application>(
-            "SELECT * FROM applications WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Application with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let app = applications::table
+            .filter(applications::id.eq(id))
+            .filter(applications::is_deleted.eq(false))
+            .select(Application::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Application with id '{}' not found", id)))?;
 
         Ok(app)
     }
@@ -134,50 +145,86 @@ impl AppService {
             }
         }
 
-        let app = sqlx::query_as::<_, Application>(
-            r#"
-            SELECT *
-            FROM applications
-            WHERE is_deleted = FALSE
-              AND (id = $1 OR name = $1)
-            ORDER BY CASE WHEN id = $1 THEN 0 ELSE 1 END, created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(reference)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Application '{}' not found", reference)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        // Try to find by id first, then by name
+        let app = applications::table
+            .filter(applications::id.eq(reference))
+            .filter(applications::is_deleted.eq(false))
+            .select(Application::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let app = if let Some(app) = app {
+            app
+        } else {
+            applications::table
+                .filter(applications::name.eq(reference))
+                .filter(applications::is_deleted.eq(false))
+                .order(applications::created_at.desc())
+                .select(Application::as_select())
+                .first(&mut conn)
+                .await
+                .optional()
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("Application '{}' not found", reference))
+                })?
+        };
 
         Ok(app)
     }
 
     pub async fn get_by_client_id(&self, client_id: &str) -> AppResult<Application> {
-        let app = sqlx::query_as::<_, Application>(
-            "SELECT * FROM applications WHERE client_id = $1 AND is_deleted = FALSE",
-        )
-        .bind(client_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| {
-            AppError::NotFound(format!(
-                "Application with client_id '{}' not found",
-                client_id
-            ))
-        })?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let app = applications::table
+            .filter(applications::client_id.eq(client_id))
+            .filter(applications::is_deleted.eq(false))
+            .select(Application::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "Application with client_id '{}' not found",
+                    client_id
+                ))
+            })?;
 
         Ok(app)
     }
 
     pub async fn get_by_name(&self, owner: &str, name: &str) -> AppResult<Application> {
-        let app = sqlx::query_as::<_, Application>(
-            "SELECT * FROM applications WHERE owner = $1 AND name = $2 AND is_deleted = FALSE",
-        )
-        .bind(owner)
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Application '{}/{}' not found", owner, name)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let app = applications::table
+            .filter(applications::owner.eq(owner))
+            .filter(applications::name.eq(name))
+            .filter(applications::is_deleted.eq(false))
+            .select(Application::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Application '{}/{}' not found", owner, name))
+            })?;
 
         Ok(app)
     }
@@ -187,81 +234,100 @@ impl AppService {
         let page_size = query.page_size.unwrap_or(20).min(100);
         let offset = (page - 1) * page_size;
 
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         let (apps, total): (Vec<Application>, i64) = match (&query.owner, &query.organization) {
             (Some(owner), Some(org)) => {
-                let apps = sqlx::query_as::<_, Application>(
-                    "SELECT * FROM applications WHERE owner = $1 AND organization = $2 AND is_deleted = FALSE ORDER BY created_at DESC LIMIT $3 OFFSET $4",
-                )
-                .bind(owner)
-                .bind(org)
-                .bind(page_size)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?;
+                let apps = applications::table
+                    .filter(applications::owner.eq(owner))
+                    .filter(applications::organization.eq(org))
+                    .filter(applications::is_deleted.eq(false))
+                    .order(applications::created_at.desc())
+                    .limit(page_size)
+                    .offset(offset)
+                    .select(Application::as_select())
+                    .load(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-                let total: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM applications WHERE owner = $1 AND organization = $2 AND is_deleted = FALSE",
-                )
-                .bind(owner)
-                .bind(org)
-                .fetch_one(&self.pool)
-                .await?;
+                let total: i64 = applications::table
+                    .filter(applications::owner.eq(owner))
+                    .filter(applications::organization.eq(org))
+                    .filter(applications::is_deleted.eq(false))
+                    .count()
+                    .get_result(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-                (apps, total.0)
+                (apps, total)
             }
             (Some(owner), None) => {
-                let apps = sqlx::query_as::<_, Application>(
-                    "SELECT * FROM applications WHERE owner = $1 AND is_deleted = FALSE ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-                )
-                .bind(owner)
-                .bind(page_size)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?;
+                let apps = applications::table
+                    .filter(applications::owner.eq(owner))
+                    .filter(applications::is_deleted.eq(false))
+                    .order(applications::created_at.desc())
+                    .limit(page_size)
+                    .offset(offset)
+                    .select(Application::as_select())
+                    .load(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-                let total: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM applications WHERE owner = $1 AND is_deleted = FALSE",
-                )
-                .bind(owner)
-                .fetch_one(&self.pool)
-                .await?;
+                let total: i64 = applications::table
+                    .filter(applications::owner.eq(owner))
+                    .filter(applications::is_deleted.eq(false))
+                    .count()
+                    .get_result(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-                (apps, total.0)
+                (apps, total)
             }
             (None, Some(org)) => {
-                let apps = sqlx::query_as::<_, Application>(
-                    "SELECT * FROM applications WHERE organization = $1 AND is_deleted = FALSE ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-                )
-                .bind(org)
-                .bind(page_size)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?;
+                let apps = applications::table
+                    .filter(applications::organization.eq(org))
+                    .filter(applications::is_deleted.eq(false))
+                    .order(applications::created_at.desc())
+                    .limit(page_size)
+                    .offset(offset)
+                    .select(Application::as_select())
+                    .load(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-                let total: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(*) FROM applications WHERE organization = $1 AND is_deleted = FALSE",
-                )
-                .bind(org)
-                .fetch_one(&self.pool)
-                .await?;
+                let total: i64 = applications::table
+                    .filter(applications::organization.eq(org))
+                    .filter(applications::is_deleted.eq(false))
+                    .count()
+                    .get_result(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-                (apps, total.0)
+                (apps, total)
             }
             (None, None) => {
-                let apps = sqlx::query_as::<_, Application>(
-                    "SELECT * FROM applications WHERE is_deleted = FALSE ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-                )
-                .bind(page_size)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?;
+                let apps = applications::table
+                    .filter(applications::is_deleted.eq(false))
+                    .order(applications::created_at.desc())
+                    .limit(page_size)
+                    .offset(offset)
+                    .select(Application::as_select())
+                    .load(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-                let total: (i64,) =
-                    sqlx::query_as("SELECT COUNT(*) FROM applications WHERE is_deleted = FALSE")
-                        .fetch_one(&self.pool)
-                        .await?;
+                let total: i64 = applications::table
+                    .filter(applications::is_deleted.eq(false))
+                    .count()
+                    .get_result(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-                (apps, total.0)
+                (apps, total)
             }
         };
 
@@ -278,13 +344,21 @@ impl AppService {
         id: &str,
         req: UpdateApplicationRequest,
     ) -> AppResult<ApplicationResponse> {
-        let mut app = sqlx::query_as::<_, Application>(
-            "SELECT * FROM applications WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Application with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let mut app = applications::table
+            .filter(applications::id.eq(id))
+            .filter(applications::is_deleted.eq(false))
+            .select(Application::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Application with id '{}' not found", id)))?;
 
         if let Some(v) = req.display_name {
             app.display_name = v;
@@ -402,81 +476,77 @@ impl AppService {
         }
         app.updated_at = Utc::now();
 
-        let updated_app = sqlx::query_as::<_, Application>(
-            r#"
-            UPDATE applications SET
-                display_name = $1, logo = $2, homepage_url = $3, description = $4,
-                redirect_uris = $5, token_format = $6, expire_in_hours = $7,
-                refresh_expire_in_hours = $8, cert = $9, signup_url = $10, signin_url = $11,
-                forget_url = $12, terms_of_use = $13, signup_html = $14, signin_html = $15,
-                signup_items = $16, signin_items = $17, signin_methods = $18, grant_types = $19,
-                providers = $20, saml_reply_url = $21, enable_password = $22,
-                enable_signin_session = $23, enable_auto_signin = $24, enable_code_signin = $25,
-                enable_saml_compress = $26, enable_web_authn = $27, enable_link_with_email = $28,
-                enable_internal_signup = $29, enable_idp_signup = $30, form_offset = $31,
-                form_side_html = $32, form_background_url = $33, form_css = $34,
-                tags = $35, footer_text = $36, logout_url = $37,
-                logout_redirect_uris = $38, updated_at = $39
-            WHERE id = $40
-            RETURNING *
-            "#,
-        )
-        .bind(&app.display_name)
-        .bind(&app.logo)
-        .bind(&app.homepage_url)
-        .bind(&app.description)
-        .bind(&app.redirect_uris)
-        .bind(&app.token_format)
-        .bind(app.expire_in_hours)
-        .bind(app.refresh_expire_in_hours)
-        .bind(&app.cert)
-        .bind(&app.signup_url)
-        .bind(&app.signin_url)
-        .bind(&app.forget_url)
-        .bind(&app.terms_of_use)
-        .bind(&app.signup_html)
-        .bind(&app.signin_html)
-        .bind(&app.signup_items)
-        .bind(&app.signin_items)
-        .bind(&app.signin_methods)
-        .bind(&app.grant_types)
-        .bind(&app.providers)
-        .bind(&app.saml_reply_url)
-        .bind(app.enable_password)
-        .bind(app.enable_signin_session)
-        .bind(app.enable_auto_signin)
-        .bind(app.enable_code_signin)
-        .bind(app.enable_saml_compress)
-        .bind(app.enable_web_authn)
-        .bind(app.enable_link_with_email)
-        .bind(app.enable_internal_signup)
-        .bind(app.enable_idp_signup)
-        .bind(app.form_offset)
-        .bind(&app.form_side_html)
-        .bind(&app.form_background_url)
-        .bind(&app.form_css)
-        .bind(&app.tags)
-        .bind(&app.footer_text)
-        .bind(&app.logout_url)
-        .bind(&app.logout_redirect_uris)
-        .bind(app.updated_at)
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await?;
+        let updated_app = diesel::update(applications::table.filter(applications::id.eq(id)))
+            .set((
+                applications::display_name.eq(&app.display_name),
+                applications::logo.eq(&app.logo),
+                applications::homepage_url.eq(&app.homepage_url),
+                applications::description.eq(&app.description),
+                applications::redirect_uris.eq(&app.redirect_uris),
+                applications::token_format.eq(&app.token_format),
+                applications::expire_in_hours.eq(app.expire_in_hours),
+                applications::refresh_expire_in_hours.eq(app.refresh_expire_in_hours),
+                applications::cert.eq(&app.cert),
+                applications::signup_url.eq(&app.signup_url),
+                applications::signin_url.eq(&app.signin_url),
+                applications::forget_url.eq(&app.forget_url),
+                applications::terms_of_use.eq(&app.terms_of_use),
+                applications::signup_html.eq(&app.signup_html),
+                applications::signin_html.eq(&app.signin_html),
+                applications::signup_items.eq(&app.signup_items),
+                applications::signin_items.eq(&app.signin_items),
+                applications::signin_methods.eq(&app.signin_methods),
+                applications::grant_types.eq(&app.grant_types),
+                applications::providers.eq(&app.providers),
+                applications::saml_reply_url.eq(&app.saml_reply_url),
+                applications::enable_password.eq(app.enable_password),
+                applications::enable_signin_session.eq(app.enable_signin_session),
+                applications::enable_auto_signin.eq(app.enable_auto_signin),
+                applications::enable_code_signin.eq(app.enable_code_signin),
+                applications::enable_saml_compress.eq(app.enable_saml_compress),
+                applications::enable_web_authn.eq(app.enable_web_authn),
+                applications::enable_link_with_email.eq(app.enable_link_with_email),
+                applications::enable_internal_signup.eq(app.enable_internal_signup),
+                applications::enable_idp_signup.eq(app.enable_idp_signup),
+                applications::form_offset.eq(app.form_offset),
+                applications::form_side_html.eq(&app.form_side_html),
+                applications::form_background_url.eq(&app.form_background_url),
+                applications::form_css.eq(&app.form_css),
+                applications::tags.eq(&app.tags),
+                applications::footer_text.eq(&app.footer_text),
+                applications::logout_url.eq(&app.logout_url),
+                applications::logout_redirect_uris.eq(&app.logout_redirect_uris),
+                applications::updated_at.eq(app.updated_at),
+            ))
+            .returning(Application::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(updated_app.into())
     }
 
     pub async fn delete(&self, id: &str) -> AppResult<()> {
-        let result = sqlx::query(
-            "UPDATE applications SET is_deleted = TRUE, updated_at = $1 WHERE id = $2 AND is_deleted = FALSE",
-        )
-        .bind(Utc::now())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        if result.rows_affected() == 0 {
+        let count = diesel::update(
+            applications::table
+                .filter(applications::id.eq(id))
+                .filter(applications::is_deleted.eq(false)),
+        )
+        .set((
+            applications::is_deleted.eq(true),
+            applications::updated_at.eq(Utc::now()),
+        ))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if count == 0 {
             return Err(AppError::NotFound(format!(
                 "Application with id '{}' not found",
                 id

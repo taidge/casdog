@@ -1,12 +1,16 @@
 use chrono::{Duration, Utc};
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use salvo::oapi::ToSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::config::AppConfig;
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::UserResponse;
+use crate::schema::users;
 use crate::services::{
     AppService, CheckService, OrgService, PasswordService, TokenService, UserService,
 };
@@ -119,6 +123,7 @@ pub struct CheckPasswordResponse {
 #[derive(Clone)]
 pub struct AuthService {
     user_service: UserService,
+    pg_pool: Option<PgPool>,
     jwt_secret: String,
     jwt_expiration_hours: i64,
     jwt_issuer: String,
@@ -129,14 +134,24 @@ impl AuthService {
         let config = AppConfig::get();
         Self {
             user_service,
+            pg_pool: None,
             jwt_secret: config.jwt.secret,
             jwt_expiration_hours: config.jwt.expiration_hours,
             jwt_issuer: config.jwt.issuer,
         }
     }
 
+    pub fn with_pg_pool(mut self, pool: PgPool) -> Self {
+        self.pg_pool = Some(pool);
+        self
+    }
+
     pub async fn signup(&self, req: SignupRequest) -> AppResult<LoginResponse> {
         let pool = self.user_service.pool();
+        let pg_pool = self
+            .pg_pool
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("PgPool not available in AuthService".to_string()))?;
 
         // 1. Get organization for password options
         let org = OrgService::new(pool.clone())
@@ -155,7 +170,7 @@ impl AuthService {
 
         // 3. Run full signup validation
         CheckService::check_user_signup(
-            pool,
+            pg_pool,
             &req.owner,
             &req.name,
             &req.password,
@@ -171,7 +186,7 @@ impl AuthService {
         if let Some(ref invitation_code) = req.invitation_code {
             if !invitation_code.is_empty() {
                 CheckService::check_invitation_code(
-                    pool,
+                    pg_pool,
                     &req.owner,
                     invitation_code,
                     req.application.as_deref(),
@@ -228,7 +243,12 @@ impl AuthService {
         })
     }
 
-    pub async fn login(&self, pool: &PgPool, req: LoginRequest) -> AppResult<LoginResponse> {
+    pub async fn login(&self, pool: &DieselPool, req: LoginRequest) -> AppResult<LoginResponse> {
+        let pg_pool = self
+            .pg_pool
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("PgPool not available in AuthService".to_string()))?;
+
         // 1. Get application (if client_id or application name provided)
         let application = if let Some(ref client_id) = req.client_id {
             Some(
@@ -320,13 +340,13 @@ impl AuthService {
 
             if !master_valid {
                 // Record failed attempt
-                CheckService::record_signin_error(pool, &user.id, 5, 15).await?;
+                CheckService::record_signin_error(pg_pool, &user.id, 5, 15).await?;
                 return Err(AppError::Authentication("Invalid credentials".to_string()));
             }
         }
 
         // 8. Reset signin error count on success
-        CheckService::reset_signin_error(pool, &user.id).await?;
+        CheckService::reset_signin_error(pg_pool, &user.id).await?;
 
         // 9. Check MFA requirement
         if user.mfa_enabled {
@@ -399,7 +419,7 @@ impl AuthService {
 
         // 12. Check login permission if application is specified
         if let Some(ref app) = application {
-            CheckService::check_login_permission(pool, &user.id, &app.id).await?;
+            CheckService::check_login_permission(pg_pool, &user.id, &app.id).await?;
         }
 
         // 13. Generate token
@@ -535,12 +555,20 @@ impl AuthService {
         }
 
         let new_hash = UserService::hash_password(new_password)?;
-        sqlx::query("UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3")
-            .bind(&new_hash)
-            .bind(Utc::now())
-            .bind(user_id)
-            .execute(self.user_service.pool())
-            .await?;
+        let mut conn = self
+            .user_service
+            .pool()
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        diesel::update(users::table.filter(users::id.eq(user_id)))
+            .set((
+                users::password_hash.eq(&new_hash),
+                users::updated_at.eq(Utc::now()),
+            ))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(())
     }
@@ -550,14 +578,19 @@ impl AuthService {
         UserService::verify_password(password, &user.password_hash)
     }
 
-    pub async fn sso_logout(pool: &PgPool, user_id: &str) -> AppResult<()> {
+    pub async fn sso_logout(pool: &DieselPool, user_id: &str) -> AppResult<()> {
         // Delete all tokens for this user
         TokenService::delete_by_user(pool, user_id).await?;
         // Delete all sessions for this user
-        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-            .bind(user_id)
-            .execute(pool)
-            .await?;
+        use crate::schema::sessions;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        diesel::delete(sessions::table.filter(sessions::user_id.eq(user_id)))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         Ok(())
     }
 }

@@ -116,6 +116,7 @@ fn public_routes() -> Router {
         .push(Router::with_path("get-qrcode").get(auth::get_qrcode))
         .push(Router::with_path("get-webhook-event").get(auth::get_webhook_event))
         .push(Router::with_path("faceid-signin-begin").get(login_compat::faceid_signin_begin))
+        .push(Router::with_path("faceid-signin-finish").post(login_compat::faceid_signin_finish))
         .push(
             Router::new()
                 .hoop(OptionalJwtAuth)
@@ -724,6 +725,7 @@ fn api_router_for_openapi() -> Router {
             .push(Router::with_path("get-qrcode").get(auth::get_qrcode))
             .push(Router::with_path("get-webhook-event").get(auth::get_webhook_event))
             .push(Router::with_path("faceid-signin-begin").get(login_compat::faceid_signin_begin))
+            .push(Router::with_path("faceid-signin-finish").post(login_compat::faceid_signin_finish))
             .push(
                 Router::with_path("saml")
                     .push(Router::with_path("metadata").get(saml::saml_metadata))

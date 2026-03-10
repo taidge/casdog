@@ -1,20 +1,23 @@
 use chrono::Utc;
-use sqlx::{Pool, Postgres};
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use uuid::Uuid;
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     AssignPermissionRequest, CreatePermissionRequest, Permission, PermissionListResponse,
     PermissionQuery, PermissionResponse, UpdatePermissionRequest,
 };
+use crate::schema::{permissions, role_permissions};
 
 #[derive(Clone)]
 pub struct PermissionService {
-    pool: Pool<Postgres>,
+    pool: DieselPool,
 }
 
 impl PermissionService {
-    pub fn new(pool: Pool<Postgres>) -> Self {
+    pub fn new(pool: DieselPool) -> Self {
         Self { pool }
     }
 
@@ -22,45 +25,59 @@ impl PermissionService {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        let permission = sqlx::query_as::<_, Permission>(
-            r#"
-            INSERT INTO permissions (id, owner, name, display_name, description, resource_type, resources, actions, effect, is_enabled, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            RETURNING *
-            "#,
-        )
-        .bind(&id)
-        .bind(&req.owner)
-        .bind(&req.name)
-        .bind(&req.display_name)
-        .bind(&req.description)
-        .bind(&req.resource_type)
-        .bind(&req.resources)
-        .bind(&req.actions)
-        .bind(req.effect.unwrap_or_else(|| "allow".to_string()))
-        .bind(req.is_enabled.unwrap_or(true))
-        .bind(now)
-        .bind(now)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-                AppError::Conflict(format!("Permission '{}' already exists in '{}'", req.name, req.owner))
-            }
-            _ => AppError::Database(e),
-        })?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let permission = diesel::insert_into(permissions::table)
+            .values((
+                permissions::id.eq(&id),
+                permissions::owner.eq(&req.owner),
+                permissions::name.eq(&req.name),
+                permissions::display_name.eq(&req.display_name),
+                permissions::description.eq(&req.description),
+                permissions::resource_type.eq(&req.resource_type),
+                permissions::resources.eq(&req.resources),
+                permissions::actions.eq(&req.actions),
+                permissions::effect.eq(req.effect.as_deref().unwrap_or("allow")),
+                permissions::is_enabled.eq(req.is_enabled.unwrap_or(true)),
+                permissions::created_at.eq(now),
+                permissions::updated_at.eq(now),
+            ))
+            .returning(Permission::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| match e {
+                diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                ) => AppError::Conflict(format!(
+                    "Permission '{}' already exists in '{}'",
+                    req.name, req.owner
+                )),
+                _ => AppError::Internal(e.to_string()),
+            })?;
 
         Ok(permission.into())
     }
 
     pub async fn get_by_id(&self, id: &str) -> AppResult<PermissionResponse> {
-        let permission = sqlx::query_as::<_, Permission>(
-            "SELECT * FROM permissions WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Permission with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let permission = permissions::table
+            .filter(permissions::id.eq(id))
+            .filter(permissions::is_deleted.eq(false))
+            .first::<Permission>(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Permission with id '{}' not found", id)))?;
 
         Ok(permission.into())
     }
@@ -70,43 +87,54 @@ impl PermissionService {
         let page_size = query.page_size.unwrap_or(20).min(100);
         let offset = (page - 1) * page_size;
 
-        let (permissions, total): (Vec<Permission>, i64) = if let Some(owner) = &query.owner {
-            let permissions = sqlx::query_as::<_, Permission>(
-                "SELECT * FROM permissions WHERE owner = $1 AND is_deleted = FALSE ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            )
-            .bind(owner)
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM permissions WHERE owner = $1 AND is_deleted = FALSE",
-            )
-            .bind(owner)
-            .fetch_one(&self.pool)
-            .await?;
+        let (perm_list, total): (Vec<Permission>, i64) = if let Some(ref owner) = query.owner {
+            let perm_list = permissions::table
+                .filter(permissions::owner.eq(owner))
+                .filter(permissions::is_deleted.eq(false))
+                .order(permissions::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .load::<Permission>(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (permissions, total.0)
+            let total: i64 = permissions::table
+                .filter(permissions::owner.eq(owner))
+                .filter(permissions::is_deleted.eq(false))
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            (perm_list, total)
         } else {
-            let permissions = sqlx::query_as::<_, Permission>(
-                "SELECT * FROM permissions WHERE is_deleted = FALSE ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-            )
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
+            let perm_list = permissions::table
+                .filter(permissions::is_deleted.eq(false))
+                .order(permissions::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .load::<Permission>(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM permissions WHERE is_deleted = FALSE")
-                    .fetch_one(&self.pool)
-                    .await?;
+            let total: i64 = permissions::table
+                .filter(permissions::is_deleted.eq(false))
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (permissions, total.0)
+            (perm_list, total)
         };
 
         Ok(PermissionListResponse {
-            data: permissions.into_iter().map(|p| p.into()).collect(),
+            data: perm_list.into_iter().map(|p| p.into()).collect(),
             total,
             page,
             page_size,
@@ -118,13 +146,20 @@ impl PermissionService {
         id: &str,
         req: UpdatePermissionRequest,
     ) -> AppResult<PermissionResponse> {
-        let mut permission = sqlx::query_as::<_, Permission>(
-            "SELECT * FROM permissions WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Permission with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let mut permission = permissions::table
+            .filter(permissions::id.eq(id))
+            .filter(permissions::is_deleted.eq(false))
+            .first::<Permission>(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Permission with id '{}' not found", id)))?;
 
         if let Some(display_name) = req.display_name {
             permission.display_name = display_name;
@@ -149,39 +184,46 @@ impl PermissionService {
         }
         permission.updated_at = Utc::now();
 
-        let updated_permission = sqlx::query_as::<_, Permission>(
-            r#"
-            UPDATE permissions
-            SET display_name = $1, description = $2, resource_type = $3, resources = $4, actions = $5, effect = $6, is_enabled = $7, updated_at = $8
-            WHERE id = $9
-            RETURNING *
-            "#,
-        )
-        .bind(&permission.display_name)
-        .bind(&permission.description)
-        .bind(&permission.resource_type)
-        .bind(&permission.resources)
-        .bind(&permission.actions)
-        .bind(&permission.effect)
-        .bind(permission.is_enabled)
-        .bind(permission.updated_at)
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await?;
+        let updated_permission = diesel::update(permissions::table.filter(permissions::id.eq(id)))
+            .set((
+                permissions::display_name.eq(&permission.display_name),
+                permissions::description.eq(&permission.description),
+                permissions::resource_type.eq(&permission.resource_type),
+                permissions::resources.eq(&permission.resources),
+                permissions::actions.eq(&permission.actions),
+                permissions::effect.eq(&permission.effect),
+                permissions::is_enabled.eq(permission.is_enabled),
+                permissions::updated_at.eq(permission.updated_at),
+            ))
+            .returning(Permission::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(updated_permission.into())
     }
 
     pub async fn delete(&self, id: &str) -> AppResult<()> {
-        let result = sqlx::query(
-            "UPDATE permissions SET is_deleted = TRUE, updated_at = $1 WHERE id = $2 AND is_deleted = FALSE",
-        )
-        .bind(Utc::now())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        if result.rows_affected() == 0 {
+        let count = diesel::update(
+            permissions::table
+                .filter(permissions::id.eq(id))
+                .filter(permissions::is_deleted.eq(false)),
+        )
+        .set((
+            permissions::is_deleted.eq(true),
+            permissions::updated_at.eq(Utc::now()),
+        ))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if count == 0 {
             return Err(AppError::NotFound(format!(
                 "Permission with id '{}' not found",
                 id
@@ -195,32 +237,45 @@ impl PermissionService {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        sqlx::query(
-            r#"
-            INSERT INTO role_permissions (id, role_id, permission_id, created_at)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (role_id, permission_id) DO NOTHING
-            "#,
-        )
-        .bind(&id)
-        .bind(&req.role_id)
-        .bind(&req.permission_id)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::insert_into(role_permissions::table)
+            .values((
+                role_permissions::id.eq(&id),
+                role_permissions::role_id.eq(&req.role_id),
+                role_permissions::permission_id.eq(&req.permission_id),
+                role_permissions::created_at.eq(now),
+            ))
+            .on_conflict((role_permissions::role_id, role_permissions::permission_id))
+            .do_nothing()
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(())
     }
 
     pub async fn remove_permission(&self, role_id: &str, permission_id: &str) -> AppResult<()> {
-        let result =
-            sqlx::query("DELETE FROM role_permissions WHERE role_id = $1 AND permission_id = $2")
-                .bind(role_id)
-                .bind(permission_id)
-                .execute(&self.pool)
-                .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        if result.rows_affected() == 0 {
+        let count = diesel::delete(
+            role_permissions::table
+                .filter(role_permissions::role_id.eq(role_id))
+                .filter(role_permissions::permission_id.eq(permission_id)),
+        )
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if count == 0 {
             return Err(AppError::NotFound(format!(
                 "Permission assignment not found for role '{}' and permission '{}'",
                 role_id, permission_id
@@ -231,17 +286,23 @@ impl PermissionService {
     }
 
     pub async fn get_role_permissions(&self, role_id: &str) -> AppResult<Vec<PermissionResponse>> {
-        let permissions = sqlx::query_as::<_, Permission>(
-            r#"
-            SELECT p.* FROM permissions p
-            INNER JOIN role_permissions rp ON p.id = rp.permission_id
-            WHERE rp.role_id = $1 AND p.is_deleted = FALSE
-            "#,
-        )
-        .bind(role_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        Ok(permissions.into_iter().map(|p| p.into()).collect())
+        let perm_list = permissions::table
+            .inner_join(
+                role_permissions::table.on(permissions::id.eq(role_permissions::permission_id)),
+            )
+            .filter(role_permissions::role_id.eq(role_id))
+            .filter(permissions::is_deleted.eq(false))
+            .select(Permission::as_select())
+            .load::<Permission>(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(perm_list.into_iter().map(|p| p.into()).collect())
     }
 }

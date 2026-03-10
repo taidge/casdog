@@ -1,20 +1,23 @@
 use chrono::Utc;
-use sqlx::{Pool, Postgres};
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use uuid::Uuid;
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     AssignRoleRequest, CreateRoleRequest, Role, RoleListResponse, RoleQuery, RoleResponse,
     UpdateRoleRequest,
 };
+use crate::schema::{roles, user_roles};
 
 #[derive(Clone)]
 pub struct RoleService {
-    pool: Pool<Postgres>,
+    pool: DieselPool,
 }
 
 impl RoleService {
-    pub fn new(pool: Pool<Postgres>) -> Self {
+    pub fn new(pool: DieselPool) -> Self {
         Self { pool }
     }
 
@@ -22,40 +25,55 @@ impl RoleService {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        let role = sqlx::query_as::<_, Role>(
-            r#"
-            INSERT INTO roles (id, owner, name, display_name, description, is_enabled, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING *
-            "#,
-        )
-        .bind(&id)
-        .bind(&req.owner)
-        .bind(&req.name)
-        .bind(&req.display_name)
-        .bind(&req.description)
-        .bind(req.is_enabled.unwrap_or(true))
-        .bind(now)
-        .bind(now)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-                AppError::Conflict(format!("Role '{}' already exists in '{}'", req.name, req.owner))
-            }
-            _ => AppError::Database(e),
-        })?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let role = diesel::insert_into(roles::table)
+            .values((
+                roles::id.eq(&id),
+                roles::owner.eq(&req.owner),
+                roles::name.eq(&req.name),
+                roles::display_name.eq(&req.display_name),
+                roles::description.eq(&req.description),
+                roles::is_enabled.eq(req.is_enabled.unwrap_or(true)),
+                roles::created_at.eq(now),
+                roles::updated_at.eq(now),
+            ))
+            .returning(Role::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| match e {
+                diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                ) => AppError::Conflict(format!(
+                    "Role '{}' already exists in '{}'",
+                    req.name, req.owner
+                )),
+                _ => AppError::Internal(e.to_string()),
+            })?;
 
         Ok(role.into())
     }
 
     pub async fn get_by_id(&self, id: &str) -> AppResult<RoleResponse> {
-        let role =
-            sqlx::query_as::<_, Role>("SELECT * FROM roles WHERE id = $1 AND is_deleted = FALSE")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("Role with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let role = roles::table
+            .filter(roles::id.eq(id))
+            .filter(roles::is_deleted.eq(false))
+            .first::<Role>(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Role with id '{}' not found", id)))?;
 
         Ok(role.into())
     }
@@ -65,43 +83,54 @@ impl RoleService {
         let page_size = query.page_size.unwrap_or(20).min(100);
         let offset = (page - 1) * page_size;
 
-        let (roles, total): (Vec<Role>, i64) = if let Some(owner) = &query.owner {
-            let roles = sqlx::query_as::<_, Role>(
-                "SELECT * FROM roles WHERE owner = $1 AND is_deleted = FALSE ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            )
-            .bind(owner)
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM roles WHERE owner = $1 AND is_deleted = FALSE",
-            )
-            .bind(owner)
-            .fetch_one(&self.pool)
-            .await?;
+        let (role_list, total): (Vec<Role>, i64) = if let Some(ref owner) = query.owner {
+            let role_list = roles::table
+                .filter(roles::owner.eq(owner))
+                .filter(roles::is_deleted.eq(false))
+                .order(roles::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .load::<Role>(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (roles, total.0)
+            let total: i64 = roles::table
+                .filter(roles::owner.eq(owner))
+                .filter(roles::is_deleted.eq(false))
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            (role_list, total)
         } else {
-            let roles = sqlx::query_as::<_, Role>(
-                "SELECT * FROM roles WHERE is_deleted = FALSE ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-            )
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
+            let role_list = roles::table
+                .filter(roles::is_deleted.eq(false))
+                .order(roles::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .load::<Role>(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM roles WHERE is_deleted = FALSE")
-                    .fetch_one(&self.pool)
-                    .await?;
+            let total: i64 = roles::table
+                .filter(roles::is_deleted.eq(false))
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (roles, total.0)
+            (role_list, total)
         };
 
         Ok(RoleListResponse {
-            data: roles.into_iter().map(|r| r.into()).collect(),
+            data: role_list.into_iter().map(|r| r.into()).collect(),
             total,
             page,
             page_size,
@@ -109,12 +138,20 @@ impl RoleService {
     }
 
     pub async fn update(&self, id: &str, req: UpdateRoleRequest) -> AppResult<RoleResponse> {
-        let mut role =
-            sqlx::query_as::<_, Role>("SELECT * FROM roles WHERE id = $1 AND is_deleted = FALSE")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("Role with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let mut role = roles::table
+            .filter(roles::id.eq(id))
+            .filter(roles::is_deleted.eq(false))
+            .first::<Role>(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Role with id '{}' not found", id)))?;
 
         if let Some(display_name) = req.display_name {
             role.display_name = display_name;
@@ -127,35 +164,39 @@ impl RoleService {
         }
         role.updated_at = Utc::now();
 
-        let updated_role = sqlx::query_as::<_, Role>(
-            r#"
-            UPDATE roles
-            SET display_name = $1, description = $2, is_enabled = $3, updated_at = $4
-            WHERE id = $5
-            RETURNING *
-            "#,
-        )
-        .bind(&role.display_name)
-        .bind(&role.description)
-        .bind(role.is_enabled)
-        .bind(role.updated_at)
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await?;
+        let updated_role = diesel::update(roles::table.filter(roles::id.eq(id)))
+            .set((
+                roles::display_name.eq(&role.display_name),
+                roles::description.eq(&role.description),
+                roles::is_enabled.eq(role.is_enabled),
+                roles::updated_at.eq(role.updated_at),
+            ))
+            .returning(Role::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(updated_role.into())
     }
 
     pub async fn delete(&self, id: &str) -> AppResult<()> {
-        let result = sqlx::query(
-            "UPDATE roles SET is_deleted = TRUE, updated_at = $1 WHERE id = $2 AND is_deleted = FALSE",
-        )
-        .bind(Utc::now())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        if result.rows_affected() == 0 {
+        let count = diesel::update(
+            roles::table
+                .filter(roles::id.eq(id))
+                .filter(roles::is_deleted.eq(false)),
+        )
+        .set((roles::is_deleted.eq(true), roles::updated_at.eq(Utc::now())))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if count == 0 {
             return Err(AppError::NotFound(format!(
                 "Role with id '{}' not found",
                 id
@@ -169,31 +210,45 @@ impl RoleService {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        sqlx::query(
-            r#"
-            INSERT INTO user_roles (id, user_id, role_id, created_at)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (user_id, role_id) DO NOTHING
-            "#,
-        )
-        .bind(&id)
-        .bind(&req.user_id)
-        .bind(&req.role_id)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::insert_into(user_roles::table)
+            .values((
+                user_roles::id.eq(&id),
+                user_roles::user_id.eq(&req.user_id),
+                user_roles::role_id.eq(&req.role_id),
+                user_roles::created_at.eq(now),
+            ))
+            .on_conflict((user_roles::user_id, user_roles::role_id))
+            .do_nothing()
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(())
     }
 
     pub async fn remove_role(&self, user_id: &str, role_id: &str) -> AppResult<()> {
-        let result = sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2")
-            .bind(user_id)
-            .bind(role_id)
-            .execute(&self.pool)
-            .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        if result.rows_affected() == 0 {
+        let count = diesel::delete(
+            user_roles::table
+                .filter(user_roles::user_id.eq(user_id))
+                .filter(user_roles::role_id.eq(role_id)),
+        )
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if count == 0 {
             return Err(AppError::NotFound(format!(
                 "User role assignment not found for user '{}' and role '{}'",
                 user_id, role_id
@@ -204,17 +259,21 @@ impl RoleService {
     }
 
     pub async fn get_user_roles(&self, user_id: &str) -> AppResult<Vec<RoleResponse>> {
-        let roles = sqlx::query_as::<_, Role>(
-            r#"
-            SELECT r.* FROM roles r
-            INNER JOIN user_roles ur ON r.id = ur.role_id
-            WHERE ur.user_id = $1 AND r.is_deleted = FALSE
-            "#,
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        Ok(roles.into_iter().map(|r| r.into()).collect())
+        let role_list = roles::table
+            .inner_join(user_roles::table.on(roles::id.eq(user_roles::role_id)))
+            .filter(user_roles::user_id.eq(user_id))
+            .filter(roles::is_deleted.eq(false))
+            .select(Role::as_select())
+            .load::<Role>(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(role_list.into_iter().map(|r| r.into()).collect())
     }
 }

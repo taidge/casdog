@@ -5,7 +5,11 @@ use sqlx::FromRow;
 
 /// Full User entity matching Casdoor's user model.
 /// Social provider IDs are stored in `provider_ids` JSONB instead of 78 individual columns.
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, FromRow, ToSchema, diesel::Queryable, diesel::Selectable,
+)]
+#[diesel(table_name = crate::schema::users)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct User {
     pub id: String,
     pub owner: String,

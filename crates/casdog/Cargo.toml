@@ -11,6 +11,10 @@ description = "Casdog IAM/SSO server - Casdoor-compatible identity and access ma
 readme = "../../README.md"
 include = ["/src/**", "/build.rs", "/config/**", "/casbin/**", "/web-dist/**", "/README.md"]
 
+[lib]
+name = "casdog"
+path = "src/lib.rs"
+
 [[bin]]
 name = "casdog"
 path = "src/main.rs"
@@ -48,6 +52,8 @@ lettre.workspace = true
 totp-rs.workspace = true
 webauthn-rs.workspace = true
 webauthn-rs-proto.workspace = true
+diesel.workspace = true
+diesel-async.workspace = true
 ldap3 = "0.11"
 flate2 = "1"
 tar = "0.4"
@@ -56,3 +62,9 @@ which = "7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+serde_json.workspace = true
+salvo = { workspace = true, features = ["test"] }
+rsa.workspace = true
+sha2.workspace = true
+base64.workspace = true

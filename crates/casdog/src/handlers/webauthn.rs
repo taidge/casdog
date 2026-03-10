@@ -14,6 +14,7 @@ use webauthn_rs::prelude::{
 };
 
 use crate::config::AppConfig;
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::services::auth_service::LoginResponse;
 use crate::services::webauthn_service::WebauthnService;
@@ -160,6 +161,10 @@ pub async fn signup_begin(
     req: &mut Request,
 ) -> AppResult<Json<WebauthnBeginResponse>> {
     let pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
@@ -170,7 +175,7 @@ pub async fn signup_begin(
 
     let user_service = UserService::new(pool.clone());
     let user = user_service.get_by_id_internal(&user_id).await?;
-    let passkeys = load_passkey_rows(&pool, &user_id).await?;
+    let passkeys = load_passkey_rows(&pg_pool, &user_id).await?;
     let existing_credentials = if passkeys.is_empty() {
         None
     } else {
@@ -237,6 +242,10 @@ pub async fn signin_begin(
     req: &mut Request,
 ) -> AppResult<Json<WebauthnBeginResponse>> {
     let pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
@@ -246,7 +255,7 @@ pub async fn signin_begin(
 
     let user_service = UserService::new(pool.clone());
     let user = user_service.get_by_name(&owner, &name).await?;
-    let passkey_rows = load_passkey_rows(&pool, &user.id).await?;
+    let passkey_rows = load_passkey_rows(&pg_pool, &user.id).await?;
     if passkey_rows.is_empty() {
         return Err(AppError::Validation(
             "Found no WebAuthn credentials for this user".to_string(),
@@ -293,6 +302,10 @@ pub async fn signin_finish(
     body: JsonBody<serde_json::Value>,
 ) -> AppResult<Json<LoginResponse>> {
     let pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
@@ -302,7 +315,7 @@ pub async fn signin_finish(
     let assertion: PublicKeyCredential = serde_json::from_value(body.into_inner())
         .map_err(|e| AppError::Validation(format!("Invalid authentication payload: {}", e)))?;
 
-    let passkey_rows = load_passkey_rows(&pool, &state.user_id).await?;
+    let passkey_rows = load_passkey_rows(&pg_pool, &state.user_id).await?;
     let passkeys: Vec<Passkey> = passkey_rows
         .iter()
         .map(|(_, _, _, passkey)| passkey.clone())
@@ -318,7 +331,7 @@ pub async fn signin_finish(
 
     for (credential_row_id, _, _, mut passkey) in passkey_rows {
         if passkey.update_credential(&auth_result).unwrap_or(false) {
-            persist_passkey(&pool, &credential_row_id, &passkey).await?;
+            persist_passkey(&pg_pool, &credential_row_id, &passkey).await?;
             break;
         }
     }

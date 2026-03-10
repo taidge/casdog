@@ -5,6 +5,7 @@ use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
 
 use crate::config::AppConfig;
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{Application, Certificate, User};
 use crate::services::{AppService, ProviderService, SamlService, UserService};
@@ -133,7 +134,7 @@ fn append_query_param(url: &str, key: &str, value: &str) -> String {
     format!("{url}{separator}{key}={value}")
 }
 
-async fn load_current_user(depot: &Depot, pool: &Pool<Postgres>) -> AppResult<Option<User>> {
+async fn load_current_user(depot: &Depot, pool: &DieselPool) -> AppResult<Option<User>> {
     let Ok(user_id) = depot.get::<String>("user_id").cloned() else {
         return Ok(None);
     };
@@ -145,13 +146,17 @@ async fn load_current_user(depot: &Depot, pool: &Pool<Postgres>) -> AppResult<Op
 #[endpoint(tags("SAML"), summary = "Get SAML IdP metadata")]
 pub async fn saml_metadata(req: &mut Request, depot: &mut Depot) -> Result<String, AppError> {
     let pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool.clone());
     let application = resolve_application(req, &app_service).await?;
     let enable_post_binding = req.query::<bool>("enablePostBinding").unwrap_or(false);
-    let cert = resolve_certificate(&pool, &application)
+    let cert = resolve_certificate(&pg_pool, &application)
         .await?
         .ok_or_else(|| {
             AppError::NotFound(format!(
@@ -244,6 +249,10 @@ pub async fn saml_redirect(
     let login_hint = req.query::<String>("login_hint");
 
     let pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
@@ -268,8 +277,14 @@ pub async fn saml_redirect(
         AppError::Validation("SAMLRequest is required once the user is authenticated".to_string())
     })?;
     let issuer = origin.clone();
-    let (response, destination, method) =
-        SamlService::build_application_response(&application, &user, &saml_request, &issuer)?;
+    let cert = resolve_certificate(&pg_pool, &application).await?;
+    let (response, destination, method) = SamlService::build_application_response(
+        &application,
+        &user,
+        &saml_request,
+        &issuer,
+        cert.as_ref(),
+    )?;
 
     if method == "POST" {
         let html = SamlService::build_auto_post_form(

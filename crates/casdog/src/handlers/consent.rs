@@ -3,6 +3,7 @@ use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{Application, ConsentGrantResponse, ConsentRequest};
 use crate::services::{AppService, ConsentService, TokenService};
@@ -38,10 +39,7 @@ fn application_matches(application: &Application, identifier: &str) -> bool {
         || identifier == format!("{}/{}", application.owner, application.name)
 }
 
-async fn resolve_application(
-    pool: &Pool<Postgres>,
-    req: &ConsentRequest,
-) -> AppResult<Application> {
+async fn resolve_application(pool: &DieselPool, req: &ConsentRequest) -> AppResult<Application> {
     let app_service = AppService::new(pool.clone());
 
     let application = if let Some(client_id) = req.client_id.as_deref() {
@@ -71,6 +69,10 @@ pub async fn grant_consent(
     body: JsonBody<ConsentRequest>,
 ) -> AppResult<Json<ConsentGrantResponse>> {
     let pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
@@ -98,7 +100,7 @@ pub async fn grant_consent(
         }
     }
 
-    ConsentService::grant(&pool, &user_id, &application.id, &scopes).await?;
+    ConsentService::grant(&pg_pool, &user_id, &application.id, &scopes).await?;
 
     let scope_text = if let Some(scope) = req.scope.as_deref() {
         scope.to_string()
@@ -142,6 +144,10 @@ pub async fn revoke_consent(
     body: JsonBody<ConsentRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
@@ -159,7 +165,7 @@ pub async fn revoke_consent(
     }
 
     let application = resolve_application(&pool, &req).await?;
-    let remaining = ConsentService::revoke(&pool, &user_id, &application.id, &scopes).await?;
+    let remaining = ConsentService::revoke(&pg_pool, &user_id, &application.id, &scopes).await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",

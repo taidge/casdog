@@ -1,14 +1,17 @@
 use chrono::Utc;
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use rand::Rng;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Application, CreateTokenRequest, IntrospectResponse, OAuthTokenResponse, Token, TokenResponse,
     UpdateTokenRequest,
 };
+use crate::schema::tokens;
 use crate::services::UserService;
 use crate::services::id_token_service::IdTokenService;
 
@@ -16,155 +19,232 @@ pub struct TokenService;
 
 impl TokenService {
     pub async fn list(
-        pool: &PgPool,
+        pool: &DieselPool,
         owner: Option<&str>,
         page: i64,
         page_size: i64,
     ) -> AppResult<(Vec<TokenResponse>, i64)> {
         let offset = (page - 1) * page_size;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let (tokens, total): (Vec<Token>, i64) = if let Some(owner) = owner {
-            let tokens = sqlx::query_as::<_, Token>(
-                r#"SELECT * FROM tokens WHERE owner = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"#
-            )
-            .bind(owner)
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(pool)
-            .await?;
+        let (token_list, total): (Vec<Token>, i64) = if let Some(owner) = owner {
+            let token_list = tokens::table
+                .filter(tokens::owner.eq(owner))
+                .order(tokens::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .select(Token::as_select())
+                .load(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tokens WHERE owner = $1")
-                .bind(owner)
-                .fetch_one(pool)
-                .await?;
+            let total: i64 = tokens::table
+                .filter(tokens::owner.eq(owner))
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (tokens, total.0)
+            (token_list, total)
         } else {
-            let tokens = sqlx::query_as::<_, Token>(
-                r#"SELECT * FROM tokens ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
-            )
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(pool)
-            .await?;
+            let token_list = tokens::table
+                .order(tokens::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .select(Token::as_select())
+                .load(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tokens")
-                .fetch_one(pool)
-                .await?;
+            let total: i64 = tokens::table
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (tokens, total.0)
+            (token_list, total)
         };
 
-        Ok((tokens.into_iter().map(Into::into).collect(), total))
+        Ok((token_list.into_iter().map(Into::into).collect(), total))
     }
 
-    pub async fn get_by_id(pool: &PgPool, id: &str) -> AppResult<TokenResponse> {
-        let token = sqlx::query_as::<_, Token>("SELECT * FROM tokens WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
-            .await?;
+    pub async fn get_by_id(pool: &DieselPool, id: &str) -> AppResult<TokenResponse> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let token = tokens::table
+            .filter(tokens::id.eq(id))
+            .select(Token::as_select())
+            .first(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         Ok(token.into())
     }
 
-    pub async fn get_by_access_token(pool: &PgPool, access_token: &str) -> AppResult<Token> {
-        let token = sqlx::query_as::<_, Token>("SELECT * FROM tokens WHERE access_token = $1")
-            .bind(access_token)
-            .fetch_one(pool)
-            .await?;
+    pub async fn get_by_access_token(pool: &DieselPool, access_token: &str) -> AppResult<Token> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let token = tokens::table
+            .filter(tokens::access_token.eq(access_token))
+            .select(Token::as_select())
+            .first(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         Ok(token)
     }
 
-    pub async fn get_by_refresh_token(pool: &PgPool, refresh_token: &str) -> AppResult<Token> {
-        let token = sqlx::query_as::<_, Token>("SELECT * FROM tokens WHERE refresh_token = $1")
-            .bind(refresh_token)
-            .fetch_one(pool)
-            .await?;
+    pub async fn get_by_refresh_token(pool: &DieselPool, refresh_token: &str) -> AppResult<Token> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let token = tokens::table
+            .filter(tokens::refresh_token.eq(refresh_token))
+            .select(Token::as_select())
+            .first(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         Ok(token)
     }
 
-    pub async fn get_by_code(pool: &PgPool, code: &str) -> AppResult<Token> {
-        let token = sqlx::query_as::<_, Token>(
-            "SELECT * FROM tokens WHERE code = $1 AND code_is_used = false",
-        )
-        .bind(code)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| {
-            AppError::Authentication("Invalid or expired authorization code".to_string())
-        })?;
+    pub async fn get_by_code(pool: &DieselPool, code: &str) -> AppResult<Token> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let token = tokens::table
+            .filter(tokens::code.eq(code))
+            .filter(tokens::code_is_used.eq(false))
+            .select(Token::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                AppError::Authentication("Invalid or expired authorization code".to_string())
+            })?;
+
         Ok(token)
     }
 
-    pub async fn create(pool: &PgPool, req: CreateTokenRequest) -> AppResult<TokenResponse> {
+    pub async fn create(pool: &DieselPool, req: CreateTokenRequest) -> AppResult<TokenResponse> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let access_token = Self::generate_token();
         let refresh_token = Self::generate_token();
-        let expires_in = req.expires_in.unwrap_or(3600 * 24); // Default 24 hours
+        let expires_in = req.expires_in.unwrap_or(3600 * 24);
         let scope = req.scope.unwrap_or_else(|| "openid profile".to_string());
 
-        let token = sqlx::query_as::<_, Token>(
-            r#"INSERT INTO tokens (
-                id, owner, name, created_at, application, organization, user_id,
-                access_token, refresh_token, expires_in, scope, token_type, code_is_used
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'Bearer', false)
-            RETURNING *"#,
-        )
-        .bind(&id)
-        .bind(&req.owner)
-        .bind(&req.name)
-        .bind(now)
-        .bind(&req.application)
-        .bind(&req.organization)
-        .bind(&req.user)
-        .bind(&access_token)
-        .bind(&refresh_token)
-        .bind(expires_in)
-        .bind(&scope)
-        .fetch_one(pool)
-        .await?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let token = diesel::insert_into(tokens::table)
+            .values((
+                tokens::id.eq(&id),
+                tokens::owner.eq(&req.owner),
+                tokens::name.eq(&req.name),
+                tokens::created_at.eq(now),
+                tokens::application.eq(&req.application),
+                tokens::organization.eq(&req.organization),
+                tokens::user_id.eq(&req.user),
+                tokens::access_token.eq(&access_token),
+                tokens::refresh_token.eq(&refresh_token),
+                tokens::expires_in.eq(expires_in),
+                tokens::scope.eq(&scope),
+                tokens::token_type.eq("Bearer"),
+                tokens::code_is_used.eq(false),
+            ))
+            .returning(Token::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(token.into())
     }
 
     pub async fn update(
-        pool: &PgPool,
+        pool: &DieselPool,
         id: &str,
         req: UpdateTokenRequest,
     ) -> AppResult<TokenResponse> {
-        let token = sqlx::query_as::<_, Token>(
-            r#"UPDATE tokens SET
-                scope = COALESCE($2, scope),
-                expires_in = COALESCE($3, expires_in)
-            WHERE id = $1 RETURNING *"#,
-        )
-        .bind(id)
-        .bind(&req.scope)
-        .bind(&req.expires_in)
-        .fetch_one(pool)
-        .await?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        // Fetch current token, apply changes, write back
+        let mut token = tokens::table
+            .filter(tokens::id.eq(id))
+            .select(Token::as_select())
+            .first(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if let Some(ref scope) = req.scope {
+            token.scope = scope.clone();
+        }
+        if let Some(expires_in) = req.expires_in {
+            token.expires_in = expires_in;
+        }
+
+        let token = diesel::update(tokens::table.filter(tokens::id.eq(id)))
+            .set((
+                tokens::scope.eq(&token.scope),
+                tokens::expires_in.eq(token.expires_in),
+            ))
+            .returning(Token::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(token.into())
     }
 
-    pub async fn delete(pool: &PgPool, id: &str) -> AppResult<()> {
-        sqlx::query("DELETE FROM tokens WHERE id = $1")
-            .bind(id)
-            .execute(pool)
-            .await?;
+    pub async fn delete(pool: &DieselPool, id: &str) -> AppResult<()> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::delete(tokens::table.filter(tokens::id.eq(id)))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         Ok(())
     }
 
-    pub async fn delete_by_access_token(pool: &PgPool, access_token: &str) -> AppResult<()> {
-        sqlx::query("DELETE FROM tokens WHERE access_token = $1")
-            .bind(access_token)
-            .execute(pool)
-            .await?;
+    pub async fn delete_by_access_token(pool: &DieselPool, access_token: &str) -> AppResult<()> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::delete(tokens::table.filter(tokens::access_token.eq(access_token)))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         Ok(())
     }
 
     pub async fn persist_issued_access_token(
-        pool: &PgPool,
+        pool: &DieselPool,
         owner: &str,
         name: &str,
         application: &str,
@@ -178,40 +258,51 @@ impl TokenService {
         let now = Utc::now();
         let scope = scope.unwrap_or("openid profile");
 
-        let token = sqlx::query_as::<_, Token>(
-            r#"INSERT INTO tokens (
-                id, owner, name, created_at, application, organization, user_id,
-                access_token, expires_in, scope, token_type, code_is_used
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Bearer', false)
-            RETURNING *"#,
-        )
-        .bind(&id)
-        .bind(owner)
-        .bind(name)
-        .bind(now)
-        .bind(application)
-        .bind(organization)
-        .bind(user_id)
-        .bind(access_token)
-        .bind(expires_in)
-        .bind(scope)
-        .fetch_one(pool)
-        .await?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let token = diesel::insert_into(tokens::table)
+            .values((
+                tokens::id.eq(&id),
+                tokens::owner.eq(owner),
+                tokens::name.eq(name),
+                tokens::created_at.eq(now),
+                tokens::application.eq(application),
+                tokens::organization.eq(organization),
+                tokens::user_id.eq(user_id),
+                tokens::access_token.eq(access_token),
+                tokens::expires_in.eq(expires_in),
+                tokens::scope.eq(scope),
+                tokens::token_type.eq("Bearer"),
+                tokens::code_is_used.eq(false),
+            ))
+            .returning(Token::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(token.into())
     }
 
-    pub async fn delete_by_user(pool: &PgPool, user_id: &str) -> AppResult<u64> {
-        let result = sqlx::query("DELETE FROM tokens WHERE user_id = $1")
-            .bind(user_id)
-            .execute(pool)
-            .await?;
-        Ok(result.rows_affected())
+    pub async fn delete_by_user(pool: &DieselPool, user_id: &str) -> AppResult<u64> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let count = diesel::delete(tokens::table.filter(tokens::user_id.eq(user_id)))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(count as u64)
     }
 
     /// Create an authorization code for the OAuth code flow
     pub async fn create_authorization_code(
-        pool: &PgPool,
+        pool: &DieselPool,
         application: &Application,
         user_id: &str,
         scope: &str,
@@ -224,37 +315,42 @@ impl TokenService {
         let code = Self::generate_token();
         let now = Utc::now();
 
-        sqlx::query(
-            r#"INSERT INTO tokens (
-                id, owner, name, created_at, application, organization, user_id,
-                code, access_token, expires_in, scope, token_type,
-                code_challenge, code_challenge_method, code_is_used, code_expire_in,
-                nonce, redirect_uri
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', 0, $9, 'Bearer',
-                      $10, $11, false, 300, $12, $13)"#,
-        )
-        .bind(&id)
-        .bind(&application.owner)
-        .bind(&format!("code_{}", id))
-        .bind(now)
-        .bind(&application.name)
-        .bind(&application.organization)
-        .bind(user_id)
-        .bind(&code)
-        .bind(scope)
-        .bind(code_challenge)
-        .bind(code_challenge_method)
-        .bind(nonce)
-        .bind(redirect_uri)
-        .execute(pool)
-        .await?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::insert_into(tokens::table)
+            .values((
+                tokens::id.eq(&id),
+                tokens::owner.eq(&application.owner),
+                tokens::name.eq(&format!("code_{}", id)),
+                tokens::created_at.eq(now),
+                tokens::application.eq(&application.name),
+                tokens::organization.eq(&application.organization),
+                tokens::user_id.eq(user_id),
+                tokens::code.eq(&code),
+                tokens::access_token.eq(""),
+                tokens::expires_in.eq(0i64),
+                tokens::scope.eq(scope),
+                tokens::token_type.eq("Bearer"),
+                tokens::code_challenge.eq(code_challenge),
+                tokens::code_challenge_method.eq(code_challenge_method),
+                tokens::code_is_used.eq(false),
+                tokens::code_expire_in.eq(Some(300i64)),
+                tokens::nonce.eq(nonce),
+                tokens::redirect_uri.eq(Some(redirect_uri)),
+            ))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(code)
     }
 
     /// Exchange an authorization code for tokens
     pub async fn exchange_authorization_code(
-        pool: &PgPool,
+        pool: &DieselPool,
         application: &Application,
         code: &str,
         redirect_uri: Option<&str>,
@@ -321,15 +417,20 @@ impl TokenService {
         let refresh_token = Self::generate_token();
         let expires_in = application.expire_in_hours as i64 * 3600;
 
-        sqlx::query(
-            "UPDATE tokens SET access_token = $1, refresh_token = $2, expires_in = $3 WHERE id = $4",
-        )
-        .bind(&access_token)
-        .bind(&refresh_token)
-        .bind(expires_in)
-        .bind(&token.id)
-        .execute(pool)
-        .await?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::update(tokens::table.filter(tokens::id.eq(&token.id)))
+            .set((
+                tokens::access_token.eq(&access_token),
+                tokens::refresh_token.eq(&refresh_token),
+                tokens::expires_in.eq(expires_in),
+            ))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // Generate ID token if scope includes openid
         let id_token = if token.scope.contains("openid") {
@@ -360,7 +461,7 @@ impl TokenService {
 
     /// Refresh an access token
     pub async fn refresh_access_token(
-        pool: &PgPool,
+        pool: &DieselPool,
         application: &Application,
         refresh_token_str: &str,
     ) -> AppResult<OAuthTokenResponse> {
@@ -378,16 +479,21 @@ impl TokenService {
         let new_refresh_token = Self::generate_token();
         let expires_in = application.expire_in_hours as i64 * 3600;
 
-        sqlx::query(
-            "UPDATE tokens SET access_token = $1, refresh_token = $2, expires_in = $3, created_at = $4 WHERE id = $5",
-        )
-        .bind(&new_access_token)
-        .bind(&new_refresh_token)
-        .bind(expires_in)
-        .bind(Utc::now())
-        .bind(&token.id)
-        .execute(pool)
-        .await?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::update(tokens::table.filter(tokens::id.eq(&token.id)))
+            .set((
+                tokens::access_token.eq(&new_access_token),
+                tokens::refresh_token.eq(&new_refresh_token),
+                tokens::expires_in.eq(expires_in),
+                tokens::created_at.eq(Utc::now()),
+            ))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // Generate ID token if scope includes openid
         let id_token = if token.scope.contains("openid") {
@@ -418,7 +524,7 @@ impl TokenService {
 
     /// Client credentials grant - creates a token for the application itself
     pub async fn exchange_client_credentials(
-        pool: &PgPool,
+        pool: &DieselPool,
         application: &Application,
         scope: Option<&str>,
     ) -> AppResult<OAuthTokenResponse> {
@@ -428,23 +534,29 @@ impl TokenService {
         let scope = scope.unwrap_or("openid profile");
         let now = Utc::now();
 
-        sqlx::query(
-            r#"INSERT INTO tokens (
-                id, owner, name, created_at, application, organization, user_id,
-                access_token, expires_in, scope, token_type, code_is_used
-            ) VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $9, 'Bearer', false)"#,
-        )
-        .bind(&id)
-        .bind(&application.owner)
-        .bind(&format!("client_cred_{}", id))
-        .bind(now)
-        .bind(&application.name)
-        .bind(&application.organization)
-        .bind(&access_token)
-        .bind(expires_in)
-        .bind(scope)
-        .execute(pool)
-        .await?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::insert_into(tokens::table)
+            .values((
+                tokens::id.eq(&id),
+                tokens::owner.eq(&application.owner),
+                tokens::name.eq(&format!("client_cred_{}", id)),
+                tokens::created_at.eq(now),
+                tokens::application.eq(&application.name),
+                tokens::organization.eq(&application.organization),
+                tokens::user_id.eq(""),
+                tokens::access_token.eq(&access_token),
+                tokens::expires_in.eq(expires_in),
+                tokens::scope.eq(scope),
+                tokens::token_type.eq("Bearer"),
+                tokens::code_is_used.eq(false),
+            ))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(OAuthTokenResponse {
             access_token,
@@ -458,23 +570,31 @@ impl TokenService {
 
     /// Password grant - authenticates user and creates tokens
     pub async fn exchange_password(
-        pool: &PgPool,
+        pool: &DieselPool,
         application: &Application,
         username: &str,
         password: &str,
         scope: Option<&str>,
     ) -> AppResult<OAuthTokenResponse> {
-        // Find and verify user
-        let user = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT id, name, password_hash FROM users WHERE name = $1 AND owner = $2 AND is_deleted = FALSE"
-        )
-        .bind(username)
-        .bind(&application.organization)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| AppError::Authentication("Invalid credentials".to_string()))?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let (user_id, user_name, password_hash) = user;
+        // Find and verify user
+        use crate::schema::users;
+        let user_row: (String, String, String) = users::table
+            .filter(users::name.eq(username))
+            .filter(users::owner.eq(&application.organization))
+            .filter(users::is_deleted.eq(false))
+            .select((users::id, users::name, users::password_hash))
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::Authentication("Invalid credentials".to_string()))?;
+
+        let (user_id, user_name, password_hash) = user_row;
 
         if !UserService::verify_password(password, &password_hash)? {
             return Err(AppError::Authentication("Invalid credentials".to_string()));
@@ -487,25 +607,25 @@ impl TokenService {
         let scope = scope.unwrap_or("openid profile");
         let now = Utc::now();
 
-        sqlx::query(
-            r#"INSERT INTO tokens (
-                id, owner, name, created_at, application, organization, user_id,
-                access_token, refresh_token, expires_in, scope, token_type, code_is_used
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'Bearer', false)"#,
-        )
-        .bind(&id)
-        .bind(&application.owner)
-        .bind(&format!("password_{}", id))
-        .bind(now)
-        .bind(&application.name)
-        .bind(&application.organization)
-        .bind(&user_id)
-        .bind(&access_token)
-        .bind(&refresh_token)
-        .bind(expires_in)
-        .bind(scope)
-        .execute(pool)
-        .await?;
+        diesel::insert_into(tokens::table)
+            .values((
+                tokens::id.eq(&id),
+                tokens::owner.eq(&application.owner),
+                tokens::name.eq(&format!("password_{}", id)),
+                tokens::created_at.eq(now),
+                tokens::application.eq(&application.name),
+                tokens::organization.eq(&application.organization),
+                tokens::user_id.eq(&user_id),
+                tokens::access_token.eq(&access_token),
+                tokens::refresh_token.eq(&refresh_token),
+                tokens::expires_in.eq(expires_in),
+                tokens::scope.eq(scope),
+                tokens::token_type.eq("Bearer"),
+                tokens::code_is_used.eq(false),
+            ))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // Generate ID token if scope includes openid
         let id_token = if scope.contains("openid") {
@@ -536,14 +656,13 @@ impl TokenService {
 
     /// RFC 7662 Token Introspection
     pub async fn introspect_token(
-        pool: &PgPool,
+        pool: &DieselPool,
         token_str: &str,
         token_type_hint: Option<&str>,
     ) -> AppResult<IntrospectResponse> {
         let config = AppConfig::get();
         let issuer = format!("http://{}:{}", config.server.host, config.server.port);
 
-        // Try to find by access_token first, then refresh_token
         let token = match token_type_hint {
             Some("refresh_token") => Self::get_by_refresh_token(pool, token_str).await.ok(),
             _ => {
@@ -592,27 +711,33 @@ impl TokenService {
 
     /// Revoke a token
     pub async fn revoke_token(
-        pool: &PgPool,
+        pool: &DieselPool,
         token_str: &str,
         token_type_hint: Option<&str>,
     ) -> AppResult<()> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         match token_type_hint {
             Some("refresh_token") => {
-                sqlx::query("DELETE FROM tokens WHERE refresh_token = $1")
-                    .bind(token_str)
-                    .execute(pool)
-                    .await?;
+                diesel::delete(tokens::table.filter(tokens::refresh_token.eq(token_str)))
+                    .execute(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
             }
             _ => {
-                let result = sqlx::query("DELETE FROM tokens WHERE access_token = $1")
-                    .bind(token_str)
-                    .execute(pool)
-                    .await?;
-                if result.rows_affected() == 0 {
-                    sqlx::query("DELETE FROM tokens WHERE refresh_token = $1")
-                        .bind(token_str)
-                        .execute(pool)
-                        .await?;
+                let count =
+                    diesel::delete(tokens::table.filter(tokens::access_token.eq(token_str)))
+                        .execute(&mut conn)
+                        .await
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                if count == 0 {
+                    diesel::delete(tokens::table.filter(tokens::refresh_token.eq(token_str)))
+                        .execute(&mut conn)
+                        .await
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
                 }
             }
         }
@@ -620,31 +745,52 @@ impl TokenService {
     }
 
     /// Mark an authorization code as used (prevents replay attacks)
-    pub async fn mark_code_used(pool: &PgPool, code: &str) -> AppResult<()> {
-        sqlx::query(
-            "UPDATE tokens SET code_is_used = true WHERE code = $1 AND code_is_used = false",
+    pub async fn mark_code_used(pool: &DieselPool, code: &str) -> AppResult<()> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::update(
+            tokens::table
+                .filter(tokens::code.eq(code))
+                .filter(tokens::code_is_used.eq(false)),
         )
-        .bind(code)
-        .execute(pool)
-        .await?;
+        .set(tokens::code_is_used.eq(true))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
         Ok(())
     }
 
     /// Expire/revoke all tokens for a specific user
-    pub async fn expire_tokens_by_user(pool: &PgPool, user_id: &str) -> AppResult<()> {
-        sqlx::query("DELETE FROM tokens WHERE user_id = $1")
-            .bind(user_id)
-            .execute(pool)
-            .await?;
+    pub async fn expire_tokens_by_user(pool: &DieselPool, user_id: &str) -> AppResult<()> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::delete(tokens::table.filter(tokens::user_id.eq(user_id)))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         Ok(())
     }
 
     /// Expire/revoke all tokens for a specific application
-    pub async fn expire_tokens_by_application(pool: &PgPool, app_name: &str) -> AppResult<()> {
-        sqlx::query("DELETE FROM tokens WHERE application = $1")
-            .bind(app_name)
-            .execute(pool)
-            .await?;
+    pub async fn expire_tokens_by_application(pool: &DieselPool, app_name: &str) -> AppResult<()> {
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::delete(tokens::table.filter(tokens::application.eq(app_name)))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         Ok(())
     }
 

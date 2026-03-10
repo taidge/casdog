@@ -1,11 +1,14 @@
 use chrono::{Duration, Utc};
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 
 use crate::config::AppConfig;
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::Certificate;
+use crate::schema::{certificates, users};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IdTokenClaims {
@@ -39,7 +42,7 @@ pub struct IdTokenService;
 impl IdTokenService {
     /// Build and sign an OIDC ID Token using the application's certificate
     pub async fn generate_id_token(
-        pool: &PgPool,
+        pool: &DieselPool,
         user_id: &str,
         user_name: &str,
         client_id: &str,
@@ -50,6 +53,11 @@ impl IdTokenService {
         let config = AppConfig::get();
         let issuer = format!("http://{}:{}", config.server.host, config.server.port);
 
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         // Fetch user details
         let user: Option<(
             String,
@@ -57,12 +65,20 @@ impl IdTokenService {
             Option<String>,
             Option<String>,
             Option<String>,
-        )> = sqlx::query_as(
-            "SELECT id, name, email, phone, avatar FROM users WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
+        )> = users::table
+            .filter(users::id.eq(user_id))
+            .filter(users::is_deleted.eq(false))
+            .select((
+                users::id,
+                users::name,
+                users::email,
+                users::phone,
+                users::avatar,
+            ))
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         let (uid, uname, email, phone, avatar) =
             user.unwrap_or_else(|| (user_id.to_string(), user_name.to_string(), None, None, None));
@@ -97,16 +113,22 @@ impl IdTokenService {
 
         // Try to find a certificate for signing
         let cert = if let Some(cert_name) = cert_name {
-            sqlx::query_as::<_, Certificate>("SELECT * FROM certificates WHERE name = $1")
-                .bind(cert_name)
-                .fetch_optional(pool)
-                .await?
+            certificates::table
+                .filter(certificates::name.eq(cert_name))
+                .select(Certificate::as_select())
+                .first(&mut conn)
+                .await
+                .optional()
+                .map_err(|e| AppError::Internal(e.to_string()))?
         } else {
-            sqlx::query_as::<_, Certificate>(
-                "SELECT * FROM certificates WHERE scope = 'JWT' ORDER BY created_at DESC LIMIT 1",
-            )
-            .fetch_optional(pool)
-            .await?
+            certificates::table
+                .filter(certificates::scope.eq("JWT"))
+                .order(certificates::created_at.desc())
+                .select(Certificate::as_select())
+                .first(&mut conn)
+                .await
+                .optional()
+                .map_err(|e| AppError::Internal(e.to_string()))?
         };
 
         match cert {

@@ -2,25 +2,28 @@ use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use chrono::Utc;
-use sqlx::{Pool, Postgres};
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use uuid::Uuid;
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateUserRequest, UpdateUserRequest, User, UserListResponse, UserQuery, UserResponse,
 };
+use crate::schema::users;
 
 #[derive(Clone)]
 pub struct UserService {
-    pool: Pool<Postgres>,
+    pool: DieselPool,
 }
 
 impl UserService {
-    pub fn new(pool: Pool<Postgres>) -> Self {
+    pub fn new(pool: DieselPool) -> Self {
         Self { pool }
     }
 
-    pub fn pool(&self) -> &Pool<Postgres> {
+    pub fn pool(&self) -> &DieselPool {
         &self.pool
     }
 
@@ -44,130 +47,164 @@ impl UserService {
 
     pub async fn create(&self, req: CreateUserRequest) -> AppResult<UserResponse> {
         let id = Uuid::new_v4().to_string();
-        let password_hash = if let Some(ref pw) = req.password {
+        let pw_hash = if let Some(ref pw) = req.password {
             Self::hash_password(pw)?
         } else {
             String::new()
         };
         let now = Utc::now();
 
-        let user = sqlx::query_as::<_, User>(
-            r#"
-            INSERT INTO users (
-                id, owner, name, password_hash, display_name, email, phone, avatar,
-                is_admin, user_type, first_name, last_name, country_code, region,
-                location, affiliation, tag, language, gender, birthday, education,
-                bio, homepage, signup_application, id_card_type, id_card, real_name,
-                properties, created_at, updated_at
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8,
-                $9, $10, $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21,
-                $22, $23, $24, $25, $26, $27,
-                $28, $29, $30
-            )
-            RETURNING *
-            "#,
-        )
-        .bind(&id)
-        .bind(&req.owner)
-        .bind(&req.name)
-        .bind(&password_hash)
-        .bind(&req.display_name)
-        .bind(&req.email)
-        .bind(&req.phone)
-        .bind(&req.avatar)
-        .bind(req.is_admin.unwrap_or(false))
-        .bind(&req.user_type)
-        .bind(&req.first_name)
-        .bind(&req.last_name)
-        .bind(&req.country_code)
-        .bind(&req.region)
-        .bind(&req.location)
-        .bind(&req.affiliation)
-        .bind(&req.tag)
-        .bind(&req.language)
-        .bind(&req.gender)
-        .bind(&req.birthday)
-        .bind(&req.education)
-        .bind(&req.bio)
-        .bind(&req.homepage)
-        .bind(&req.signup_application)
-        .bind(&req.id_card_type)
-        .bind(&req.id_card)
-        .bind(&req.real_name)
-        .bind(&req.properties)
-        .bind(now)
-        .bind(now)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-                AppError::Conflict(format!(
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let user = diesel::insert_into(users::table)
+            .values((
+                users::id.eq(&id),
+                users::owner.eq(&req.owner),
+                users::name.eq(&req.name),
+                users::password_hash.eq(&pw_hash),
+                users::display_name.eq(&req.display_name),
+                users::email.eq(&req.email),
+                users::phone.eq(&req.phone),
+                users::avatar.eq(&req.avatar),
+                users::is_admin.eq(req.is_admin.unwrap_or(false)),
+                users::user_type.eq(&req.user_type),
+                users::first_name.eq(&req.first_name),
+                users::last_name.eq(&req.last_name),
+                users::country_code.eq(&req.country_code),
+                users::region.eq(&req.region),
+                users::location.eq(&req.location),
+                users::affiliation.eq(&req.affiliation),
+                users::tag.eq(&req.tag),
+                users::language.eq(&req.language),
+                users::gender.eq(&req.gender),
+                users::birthday.eq(&req.birthday),
+                users::education.eq(&req.education),
+                users::bio.eq(&req.bio),
+                users::homepage.eq(&req.homepage),
+                users::signup_application.eq(&req.signup_application),
+                users::id_card_type.eq(&req.id_card_type),
+                users::id_card.eq(&req.id_card),
+                users::real_name.eq(&req.real_name),
+                users::properties.eq(&req.properties),
+                users::created_at.eq(now),
+                users::updated_at.eq(now),
+            ))
+            .returning(User::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| match e {
+                diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                ) => AppError::Conflict(format!(
                     "User '{}' already exists in organization '{}'",
                     req.name, req.owner
-                ))
-            }
-            _ => AppError::Database(e),
-        })?;
+                )),
+                _ => AppError::Internal(e.to_string()),
+            })?;
 
         Ok(user.into())
     }
 
     pub async fn get_by_id(&self, id: &str) -> AppResult<UserResponse> {
-        let user =
-            sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let user = users::table
+            .filter(users::id.eq(id))
+            .filter(users::is_deleted.eq(false))
+            .select(User::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
 
         Ok(user.into())
     }
 
     pub async fn get_by_id_internal(&self, id: &str) -> AppResult<User> {
-        let user =
-            sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let user = users::table
+            .filter(users::id.eq(id))
+            .filter(users::is_deleted.eq(false))
+            .select(User::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
 
         Ok(user)
     }
 
     pub async fn get_by_name(&self, owner: &str, name: &str) -> AppResult<User> {
-        let user = sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE owner = $1 AND name = $2 AND is_deleted = FALSE",
-        )
-        .bind(owner)
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("User '{}/{}' not found", owner, name)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let user = users::table
+            .filter(users::owner.eq(owner))
+            .filter(users::name.eq(name))
+            .filter(users::is_deleted.eq(false))
+            .select(User::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("User '{}/{}' not found", owner, name)))?;
 
         Ok(user)
     }
 
     pub async fn get_by_email(&self, email: &str) -> AppResult<Option<User>> {
-        let user = sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE email = $1 AND is_deleted = FALSE",
-        )
-        .bind(email)
-        .fetch_optional(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let user = users::table
+            .filter(users::email.eq(email))
+            .filter(users::is_deleted.eq(false))
+            .select(User::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(user)
     }
 
     pub async fn get_by_phone(&self, phone: &str) -> AppResult<Option<User>> {
-        let user = sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE phone = $1 AND is_deleted = FALSE",
-        )
-        .bind(phone)
-        .fetch_optional(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let user = users::table
+            .filter(users::phone.eq(phone))
+            .filter(users::is_deleted.eq(false))
+            .select(User::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(user)
     }
@@ -177,43 +214,56 @@ impl UserService {
         let page_size = query.page_size.unwrap_or(20).min(100);
         let offset = (page - 1) * page_size;
 
-        let (users, total): (Vec<User>, i64) = if let Some(owner) = &query.owner {
-            let users = sqlx::query_as::<_, User>(
-                "SELECT * FROM users WHERE owner = $1 AND is_deleted = FALSE ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            )
-            .bind(owner)
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM users WHERE owner = $1 AND is_deleted = FALSE",
-            )
-            .bind(owner)
-            .fetch_one(&self.pool)
-            .await?;
+        let (user_list, total): (Vec<User>, i64) = if let Some(ref owner) = query.owner {
+            let user_list = users::table
+                .filter(users::owner.eq(owner))
+                .filter(users::is_deleted.eq(false))
+                .order(users::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .select(User::as_select())
+                .load(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (users, total.0)
+            let total: i64 = users::table
+                .filter(users::owner.eq(owner))
+                .filter(users::is_deleted.eq(false))
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            (user_list, total)
         } else {
-            let users = sqlx::query_as::<_, User>(
-                "SELECT * FROM users WHERE is_deleted = FALSE ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-            )
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
+            let user_list = users::table
+                .filter(users::is_deleted.eq(false))
+                .order(users::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .select(User::as_select())
+                .load(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_deleted = FALSE")
-                    .fetch_one(&self.pool)
-                    .await?;
+            let total: i64 = users::table
+                .filter(users::is_deleted.eq(false))
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (users, total.0)
+            (user_list, total)
         };
 
         Ok(UserListResponse {
-            data: users.into_iter().map(|u| u.into()).collect(),
+            data: user_list.into_iter().map(|u| u.into()).collect(),
             total,
             page,
             page_size,
@@ -221,12 +271,21 @@ impl UserService {
     }
 
     pub async fn update(&self, id: &str, req: UpdateUserRequest) -> AppResult<UserResponse> {
-        let mut user =
-            sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND is_deleted = FALSE")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let mut user = users::table
+            .filter(users::id.eq(id))
+            .filter(users::is_deleted.eq(false))
+            .select(User::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("User with id '{}' not found", id)))?;
 
         // Apply partial updates
         if let Some(v) = req.display_name {
@@ -342,77 +401,74 @@ impl UserService {
         }
         user.updated_at = Utc::now();
 
-        let updated_user = sqlx::query_as::<_, User>(
-            r#"
-            UPDATE users SET
-                display_name = $1, email = $2, phone = $3, avatar = $4, is_admin = $5,
-                password_hash = $6, first_name = $7, last_name = $8, avatar_type = $9,
-                permanent_avatar = $10, country_code = $11, region = $12, location = $13,
-                address = $14, affiliation = $15, title = $16, homepage = $17, bio = $18,
-                id_card_type = $19, id_card = $20, real_name = $21, tag = $22, language = $23,
-                gender = $24, birthday = $25, education = $26, score = $27, karma = $28,
-                is_forbidden = $29, is_verified = $30, signup_application = $31,
-                properties = $32, custom = $33, groups = $34, managed_accounts = $35,
-                ip_whitelist = $36, need_update_password = $37, updated_at = $38
-            WHERE id = $39
-            RETURNING *
-            "#,
-        )
-        .bind(&user.display_name)
-        .bind(&user.email)
-        .bind(&user.phone)
-        .bind(&user.avatar)
-        .bind(user.is_admin)
-        .bind(&user.password_hash)
-        .bind(&user.first_name)
-        .bind(&user.last_name)
-        .bind(&user.avatar_type)
-        .bind(&user.permanent_avatar)
-        .bind(&user.country_code)
-        .bind(&user.region)
-        .bind(&user.location)
-        .bind(&user.address)
-        .bind(&user.affiliation)
-        .bind(&user.title)
-        .bind(&user.homepage)
-        .bind(&user.bio)
-        .bind(&user.id_card_type)
-        .bind(&user.id_card)
-        .bind(&user.real_name)
-        .bind(&user.tag)
-        .bind(&user.language)
-        .bind(&user.gender)
-        .bind(&user.birthday)
-        .bind(&user.education)
-        .bind(user.score)
-        .bind(user.karma)
-        .bind(user.is_forbidden)
-        .bind(user.is_verified)
-        .bind(&user.signup_application)
-        .bind(&user.properties)
-        .bind(&user.custom)
-        .bind(&user.groups)
-        .bind(&user.managed_accounts)
-        .bind(&user.ip_whitelist)
-        .bind(user.need_update_password)
-        .bind(user.updated_at)
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await?;
+        let updated_user = diesel::update(users::table.filter(users::id.eq(id)))
+            .set((
+                users::display_name.eq(&user.display_name),
+                users::email.eq(&user.email),
+                users::phone.eq(&user.phone),
+                users::avatar.eq(&user.avatar),
+                users::is_admin.eq(user.is_admin),
+                users::password_hash.eq(&user.password_hash),
+                users::first_name.eq(&user.first_name),
+                users::last_name.eq(&user.last_name),
+                users::avatar_type.eq(&user.avatar_type),
+                users::permanent_avatar.eq(&user.permanent_avatar),
+                users::country_code.eq(&user.country_code),
+                users::region.eq(&user.region),
+                users::location.eq(&user.location),
+                users::address.eq(&user.address),
+                users::affiliation.eq(&user.affiliation),
+                users::title.eq(&user.title),
+                users::homepage.eq(&user.homepage),
+                users::bio.eq(&user.bio),
+                users::id_card_type.eq(&user.id_card_type),
+                users::id_card.eq(&user.id_card),
+                users::real_name.eq(&user.real_name),
+                users::tag.eq(&user.tag),
+                users::language.eq(&user.language),
+                users::gender.eq(&user.gender),
+                users::birthday.eq(&user.birthday),
+                users::education.eq(&user.education),
+                users::score.eq(user.score),
+                users::karma.eq(user.karma),
+                users::is_forbidden.eq(user.is_forbidden),
+                users::is_verified.eq(user.is_verified),
+                users::signup_application.eq(&user.signup_application),
+                users::properties.eq(&user.properties),
+                users::custom.eq(&user.custom),
+                users::groups.eq(&user.groups),
+                users::managed_accounts.eq(&user.managed_accounts),
+                users::ip_whitelist.eq(&user.ip_whitelist),
+                users::need_update_password.eq(user.need_update_password),
+                users::updated_at.eq(user.updated_at),
+            ))
+            .returning(User::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(updated_user.into())
     }
 
     pub async fn delete(&self, id: &str) -> AppResult<()> {
-        let result = sqlx::query(
-            "UPDATE users SET is_deleted = TRUE, updated_at = $1 WHERE id = $2 AND is_deleted = FALSE",
-        )
-        .bind(Utc::now())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let now = Utc::now();
 
-        if result.rows_affected() == 0 {
+        let count = diesel::update(
+            users::table
+                .filter(users::id.eq(id))
+                .filter(users::is_deleted.eq(false)),
+        )
+        .set((users::is_deleted.eq(true), users::updated_at.eq(now)))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if count == 0 {
             return Err(AppError::NotFound(format!(
                 "User with id '{}' not found",
                 id
@@ -429,46 +485,56 @@ impl UserService {
         success: bool,
         ip: Option<&str>,
     ) -> AppResult<()> {
-        let now = Utc::now().to_rfc3339();
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let now_str = Utc::now().to_rfc3339();
+        let now = Utc::now();
+
         if success {
-            sqlx::query(
-                r#"
-                UPDATE users SET
-                    last_signin_time = $1, last_signin_ip = $2,
-                    signin_wrong_times = 0, is_online = TRUE, updated_at = NOW()
-                WHERE id = $3
-                "#,
-            )
-            .bind(&now)
-            .bind(ip)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+            diesel::update(users::table.filter(users::id.eq(id)))
+                .set((
+                    users::last_signin_time.eq(&now_str),
+                    users::last_signin_ip.eq(ip),
+                    users::signin_wrong_times.eq(0),
+                    users::is_online.eq(true),
+                    users::updated_at.eq(now),
+                ))
+                .execute(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
         } else {
-            sqlx::query(
-                r#"
-                UPDATE users SET
-                    last_signin_wrong_time = $1,
-                    signin_wrong_times = signin_wrong_times + 1,
-                    updated_at = NOW()
-                WHERE id = $2
-                "#,
+            // For incrementing signin_wrong_times we use a raw SQL expression
+            diesel::sql_query(
+                "UPDATE users SET last_signin_wrong_time = $1, signin_wrong_times = signin_wrong_times + 1, updated_at = NOW() WHERE id = $2"
             )
-            .bind(&now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+            .bind::<diesel::sql_types::Text, _>(&now_str)
+            .bind::<diesel::sql_types::Text, _>(id)
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         }
         Ok(())
     }
 
     /// Set user online/offline status
     pub async fn set_online_status(&self, id: &str, online: bool) -> AppResult<()> {
-        sqlx::query("UPDATE users SET is_online = $1, updated_at = NOW() WHERE id = $2")
-            .bind(online)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::update(users::table.filter(users::id.eq(id)))
+            .set((
+                users::is_online.eq(online),
+                users::updated_at.eq(Utc::now()),
+            ))
+            .execute(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         Ok(())
     }
 
@@ -479,7 +545,14 @@ impl UserService {
         provider_name: &str,
         provider_user_id: &str,
     ) -> AppResult<()> {
-        sqlx::query(
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        // JSONB operations require raw SQL
+        diesel::sql_query(
             r#"
             UPDATE users SET
                 provider_ids = COALESCE(provider_ids, '{}'::jsonb) || jsonb_build_object($1::text, $2::text),
@@ -487,17 +560,24 @@ impl UserService {
             WHERE id = $3
             "#,
         )
-        .bind(provider_name)
-        .bind(provider_user_id)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        .bind::<diesel::sql_types::Text, _>(provider_name)
+        .bind::<diesel::sql_types::Text, _>(provider_user_id)
+        .bind::<diesel::sql_types::Text, _>(id)
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
         Ok(())
     }
 
     /// Unlink a social provider from a user
     pub async fn unlink_provider(&self, id: &str, provider_name: &str) -> AppResult<()> {
-        sqlx::query(
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        diesel::sql_query(
             r#"
             UPDATE users SET
                 provider_ids = provider_ids - $1,
@@ -505,10 +585,11 @@ impl UserService {
             WHERE id = $2
             "#,
         )
-        .bind(provider_name)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        .bind::<diesel::sql_types::Text, _>(provider_name)
+        .bind::<diesel::sql_types::Text, _>(id)
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
         Ok(())
     }
 }

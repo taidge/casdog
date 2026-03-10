@@ -1,5 +1,6 @@
 use sqlx::PgPool;
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{Application, Provider};
 use crate::services::providers::{
@@ -11,6 +12,7 @@ use crate::services::{AppService, ProviderService};
 #[derive(Clone)]
 pub struct ProviderDispatchService {
     pool: PgPool,
+    diesel_pool: Option<DieselPool>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,7 +39,22 @@ struct ApplicationProviderItem {
 
 impl ProviderDispatchService {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            diesel_pool: None,
+        }
+    }
+
+    pub fn with_diesel_pool(mut self, diesel_pool: DieselPool) -> Self {
+        self.diesel_pool = Some(diesel_pool);
+        self
+    }
+
+    fn app_service(&self) -> AppResult<AppService> {
+        let diesel_pool = self.diesel_pool.clone().ok_or_else(|| {
+            AppError::Internal("DieselPool not configured for ProviderDispatchService".to_string())
+        })?;
+        Ok(AppService::new(diesel_pool))
     }
 
     pub async fn resolve_provider(
@@ -50,7 +67,7 @@ impl ProviderDispatchService {
     ) -> AppResult<ResolvedProvider> {
         let application = if let Some(reference) = application_ref {
             Some(
-                AppService::new(self.pool.clone())
+                self.app_service()?
                     .find_internal(reference, Some("admin"))
                     .await?,
             )
@@ -104,7 +121,7 @@ impl ProviderDispatchService {
     ) -> AppResult<Option<ResolvedProvider>> {
         let application = if let Some(reference) = application_ref {
             Some(
-                AppService::new(self.pool.clone())
+                self.app_service()?
                     .find_internal(reference, Some("admin"))
                     .await?,
             )

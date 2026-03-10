@@ -1,4 +1,7 @@
 mod api;
+mod components;
+mod i18n;
+mod pages;
 mod resources;
 mod style;
 
@@ -12,17 +15,20 @@ use crate::api::{
     build_url, extract_collection, filter_matches, item_id, item_subtitle, item_title, pretty_json,
     request_json,
 };
+use crate::components::ResourceForm;
+use crate::i18n::{Locale, use_locale, t};
+use crate::pages::*;
 use crate::style::APP_CSS;
 
 const AUTH_TOKEN_KEY: &str = "casdog.auth.token";
 const ACCOUNT_KEY: &str = "casdog.auth.account";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-struct AccountSummary {
-    owner: String,
-    name: String,
-    display_name: Option<String>,
-    is_admin: bool,
+pub struct AccountSummary {
+    pub owner: String,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub is_admin: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +47,7 @@ fn App() -> Element {
     let mut token = use_signal(|| LocalStorage::get::<String>(AUTH_TOKEN_KEY).ok());
     let mut account = use_signal(|| LocalStorage::get::<AccountSummary>(ACCOUNT_KEY).ok());
     let mut active_panel = use_signal(|| "dashboard".to_string());
+    let locale = use_locale();
 
     let is_authenticated = token().is_some();
     let account_name = account()
@@ -49,16 +56,17 @@ fn App() -> Element {
 
     rsx! {
         style { "{APP_CSS}" }
+        style { "{components::form_fields::FORM_FIELDS_CSS}" }
         div { class: "shell",
             aside { class: "sidebar",
                 div { class: "brand",
                     p { class: "eyebrow", "Casdoor parity shell" }
                     h1 { "Casdog" }
-                    p { "Dioxus frontend for the Salvo backend. The shell maps existing REST resources and exposes the new site and rule management domains." }
+                    p { "{t(\"app.description\", locale())}" }
                 }
 
                 div { class: "field",
-                    span { "API base" }
+                    span { "{t(\"nav.api_base\", locale())}" }
                     input {
                         class: "text-input",
                         placeholder: "same origin",
@@ -68,9 +76,30 @@ fn App() -> Element {
                 }
 
                 div { class: "field",
-                    span { "Session" }
+                    span { "{t(\"nav.session\", locale())}" }
                     div { class: if is_authenticated { "status-chip success" } else { "status-chip warn" },
                         "{account_name}"
+                    }
+                }
+
+                div { class: "field",
+                    span { "{t(\"nav.language\", locale())}" }
+                    select {
+                        class: "text-input",
+                        value: "{locale().code()}",
+                        oninput: move |event| {
+                            if let Some(new_locale) = Locale::from_code(&event.value()) {
+                                locale.set(new_locale);
+                                let _ = LocalStorage::set("casdog.locale", event.value());
+                            }
+                        },
+                        {
+                            Locale::all().iter().map(|l| {
+                                rsx! {
+                                    option { value: "{l.code()}", "{l.label()}" }
+                                }
+                            })
+                        }
                     }
                 }
 
@@ -84,17 +113,46 @@ fn App() -> Element {
                             account.set(None);
                             active_panel.set("dashboard".to_string());
                         },
-                        "Logout"
+                        "{t(\"nav.logout\", locale())}"
                     }
                 }
 
                 div { class: "nav-section",
-                    p { class: "section-label", "Overview" }
+                    p { class: "section-label", "{t(\"nav.overview\", locale())}" }
                     div { class: "nav-grid",
                         button {
                             class: if active_panel() == "dashboard" { "nav-item active" } else { "nav-item" },
                             onclick: move |_| active_panel.set("dashboard".to_string()),
-                            "Dashboard"
+                            "{t(\"nav.dashboard\", locale())}"
+                        }
+                    }
+                }
+
+                div { class: "nav-section",
+                    p { class: "section-label", "{t(\"nav.pages\", locale())}" }
+                    div { class: "nav-grid",
+                        {
+                            [
+                                ("login-page", t("page.login", locale())),
+                                ("signup-page", t("page.signup", locale())),
+                                ("authorize-page", t("page.authorize", locale())),
+                                ("consent-page", t("page.consent", locale())),
+                                ("device-auth-page", t("page.device_auth", locale())),
+                                ("account-page", t("page.account", locale())),
+                                ("forgot-password-page", t("page.forgot_password", locale())),
+                                ("result-page", t("page.result", locale())),
+                            ].iter().map(|(slug, label)| {
+                                let slug = slug.to_string();
+                                let label = label.to_string();
+                                let is_active = active_panel() == slug;
+                                rsx! {
+                                    button {
+                                        class: if is_active { "nav-item active" } else { "nav-item" },
+                                        onclick: move |_| active_panel.set(slug.clone()),
+                                        "{label}"
+                                    }
+                                }
+                            })
                         }
                     }
                 }
@@ -126,24 +184,60 @@ fn App() -> Element {
             }
 
             main { class: "main",
-                if active_panel() == "dashboard" {
-                    DashboardPanel {
-                        api_base,
-                        token,
-                        account,
-                        active_panel,
-                    }
-                } else if let Some(config) = resource_config(&active_panel()) {
-                    ResourcePanel {
-                        key: "{config.slug}",
-                        config,
-                        api_base,
-                        token,
-                    }
-                } else {
-                    section { class: "hero panel",
-                        h2 { "Unknown panel" }
-                        p { "The selected navigation item is not registered in the frontend resource catalog." }
+                {
+                    let panel = active_panel();
+                    match panel.as_str() {
+                        "dashboard" => rsx! {
+                            DashboardPanel {
+                                api_base,
+                                token,
+                                account,
+                                active_panel,
+                            }
+                        },
+                        "login-page" => rsx! {
+                            LoginPage { api_base, token, account }
+                        },
+                        "signup-page" => rsx! {
+                            SignupPage { api_base }
+                        },
+                        "authorize-page" => rsx! {
+                            AuthorizePage { api_base, token }
+                        },
+                        "consent-page" => rsx! {
+                            ConsentPage { api_base, token }
+                        },
+                        "device-auth-page" => rsx! {
+                            DeviceAuthPage { api_base, token }
+                        },
+                        "account-page" => rsx! {
+                            AccountPage { api_base, token }
+                        },
+                        "forgot-password-page" => rsx! {
+                            ForgotPasswordPage { api_base }
+                        },
+                        "result-page" => rsx! {
+                            ResultPage {}
+                        },
+                        _ => {
+                            if let Some(config) = resource_config(&panel) {
+                                rsx! {
+                                    ResourcePanel {
+                                        key: "{config.slug}",
+                                        config,
+                                        api_base,
+                                        token,
+                                    }
+                                }
+                            } else {
+                                rsx! {
+                                    section { class: "hero panel",
+                                        h2 { "Unknown panel" }
+                                        p { "The selected navigation item is not registered in the frontend resource catalog." }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -365,6 +459,7 @@ fn ResourcePanel(
     let mut status_message = use_signal(|| None::<String>);
     let mut status_is_error = use_signal(|| false);
     let mut refresh_nonce = use_signal(|| 0_u64);
+    let mut use_form_editor = use_signal(|| true);
 
     {
         let endpoint = config.endpoint.to_string();
@@ -611,14 +706,26 @@ fn ResourcePanel(
                         },
                         "Delete"
                     }
+                    button {
+                        class: if use_form_editor() { "ghost-button" } else { "primary-button" },
+                        onclick: move |_| use_form_editor.set(!use_form_editor()),
+                        if use_form_editor() { "Switch to JSON" } else { "Switch to Form" }
+                    }
                 }
 
-                div { class: "editor",
-                    p { class: "section-title", "JSON editor" }
-                    p { "The editor sends raw JSON to the Salvo resource endpoint. Start from the built-in template or load an existing row from the left pane." }
-                    textarea {
-                        value: "{editor_text}",
-                        oninput: move |event| editor_text.set(event.value()),
+                if use_form_editor() {
+                    ResourceForm {
+                        resource_slug: config.slug.to_string(),
+                        json_text: editor_text,
+                    }
+                } else {
+                    div { class: "editor",
+                        p { class: "section-title", "JSON editor" }
+                        p { "The editor sends raw JSON to the Salvo resource endpoint. Start from the built-in template or load an existing row from the left pane." }
+                        textarea {
+                            value: "{editor_text}",
+                            oninput: move |event| editor_text.set(event.value()),
+                        }
                     }
                 }
 

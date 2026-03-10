@@ -5,6 +5,7 @@ use salvo::prelude::*;
 use serde::Serialize;
 use sqlx::{Pool, Postgres};
 
+use crate::diesel_pool::DieselPool;
 use crate::error::AppError;
 use crate::models::{
     CreateGroupRequest, CreatePermissionRequest, CreateRoleRequest, CreateUserRequest,
@@ -134,8 +135,12 @@ fn optional_field(record: &HashMap<String, String>, key: &str) -> Option<String>
 async fn require_upload_context(
     depot: &mut Depot,
     req: &mut Request,
-) -> Result<(Pool<Postgres>, String), AppError> {
-    let pool = depot
+) -> Result<(DieselPool, Pool<Postgres>, String), AppError> {
+    let diesel_pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
@@ -152,7 +157,7 @@ async fn require_upload_context(
         .unwrap_or_else(|_| "built-in".to_string());
     let owner = req.form::<String>("owner").await.unwrap_or(user_owner);
 
-    Ok((pool, owner))
+    Ok((diesel_pool, pg_pool, owner))
 }
 
 #[endpoint(tags("Resources"), summary = "Upload users")]
@@ -160,7 +165,7 @@ pub async fn upload_users(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<BulkUploadResponse>, AppError> {
-    let (pool, owner) = require_upload_context(depot, req).await?;
+    let (pool, _pg_pool, owner) = require_upload_context(depot, req).await?;
     let records = read_upload_records(req).await?;
     let user_service = UserService::new(pool.clone());
 
@@ -235,7 +240,7 @@ pub async fn upload_groups(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<BulkUploadResponse>, AppError> {
-    let (pool, owner) = require_upload_context(depot, req).await?;
+    let (_pool, pg_pool, owner) = require_upload_context(depot, req).await?;
     let records = read_upload_records(req).await?;
 
     let mut created = 0usize;
@@ -270,7 +275,7 @@ pub async fn upload_groups(
                 .or_else(|| parse_bool(record.get("isEnabled"))),
         };
 
-        match GroupService::create(&pool, request).await {
+        match GroupService::create(&pg_pool, request).await {
             Ok(_) => created += 1,
             Err(err) => errors.push(format!("row {}: {}", index + 2, err)),
         }
@@ -289,7 +294,7 @@ pub async fn upload_roles(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<BulkUploadResponse>, AppError> {
-    let (pool, owner) = require_upload_context(depot, req).await?;
+    let (pool, _pg_pool, owner) = require_upload_context(depot, req).await?;
     let records = read_upload_records(req).await?;
     let role_service = RoleService::new(pool);
 
@@ -335,7 +340,7 @@ pub async fn upload_permissions(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<BulkUploadResponse>, AppError> {
-    let (pool, owner) = require_upload_context(depot, req).await?;
+    let (pool, _pg_pool, owner) = require_upload_context(depot, req).await?;
     let records = read_upload_records(req).await?;
     let permission_service = PermissionService::new(pool);
 

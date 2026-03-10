@@ -3,7 +3,11 @@ use salvo::oapi::ToSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, FromRow, ToSchema, diesel::Queryable, diesel::Selectable,
+)]
+#[diesel(table_name = crate::schema::roles)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Role {
     pub id: String,
     pub owner: String,
@@ -84,7 +88,11 @@ impl Default for RoleQuery {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, FromRow, ToSchema, diesel::Queryable, diesel::Selectable,
+)]
+#[diesel(table_name = crate::schema::user_roles)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct UserRole {
     pub id: String,
     pub user_id: String,

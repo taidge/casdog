@@ -3,7 +3,11 @@ use salvo::oapi::ToSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, FromRow, ToSchema, diesel::Queryable, diesel::Selectable,
+)]
+#[diesel(table_name = crate::schema::permissions)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Permission {
     pub id: String,
     pub owner: String,
@@ -104,7 +108,11 @@ impl Default for PermissionQuery {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, FromRow, ToSchema, diesel::Queryable, diesel::Selectable,
+)]
+#[diesel(table_name = crate::schema::role_permissions)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct RolePermission {
     pub id: String,
     pub role_id: String,

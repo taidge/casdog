@@ -1,7 +1,7 @@
+use crate::diesel_pool::DieselPool;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::*;
 use salvo::prelude::*;
-use sqlx::{Pool, Postgres};
 
 use crate::error::AppError;
 use crate::models::{
@@ -28,7 +28,7 @@ pub async fn list_roles(
     req: &mut Request,
 ) -> Result<Json<RoleListResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let role_service = RoleService::new(pool);
@@ -58,7 +58,7 @@ pub async fn create_role(
     req: JsonBody<CreateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let role_service = RoleService::new(pool);
@@ -83,7 +83,7 @@ pub async fn get_role(
     id: PathParam<String>,
 ) -> Result<Json<RoleResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let role_service = RoleService::new(pool);
@@ -110,7 +110,7 @@ pub async fn update_role(
     req: JsonBody<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let role_service = RoleService::new(pool);
@@ -137,7 +137,7 @@ pub async fn delete_role(
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let role_service = RoleService::new(pool);
@@ -160,7 +160,7 @@ pub async fn assign_role(
     req: JsonBody<AssignRoleRequest>,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let role_service = RoleService::new(pool);
@@ -185,7 +185,7 @@ pub async fn get_user_roles(
     user_id: PathParam<String>,
 ) -> Result<Json<Vec<RoleResponse>>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let role_service = RoleService::new(pool);

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres};
 use uuid::Uuid;
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{Application, User, UserResponse};
 use crate::services::{
@@ -52,7 +53,8 @@ fn extract_bearer_token(req: &Request) -> Option<String> {
 }
 
 async fn resolve_impersonation_application(
-    pool: &Pool<Postgres>,
+    pool: &DieselPool,
+    pg_pool: &Pool<Postgres>,
     user: &User,
 ) -> AppResult<Application> {
     let app_service = AppService::new(pool.clone());
@@ -78,7 +80,7 @@ async fn resolve_impersonation_application(
         "#,
     )
     .bind(&user.owner)
-    .fetch_optional(pool)
+    .fetch_optional(pg_pool)
     .await?
     {
         return Ok(application);
@@ -144,6 +146,10 @@ pub async fn impersonate_user(
     body: JsonBody<ImpersonateUserRequest>,
 ) -> AppResult<Json<ImpersonateUserResponse>> {
     let pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
@@ -168,12 +174,12 @@ pub async fn impersonate_user(
     }
 
     let target_user = user_service.get_by_id_internal(&payload.user_id).await?;
-    let application = resolve_impersonation_application(&pool, &target_user).await?;
+    let application = resolve_impersonation_application(&pool, &pg_pool, &target_user).await?;
     let auth_service = AuthService::new(user_service.clone());
     let expires_in = auth_service.expires_in_seconds();
     let client_ip = req.remote_addr().to_string();
     let session_id = SessionService::create_login_session(
-        &pool,
+        &pg_pool,
         &target_user.id,
         &target_user.name,
         &application.organization,
@@ -217,7 +223,7 @@ pub async fn impersonate_user(
     );
 
     write_audit_record(
-        &pool,
+        &pg_pool,
         &admin_user.owner,
         Some(&application.organization),
         Some(&client_ip),
@@ -254,6 +260,10 @@ pub async fn exit_impersonate_user(
     req: &mut Request,
 ) -> AppResult<Json<ExitImpersonateResponse>> {
     let pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
@@ -275,12 +285,12 @@ pub async fn exit_impersonate_user(
         ));
     }
 
-    let application = resolve_impersonation_application(&pool, &admin_user).await?;
+    let application = resolve_impersonation_application(&pool, &pg_pool, &admin_user).await?;
     let auth_service = AuthService::new(user_service);
     let expires_in = auth_service.expires_in_seconds();
     let client_ip = req.remote_addr().to_string();
     let session_id = SessionService::create_login_session(
-        &pool,
+        &pg_pool,
         &admin_user.id,
         &admin_user.name,
         &application.organization,
@@ -310,12 +320,12 @@ pub async fn exit_impersonate_user(
         let _ = TokenService::delete_by_access_token(&pool, &token).await;
     }
     if let Some(impersonation_session_id) = claims.impersonation_session_id.as_deref() {
-        let _ = SessionService::delete_by_session_id(&pool, impersonation_session_id).await;
+        let _ = SessionService::delete_by_session_id(&pg_pool, impersonation_session_id).await;
     }
     let audit_object = format!("restored_admin={}", admin_user.id);
 
     write_audit_record(
-        &pool,
+        &pg_pool,
         &admin_user.owner,
         Some(&application.organization),
         Some(&client_ip),

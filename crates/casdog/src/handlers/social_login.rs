@@ -4,6 +4,7 @@ use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres};
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::UserResponse;
 use crate::services::auth_service::LoginResponse;
@@ -106,6 +107,10 @@ pub async fn provider_callback(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<LoginResponse>, AppError> {
+    let diesel_pool = depot
+        .obtain::<DieselPool>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
     let pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
@@ -165,7 +170,7 @@ pub async fn provider_callback(
     let existing_user =
         find_user_by_provider_link(&pool, &provider.provider_type, &provider_user.id).await?;
 
-    let user_service = UserService::new(pool.clone());
+    let user_service = UserService::new(diesel_pool.clone());
 
     let user_response = if let Some(user) = existing_user {
         // Existing linked user - update last signin
@@ -276,7 +281,7 @@ pub async fn unlink_provider(
     req: &mut Request,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -302,7 +307,7 @@ pub async fn unlink_provider_compat(
     body: JsonBody<UnlinkRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let current_user_id = depot

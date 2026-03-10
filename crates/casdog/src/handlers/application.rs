@@ -1,7 +1,7 @@
+use crate::diesel_pool::DieselPool;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::*;
 use salvo::prelude::*;
-use sqlx::{Pool, Postgres};
 
 use crate::error::AppError;
 use crate::models::{
@@ -29,7 +29,7 @@ pub async fn list_applications(
     req: &mut Request,
 ) -> Result<Json<ApplicationListResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);
@@ -60,7 +60,7 @@ pub async fn create_application(
     req: JsonBody<CreateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);
@@ -85,7 +85,7 @@ pub async fn get_application(
     id: PathParam<String>,
 ) -> Result<Json<ApplicationResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);
@@ -112,7 +112,7 @@ pub async fn update_application(
     req: JsonBody<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);
@@ -139,7 +139,7 @@ pub async fn delete_application(
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);

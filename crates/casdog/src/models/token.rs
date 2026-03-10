@@ -3,7 +3,11 @@ use salvo::oapi::ToSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, FromRow, ToSchema, diesel::Queryable, diesel::Selectable,
+)]
+#[diesel(table_name = crate::schema::tokens)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Token {
     pub id: String,
     pub owner: String,
@@ -12,6 +16,7 @@ pub struct Token {
     pub application: String,
     pub organization: String,
     #[sqlx(rename = "user_id")]
+    #[diesel(column_name = user_id)]
     pub user: String,
     pub code: Option<String>,
     pub access_token: String,

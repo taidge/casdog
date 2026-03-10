@@ -1,6 +1,6 @@
+use crate::diesel_pool::DieselPool;
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
 use salvo::prelude::*;
-use sqlx::{Pool, Postgres};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{CreateTokenRequest, TokenResponse, UpdateTokenRequest};
@@ -14,7 +14,7 @@ pub async fn list_tokens(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -33,7 +33,7 @@ pub async fn list_tokens(
 #[endpoint(tags("tokens"), summary = "Get token by ID")]
 pub async fn get_token(depot: &mut Depot, id: PathParam<String>) -> AppResult<Json<TokenResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -47,7 +47,7 @@ pub async fn create_token(
     body: JsonBody<CreateTokenRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -62,7 +62,7 @@ pub async fn update_token(
     body: JsonBody<UpdateTokenRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -73,7 +73,7 @@ pub async fn update_token(
 #[endpoint(tags("tokens"), summary = "Delete token")]
 pub async fn delete_token(depot: &mut Depot, id: PathParam<String>) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

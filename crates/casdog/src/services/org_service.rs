@@ -1,20 +1,23 @@
 use chrono::Utc;
-use sqlx::{Pool, Postgres};
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use uuid::Uuid;
 
+use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateOrganizationRequest, Organization, OrganizationListResponse, OrganizationQuery,
     OrganizationResponse, UpdateOrganizationRequest,
 };
+use crate::schema::organizations;
 
 #[derive(Clone)]
 pub struct OrgService {
-    pool: Pool<Postgres>,
+    pool: DieselPool,
 }
 
 impl OrgService {
-    pub fn new(pool: Pool<Postgres>) -> Self {
+    pub fn new(pool: DieselPool) -> Self {
         Self { pool }
     }
 
@@ -22,89 +25,110 @@ impl OrgService {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        let org = sqlx::query_as::<_, Organization>(
-            r#"
-            INSERT INTO organizations (
-                id, owner, name, display_name, website_url, logo, logo_dark, favicon,
-                password_type, default_avatar, default_application, country_codes, languages,
-                tags, init_score, password_options, password_expire_days, default_password,
-                account_items, mfa_items, created_at, updated_at
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8,
-                $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, $18,
-                $19, $20, $21, $22
-            )
-            RETURNING *
-            "#,
-        )
-        .bind(&id)
-        .bind(&req.owner)
-        .bind(&req.name)
-        .bind(&req.display_name)
-        .bind(&req.website_url)
-        .bind(&req.logo)
-        .bind(&req.logo_dark)
-        .bind(&req.favicon)
-        .bind(req.password_type.unwrap_or_else(|| "argon2".to_string()))
-        .bind(&req.default_avatar)
-        .bind(&req.default_application)
-        .bind(&req.country_codes)
-        .bind(&req.languages)
-        .bind(&req.tags)
-        .bind(req.init_score.unwrap_or(0))
-        .bind(&req.password_options)
-        .bind(req.password_expire_days.unwrap_or(0))
-        .bind(&req.default_password)
-        .bind(&req.account_items)
-        .bind(&req.mfa_items)
-        .bind(now)
-        .bind(now)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
-                AppError::Conflict(format!("Organization '{}' already exists", req.name))
-            }
-            _ => AppError::Database(e),
-        })?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let org = diesel::insert_into(organizations::table)
+            .values((
+                organizations::id.eq(&id),
+                organizations::owner.eq(&req.owner),
+                organizations::name.eq(&req.name),
+                organizations::display_name.eq(&req.display_name),
+                organizations::website_url.eq(&req.website_url),
+                organizations::logo.eq(&req.logo),
+                organizations::logo_dark.eq(&req.logo_dark),
+                organizations::favicon.eq(&req.favicon),
+                organizations::password_type
+                    .eq(req.password_type.unwrap_or_else(|| "argon2".to_string())),
+                organizations::default_avatar.eq(&req.default_avatar),
+                organizations::default_application.eq(&req.default_application),
+                organizations::country_codes.eq(&req.country_codes),
+                organizations::languages.eq(&req.languages),
+                organizations::tags.eq(&req.tags),
+                organizations::init_score.eq(req.init_score.unwrap_or(0)),
+                organizations::password_options.eq(&req.password_options),
+                organizations::password_expire_days.eq(req.password_expire_days.unwrap_or(0)),
+                organizations::default_password.eq(&req.default_password),
+                organizations::account_items.eq(&req.account_items),
+                organizations::mfa_items.eq(&req.mfa_items),
+                organizations::created_at.eq(now),
+                organizations::updated_at.eq(now),
+            ))
+            .returning(Organization::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| match e {
+                diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                ) => AppError::Conflict(format!("Organization '{}' already exists", req.name)),
+                _ => AppError::Internal(e.to_string()),
+            })?;
 
         Ok(org.into())
     }
 
     pub async fn get_by_id(&self, id: &str) -> AppResult<OrganizationResponse> {
-        let org = sqlx::query_as::<_, Organization>(
-            "SELECT * FROM organizations WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Organization with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let org = organizations::table
+            .filter(organizations::id.eq(id))
+            .filter(organizations::is_deleted.eq(false))
+            .select(Organization::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Organization with id '{}' not found", id))
+            })?;
 
         Ok(org.into())
     }
 
     pub async fn get_by_name(&self, name: &str) -> AppResult<OrganizationResponse> {
-        let org = sqlx::query_as::<_, Organization>(
-            "SELECT * FROM organizations WHERE name = $1 AND is_deleted = FALSE",
-        )
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Organization '{}' not found", name)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let org = organizations::table
+            .filter(organizations::name.eq(name))
+            .filter(organizations::is_deleted.eq(false))
+            .select(Organization::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Organization '{}' not found", name)))?;
 
         Ok(org.into())
     }
 
     pub async fn get_internal(&self, name: &str) -> AppResult<Organization> {
-        let org = sqlx::query_as::<_, Organization>(
-            "SELECT * FROM organizations WHERE name = $1 AND is_deleted = FALSE",
-        )
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Organization '{}' not found", name)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let org = organizations::table
+            .filter(organizations::name.eq(name))
+            .filter(organizations::is_deleted.eq(false))
+            .select(Organization::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Organization '{}' not found", name)))?;
 
         Ok(org)
     }
@@ -114,39 +138,52 @@ impl OrgService {
         let page_size = query.page_size.unwrap_or(20).min(100);
         let offset = (page - 1) * page_size;
 
-        let (orgs, total): (Vec<Organization>, i64) = if let Some(owner) = &query.owner {
-            let orgs = sqlx::query_as::<_, Organization>(
-                "SELECT * FROM organizations WHERE owner = $1 AND is_deleted = FALSE ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            )
-            .bind(owner)
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM organizations WHERE owner = $1 AND is_deleted = FALSE",
-            )
-            .bind(owner)
-            .fetch_one(&self.pool)
-            .await?;
+        let (orgs, total): (Vec<Organization>, i64) = if let Some(ref owner) = query.owner {
+            let orgs = organizations::table
+                .filter(organizations::owner.eq(owner))
+                .filter(organizations::is_deleted.eq(false))
+                .order(organizations::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .select(Organization::as_select())
+                .load(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (orgs, total.0)
+            let total: i64 = organizations::table
+                .filter(organizations::owner.eq(owner))
+                .filter(organizations::is_deleted.eq(false))
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            (orgs, total)
         } else {
-            let orgs = sqlx::query_as::<_, Organization>(
-                "SELECT * FROM organizations WHERE is_deleted = FALSE ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-            )
-            .bind(page_size)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
+            let orgs = organizations::table
+                .filter(organizations::is_deleted.eq(false))
+                .order(organizations::created_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .select(Organization::as_select())
+                .load(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let total: (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM organizations WHERE is_deleted = FALSE")
-                    .fetch_one(&self.pool)
-                    .await?;
+            let total: i64 = organizations::table
+                .filter(organizations::is_deleted.eq(false))
+                .count()
+                .get_result(&mut conn)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            (orgs, total.0)
+            (orgs, total)
         };
 
         Ok(OrganizationListResponse {
@@ -162,13 +199,23 @@ impl OrgService {
         id: &str,
         req: UpdateOrganizationRequest,
     ) -> AppResult<OrganizationResponse> {
-        let mut org = sqlx::query_as::<_, Organization>(
-            "SELECT * FROM organizations WHERE id = $1 AND is_deleted = FALSE",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Organization with id '{}' not found", id)))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let mut org = organizations::table
+            .filter(organizations::id.eq(id))
+            .filter(organizations::is_deleted.eq(false))
+            .select(Organization::as_select())
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Organization with id '{}' not found", id))
+            })?;
 
         if let Some(v) = req.display_name {
             org.display_name = v;
@@ -277,76 +324,74 @@ impl OrgService {
         }
         org.updated_at = Utc::now();
 
-        let updated_org = sqlx::query_as::<_, Organization>(
-            r#"
-            UPDATE organizations SET
-                display_name = $1, website_url = $2, logo = $3, logo_dark = $4, favicon = $5,
-                password_type = $6, default_avatar = $7, password_salt = $8, password_options = $9,
-                password_obfuscator_type = $10, password_obfuscator_key = $11, password_expire_days = $12,
-                default_password = $13, master_password = $14, user_types = $15, tags = $16,
-                country_codes = $17, default_application = $18, init_score = $19, languages = $20,
-                theme_data = $21, account_menu = $22, enable_soft_deletion = $23, is_profile_public = $24,
-                use_email_as_username = $25, enable_tour = $26, disable_signin = $27,
-                ip_restriction = $28, ip_whitelist = $29, has_privilege_consent = $30,
-                account_items = $31, nav_items = $32, mfa_items = $33, mfa_remember_in_hours = $34,
-                balance_currency = $35, updated_at = $36
-            WHERE id = $37
-            RETURNING *
-            "#,
-        )
-        .bind(&org.display_name)
-        .bind(&org.website_url)
-        .bind(&org.logo)
-        .bind(&org.logo_dark)
-        .bind(&org.favicon)
-        .bind(&org.password_type)
-        .bind(&org.default_avatar)
-        .bind(&org.password_salt)
-        .bind(&org.password_options)
-        .bind(&org.password_obfuscator_type)
-        .bind(&org.password_obfuscator_key)
-        .bind(org.password_expire_days)
-        .bind(&org.default_password)
-        .bind(&org.master_password)
-        .bind(&org.user_types)
-        .bind(&org.tags)
-        .bind(&org.country_codes)
-        .bind(&org.default_application)
-        .bind(org.init_score)
-        .bind(&org.languages)
-        .bind(&org.theme_data)
-        .bind(&org.account_menu)
-        .bind(org.enable_soft_deletion)
-        .bind(org.is_profile_public)
-        .bind(org.use_email_as_username)
-        .bind(org.enable_tour)
-        .bind(org.disable_signin)
-        .bind(&org.ip_restriction)
-        .bind(&org.ip_whitelist)
-        .bind(org.has_privilege_consent)
-        .bind(&org.account_items)
-        .bind(&org.nav_items)
-        .bind(&org.mfa_items)
-        .bind(org.mfa_remember_in_hours)
-        .bind(&org.balance_currency)
-        .bind(org.updated_at)
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await?;
+        let updated_org = diesel::update(organizations::table.filter(organizations::id.eq(id)))
+            .set((
+                organizations::display_name.eq(&org.display_name),
+                organizations::website_url.eq(&org.website_url),
+                organizations::logo.eq(&org.logo),
+                organizations::logo_dark.eq(&org.logo_dark),
+                organizations::favicon.eq(&org.favicon),
+                organizations::password_type.eq(&org.password_type),
+                organizations::default_avatar.eq(&org.default_avatar),
+                organizations::password_salt.eq(&org.password_salt),
+                organizations::password_options.eq(&org.password_options),
+                organizations::password_obfuscator_type.eq(&org.password_obfuscator_type),
+                organizations::password_obfuscator_key.eq(&org.password_obfuscator_key),
+                organizations::password_expire_days.eq(org.password_expire_days),
+                organizations::default_password.eq(&org.default_password),
+                organizations::master_password.eq(&org.master_password),
+                organizations::user_types.eq(&org.user_types),
+                organizations::tags.eq(&org.tags),
+                organizations::country_codes.eq(&org.country_codes),
+                organizations::default_application.eq(&org.default_application),
+                organizations::init_score.eq(org.init_score),
+                organizations::languages.eq(&org.languages),
+                organizations::theme_data.eq(&org.theme_data),
+                organizations::account_menu.eq(&org.account_menu),
+                organizations::enable_soft_deletion.eq(org.enable_soft_deletion),
+                organizations::is_profile_public.eq(org.is_profile_public),
+                organizations::use_email_as_username.eq(org.use_email_as_username),
+                organizations::enable_tour.eq(org.enable_tour),
+                organizations::disable_signin.eq(org.disable_signin),
+                organizations::ip_restriction.eq(&org.ip_restriction),
+                organizations::ip_whitelist.eq(&org.ip_whitelist),
+                organizations::has_privilege_consent.eq(org.has_privilege_consent),
+                organizations::account_items.eq(&org.account_items),
+                organizations::nav_items.eq(&org.nav_items),
+                organizations::mfa_items.eq(&org.mfa_items),
+                organizations::mfa_remember_in_hours.eq(org.mfa_remember_in_hours),
+                organizations::balance_currency.eq(&org.balance_currency),
+                organizations::updated_at.eq(org.updated_at),
+            ))
+            .returning(Organization::as_returning())
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(updated_org.into())
     }
 
     pub async fn delete(&self, id: &str) -> AppResult<()> {
-        let result = sqlx::query(
-            "UPDATE organizations SET is_deleted = TRUE, updated_at = $1 WHERE id = $2 AND is_deleted = FALSE",
-        )
-        .bind(Utc::now())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        if result.rows_affected() == 0 {
+        let count = diesel::update(
+            organizations::table
+                .filter(organizations::id.eq(id))
+                .filter(organizations::is_deleted.eq(false)),
+        )
+        .set((
+            organizations::is_deleted.eq(true),
+            organizations::updated_at.eq(Utc::now()),
+        ))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if count == 0 {
             return Err(AppError::NotFound(format!(
                 "Organization with id '{}' not found",
                 id

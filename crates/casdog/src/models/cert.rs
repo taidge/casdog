@@ -3,7 +3,11 @@ use salvo::oapi::ToSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, FromRow, ToSchema, diesel::Queryable, diesel::Selectable,
+)]
+#[diesel(table_name = crate::schema::certificates)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Certificate {
     pub id: String,
     pub owner: String,
@@ -13,6 +17,7 @@ pub struct Certificate {
     pub scope: String, // JWT, SAML
     #[sqlx(rename = "type")]
     #[serde(rename = "type")]
+    #[diesel(column_name = type_)]
     pub cert_type: String, // x509
     pub crypto_algorithm: String, // RS256, ES256
     pub bit_size: i32,

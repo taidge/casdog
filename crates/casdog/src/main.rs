@@ -1,9 +1,11 @@
 mod config;
+mod diesel_pool;
 mod error;
 mod handlers;
 mod hoops;
 mod models;
 mod routes;
+mod schema;
 mod services;
 
 use salvo::affix_state::AffixList;
@@ -43,7 +45,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&config.database.url)
         .await?;
 
-    tracing::info!("Database connection pool created");
+    tracing::info!("SQLx database connection pool created");
+
+    let diesel_pool = diesel_pool::create_diesel_pool(&config.database.url).await?;
+
+    tracing::info!("Diesel database connection pool created");
 
     // Initialize database with built-in seed data (idempotent, skips if already done)
     InitService::init_db(&pool).await?;
@@ -76,7 +82,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = Service::new(router)
         .hoop(Logger::new())
         .hoop(cors)
-        .hoop(AffixList::new().inject(pool).inject(casbin_service))
+        .hoop(
+            AffixList::new()
+                .inject(pool)
+                .inject(diesel_pool)
+                .inject(casbin_service),
+        )
         .hoop(hoops::RecordFilter);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
