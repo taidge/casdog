@@ -7,8 +7,9 @@ use crate::handlers::{
     adapter, app_extra, application, auth, cas, cert, cert_extra, dashboard, enforcer, form, group,
     health, impersonation, invitation, ldap, messaging, mfa, model, oidc, order, org_extra,
     organization, payment, permission, permission_extra, plan, policy, pricing, product, provider,
-    provider_extra, record, resource, role, saml, scim, session, social_login, subscription,
-    syncer, system, ticket, token, transaction, upload, user, user_extra, verification, webhook,
+    provider_extra, record, resource, role, rule, saml, scim, session, site, social_login,
+    subscription, syncer, system, ticket, token, transaction, upload, user, user_extra,
+    verification, webhook,
 };
 use crate::middleware::JwtAuth;
 
@@ -106,6 +107,8 @@ fn protected_routes() -> Router {
         .push(model_routes())
         .push(adapter_routes())
         .push(enforcer_routes())
+        .push(rule_routes())
+        .push(site_routes())
         // Phase 8: Extra convenience query endpoints
         .push(Router::with_path("get-global-users").get(user_extra::get_global_users))
         .push(Router::with_path("get-sorted-users").get(user_extra::get_sorted_users))
@@ -116,6 +119,8 @@ fn protected_routes() -> Router {
         .push(Router::with_path("get-default-application").get(app_extra::get_default_application))
         .push(Router::with_path("get-global-providers").get(provider_extra::get_global_providers))
         .push(Router::with_path("get-global-certs").get(cert_extra::get_global_certs))
+        .push(Router::with_path("get-global-rules").get(rule::get_global_rules))
+        .push(Router::with_path("get-global-sites").get(site::get_global_sites))
         .push(Router::with_path("get-permissions-by-submitter").get(permission_extra::get_permissions_by_submitter))
         .push(Router::with_path("get-permissions-by-role").get(permission_extra::get_permissions_by_role))
         .push(Router::with_path("get-dashboard").get(dashboard::get_dashboard))
@@ -423,6 +428,30 @@ fn enforcer_routes() -> Router {
                 .get(enforcer::get_enforcer)
                 .put(enforcer::update_enforcer)
                 .delete(enforcer::delete_enforcer),
+        )
+}
+
+fn rule_routes() -> Router {
+    Router::with_path("rules")
+        .get(rule::list_rules)
+        .post(rule::create_rule)
+        .push(
+            Router::with_path("{id}")
+                .get(rule::get_rule)
+                .put(rule::update_rule)
+                .delete(rule::delete_rule),
+        )
+}
+
+fn site_routes() -> Router {
+    Router::with_path("sites")
+        .get(site::list_sites)
+        .post(site::create_site)
+        .push(
+            Router::with_path("{id}")
+                .get(site::get_site)
+                .put(site::update_site)
+                .delete(site::delete_site),
         )
 }
 
@@ -808,6 +837,28 @@ fn api_router_for_openapi() -> Router {
                             .delete(enforcer::delete_enforcer),
                     ),
             )
+            .push(
+                Router::with_path("rules")
+                    .get(rule::list_rules)
+                    .post(rule::create_rule)
+                    .push(
+                        Router::with_path("{id}")
+                            .get(rule::get_rule)
+                            .put(rule::update_rule)
+                            .delete(rule::delete_rule),
+                    ),
+            )
+            .push(
+                Router::with_path("sites")
+                    .get(site::list_sites)
+                    .post(site::create_site)
+                    .push(
+                        Router::with_path("{id}")
+                            .get(site::get_site)
+                            .put(site::update_site)
+                            .delete(site::delete_site),
+                    ),
+            )
             // Phase 8: Extra convenience query endpoints
             .push(Router::with_path("get-global-users").get(user_extra::get_global_users))
             .push(Router::with_path("get-sorted-users").get(user_extra::get_sorted_users))
@@ -818,6 +869,8 @@ fn api_router_for_openapi() -> Router {
             .push(Router::with_path("get-default-application").get(app_extra::get_default_application))
             .push(Router::with_path("get-global-providers").get(provider_extra::get_global_providers))
             .push(Router::with_path("get-global-certs").get(cert_extra::get_global_certs))
+            .push(Router::with_path("get-global-rules").get(rule::get_global_rules))
+            .push(Router::with_path("get-global-sites").get(site::get_global_sites))
             .push(Router::with_path("get-permissions-by-submitter").get(permission_extra::get_permissions_by_submitter))
             .push(Router::with_path("get-permissions-by-role").get(permission_extra::get_permissions_by_role))
             .push(Router::with_path("get-dashboard").get(dashboard::get_dashboard))

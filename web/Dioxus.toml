@@ -1,0 +1,6 @@
+[application]
+name = "casdog"
+out_dir = "dist"
+
+[web.app]
+title = "Casdog"
