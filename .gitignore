@@ -42,3 +42,4 @@ web/coverage/
 web/.eslintcache
 .claude
 nul
+_*.md
