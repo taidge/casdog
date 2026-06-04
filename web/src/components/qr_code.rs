@@ -88,8 +88,6 @@ pub fn QrCode(
     let has_matrix = !matrix.is_empty();
 
     rsx! {
-        style { "{QR_CODE_CSS}" }
-
         div { class: "qr-container",
             if has_image {
                 img {

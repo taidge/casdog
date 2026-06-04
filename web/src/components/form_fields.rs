@@ -9,9 +9,11 @@ pub fn TextField(
     label: String,
     value: String,
     #[props(default)] placeholder: String,
+    #[props(default = "text".to_string())] input_type: String,
     #[props(default)] disabled: bool,
     #[props(default)] required: bool,
     oninput: EventHandler<String>,
+    #[props(default)] onkeypress: Option<EventHandler<KeyboardEvent>>,
 ) -> Element {
     rsx! {
         div { class: "form-field",
@@ -23,13 +25,29 @@ pub fn TextField(
             }
             input {
                 class: "text-input",
-                r#type: "text",
+                r#type: "{input_type}",
                 placeholder: "{placeholder}",
                 value: "{value}",
                 disabled,
                 oninput: move |evt| oninput.call(evt.value()),
+                onkeypress: move |evt| {
+                    if let Some(handler) = onkeypress {
+                        handler.call(evt);
+                    }
+                },
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InlineMessage — shared status banner (error / success / neutral)
+// ---------------------------------------------------------------------------
+
+#[component]
+pub fn InlineMessage(kind: String, text: String) -> Element {
+    rsx! {
+        div { class: "inline-message {kind}", "{text}" }
     }
 }
 
@@ -244,6 +262,7 @@ pub fn PasswordField(
     #[props(default)] disabled: bool,
     #[props(default)] required: bool,
     oninput: EventHandler<String>,
+    #[props(default)] onkeypress: Option<EventHandler<KeyboardEvent>>,
 ) -> Element {
     let mut visible = use_signal(|| false);
 
@@ -263,6 +282,11 @@ pub fn PasswordField(
                     value: "{value}",
                     disabled,
                     oninput: move |evt| oninput.call(evt.value()),
+                    onkeypress: move |evt| {
+                        if let Some(handler) = onkeypress {
+                            handler.call(evt);
+                        }
+                    },
                 }
                 button {
                     class: "password-toggle ghost-button",
@@ -297,7 +321,7 @@ pub fn TagsField(
                     let tag_display = tag.clone();
                     let tags_clone = tags.clone();
                     rsx! {
-                        span { class: "tag-chip", key: "{idx}-{tag_display}",
+                        span { class: "tag-chip", key: "{tag_display}",
                             "{tag_display}"
                             button {
                                 class: "tag-remove",

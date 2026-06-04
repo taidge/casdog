@@ -334,6 +334,51 @@ body {
   color: var(--text-soft);
 }
 
+/* ---- Shared auth-card layout (login/signup/forgot/authorize/device/result) ---- */
+.auth-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 440px;
+  padding: 36px;
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+  animation: fade-up 320ms ease;
+}
+
+.field-label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.required-mark {
+  color: var(--danger);
+}
+
+.muted-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  padding: 0;
+}
+
+.muted-link:hover {
+  text-decoration: underline;
+}
+
 @keyframes fade-up {
   from {
     opacity: 0;

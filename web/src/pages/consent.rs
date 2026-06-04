@@ -1,10 +1,11 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::api::{build_url, extract_collection, request_json};
+use crate::components::InlineMessage;
 
-const CONSENT_PAGE_CSS: &str = r#"
+pub const CONSENT_PAGE_CSS: &str = r#"
 .consent-page {
   max-width: 720px;
   margin: 0 auto;
@@ -136,20 +137,17 @@ struct ConsentEntry {
 /// * `api_base` - Signal with the API base URL.
 /// * `token` - The current user's auth token.
 #[component]
-pub fn ConsentPage(
-    api_base: Signal<String>,
-    token: Signal<Option<String>>,
-) -> Element {
-    let mut consents = use_signal(Vec::<ConsentEntry>::new);
-    let mut loading = use_signal(|| false);
-    let mut error_message = use_signal(|| None::<String>);
-    let mut success_message = use_signal(|| None::<String>);
-    let mut refresh_nonce = use_signal(|| 0_u64);
+pub fn ConsentPage(api_base: Signal<String>, token: Signal<Option<String>>) -> Element {
+    let consents = use_signal(Vec::<ConsentEntry>::new);
+    let loading = use_signal(|| false);
+    let error_message = use_signal(|| None::<String>);
+    let success_message = use_signal(|| None::<String>);
+    let refresh_nonce = use_signal(|| 0_u64);
 
     // Grant form state
     let mut grant_app = use_signal(String::new);
     let mut grant_scopes = use_signal(String::new);
-    let mut granting = use_signal(|| false);
+    let granting = use_signal(|| false);
 
     // Fetch consents
     {
@@ -193,7 +191,7 @@ pub fn ConsentPage(
         });
     }
 
-    let do_revoke = move |consent_id: String| {
+    let do_revoke = use_callback(move |consent_id: String| {
         let api_base_val = api_base();
         let token_val = token();
         let mut error_message = error_message;
@@ -215,9 +213,9 @@ pub fn ConsentPage(
                 }
             }
         });
-    };
+    });
 
-    let do_grant = move |_| {
+    let do_grant = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let token_val = token();
         let app = grant_app();
@@ -259,21 +257,19 @@ pub fn ConsentPage(
 
             granting.set(false);
         });
-    };
+    });
 
     rsx! {
-        style { "{CONSENT_PAGE_CSS}" }
-
         div { class: "consent-page",
             h2 { "Consent management" }
             p { class: "subtitle", "Manage your application authorizations." }
 
             // Messages
             if let Some(msg) = success_message() {
-                div { class: "inline-message success", "{msg}" }
+                InlineMessage { kind: "success".to_string(), text: msg }
             }
             if let Some(err) = error_message() {
-                div { class: "inline-message error", "{err}" }
+                InlineMessage { kind: "error".to_string(), text: err }
             }
 
             // Granted consents
@@ -281,12 +277,12 @@ pub fn ConsentPage(
                 h3 { "Granted consents" }
 
                 if loading() {
-                    div { class: "inline-message neutral", "Loading consents..." }
+                    InlineMessage { kind: "neutral".to_string(), text: "Loading consents...".to_string() }
                 } else if consents().is_empty() {
                     div { class: "consent-empty", "No consents granted yet." }
                 } else {
                     div { class: "consent-list",
-                        {consents().iter().map(|consent| {
+                        {consents().into_iter().map(|consent| {
                             let id = consent.id.clone();
                             let app_name = consent.display_name.clone()
                                 .filter(|s| !s.is_empty())
@@ -319,7 +315,7 @@ pub fn ConsentPage(
                                     }
                                     button {
                                         class: "danger-button",
-                                        onclick: move |_| do_revoke(revoke_id.clone()),
+                                        onclick: move |_| do_revoke.call(revoke_id.clone()),
                                         "Revoke"
                                     }
                                 }
@@ -357,7 +353,7 @@ pub fn ConsentPage(
                         button {
                             class: "primary-button",
                             disabled: granting() || grant_app().is_empty(),
-                            onclick: do_grant,
+                            onclick: move |_| do_grant.call(()),
                             if granting() { "Granting..." } else { "Grant" }
                         }
                     }

@@ -1,9 +1,10 @@
 use dioxus::prelude::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::api::{build_url, request_json};
+use crate::components::InlineMessage;
 
-const DEVICE_AUTH_CSS: &str = r#"
+pub const DEVICE_AUTH_CSS: &str = r#"
 .device-auth-page {
   display: flex;
   align-items: center;
@@ -147,7 +148,7 @@ pub fn DeviceAuthPage(
     let mut user_code = use_signal(|| initial_code.clone());
     let mut status = use_signal(|| DeviceStatus::Input);
 
-    let do_verify = move |_| {
+    let do_verify = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let token_val = token();
         let code = user_code();
@@ -209,9 +210,9 @@ pub fn DeviceAuthPage(
                 }
             }
         });
-    };
+    });
 
-    let do_decision = move |approve: bool| {
+    let do_decision = use_callback(move |approve: bool| {
         let current_status = status();
         let device_code = match &current_status {
             DeviceStatus::Verified { device_code, .. } => device_code.clone(),
@@ -242,11 +243,9 @@ pub fn DeviceAuthPage(
                 }
             }
         });
-    };
+    });
 
     rsx! {
-        style { "{DEVICE_AUTH_CSS}" }
-
         div { class: "device-auth-page",
             div { class: "device-auth-box",
                 h2 { "Device authorization" }
@@ -269,7 +268,7 @@ pub fn DeviceAuthPage(
                                         oninput: move |evt| user_code.set(evt.value()),
                                         onkeypress: move |evt: KeyboardEvent| {
                                             if evt.key() == Key::Enter {
-                                                do_verify(());
+                                                do_verify.call(());
                                             }
                                         },
                                     }
@@ -277,7 +276,7 @@ pub fn DeviceAuthPage(
                                 button {
                                     class: "primary-button",
                                     disabled: matches!(status(), DeviceStatus::Verifying) || user_code().trim().is_empty(),
-                                    onclick: do_verify,
+                                    onclick: move |_| do_verify.call(()),
                                     if matches!(status(), DeviceStatus::Verifying) { "Verifying..." } else { "Verify" }
                                 }
                             }
@@ -301,12 +300,12 @@ pub fn DeviceAuthPage(
                             div { class: "device-actions",
                                 button {
                                     class: "primary-button",
-                                    onclick: move |_| do_decision(true),
+                                    onclick: move |_| do_decision.call(true),
                                     "Approve"
                                 }
                                 button {
                                     class: "danger-button",
-                                    onclick: move |_| do_decision(false),
+                                    onclick: move |_| do_decision.call(false),
                                     "Deny"
                                 }
                             }
@@ -345,7 +344,7 @@ pub fn DeviceAuthPage(
                     DeviceStatus::Error(ref msg) => {
                         let m = msg.clone();
                         rsx! {
-                            div { class: "inline-message error", "{m}" }
+                            InlineMessage { kind: "error".to_string(), text: m }
                             button {
                                 class: "ghost-button",
                                 onclick: move |_| status.set(DeviceStatus::Input),

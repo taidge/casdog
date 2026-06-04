@@ -2,8 +2,9 @@ use dioxus::prelude::*;
 use serde_json::{Value, json};
 
 use crate::api::{build_url, request_json};
+use crate::components::InlineMessage;
 
-const SIGNUP_PAGE_CSS: &str = r#"
+pub const SIGNUP_PAGE_CSS: &str = r#"
 .signup-page {
   display: flex;
   align-items: center;
@@ -115,18 +116,21 @@ pub fn SignupPage(
     let mut password = use_signal(String::new);
     let mut confirm_password = use_signal(String::new);
     let mut application = use_signal(|| default_application.clone());
-    let mut loading = use_signal(|| false);
-    let mut error_message = use_signal(|| None::<String>);
+    let loading = use_signal(|| false);
+    let error_message = use_signal(|| None::<String>);
     let mut show_password = use_signal(|| false);
 
-    let passwords_match = password().is_empty() || password() == confirm_password();
-    let can_submit = !username().is_empty()
-        && !password().is_empty()
-        && !confirm_password().is_empty()
-        && passwords_match
-        && !loading();
+    let passwords_match =
+        use_memo(move || password().is_empty() || password() == confirm_password());
+    let can_submit = use_memo(move || {
+        !username().is_empty()
+            && !password().is_empty()
+            && !confirm_password().is_empty()
+            && passwords_match()
+            && !loading()
+    });
 
-    let do_signup = move |_| {
+    let do_signup = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let org = organization();
         let user = username();
@@ -172,10 +176,7 @@ pub fn SignupPage(
             match request_json("POST", &url, None, Some(payload)).await {
                 Ok(value) => {
                     // Check if server returned an error status in the response body
-                    let status = value
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("ok");
+                    let status = value.get("status").and_then(|s| s.as_str()).unwrap_or("ok");
 
                     if status == "error" {
                         let msg = value
@@ -195,11 +196,9 @@ pub fn SignupPage(
 
             loading.set(false);
         });
-    };
+    });
 
     rsx! {
-        style { "{SIGNUP_PAGE_CSS}" }
-
         div { class: "signup-page",
             div { class: "signup-box",
                 h2 { "Create account" }
@@ -308,8 +307,8 @@ pub fn SignupPage(
                             value: "{confirm_password}",
                             oninput: move |evt| confirm_password.set(evt.value()),
                         }
-                        if !passwords_match {
-                            div { class: "inline-message error", "Passwords do not match." }
+                        if !passwords_match() {
+                            InlineMessage { kind: "error".to_string(), text: "Passwords do not match.".to_string() }
                         }
                     }
 
@@ -327,15 +326,15 @@ pub fn SignupPage(
 
                     // Error display
                     if let Some(err) = error_message() {
-                        div { class: "inline-message error", "{err}" }
+                        InlineMessage { kind: "error".to_string(), text: err }
                     }
 
                     // Submit
                     div { class: "signup-actions",
                         button {
                             class: "primary-button",
-                            disabled: !can_submit,
-                            onclick: do_signup,
+                            disabled: !can_submit(),
+                            onclick: move |_| do_signup.call(()),
                             if loading() { "Creating account..." } else { "Create account" }
                         }
                     }

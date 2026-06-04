@@ -83,6 +83,7 @@ pub const CAPTCHA_CSS: &str = r#"
 "#;
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum CaptchaMode {
     /// Use an image URL returned by the server.
     Image,
@@ -102,6 +103,7 @@ impl Default for CaptchaMode {
 /// * `captcha_url` - optional override URL; if empty, uses `/api/captcha`.
 /// * `on_verified` - called with (captcha_token, user_answer) when the user submits.
 #[component]
+#[allow(dead_code)]
 pub fn CaptchaWidget(
     api_base: Signal<String>,
     token: Signal<Option<String>>,
@@ -188,8 +190,6 @@ pub fn CaptchaWidget(
     }
 
     rsx! {
-        style { "{CAPTCHA_CSS}" }
-
         div { class: "captcha-widget",
             div { class: "captcha-header",
                 h4 { "Verification" }
@@ -272,25 +272,30 @@ pub fn CaptchaWidget(
 
 /// Generate a simple local text challenge (6 alphanumeric characters).
 /// This is a fallback when the server captcha endpoint is not available.
+#[allow(dead_code)]
 fn generate_local_challenge() -> String {
     // Use a simple deterministic-looking string since we don't have `rand` in WASM.
     // In production the server would provide the challenge.
-    let now = now_millis();
+    let now = next_seed();
     let chars = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut result = String::with_capacity(6);
     let mut seed = now as u64;
     for _ in 0..6 {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let idx = ((seed >> 33) as usize) % chars.len();
         result.push(chars[idx] as char);
     }
     result
 }
 
-/// Get a simple hash-like seed value from the current timestamp.
-/// We avoid external JS interop; instead use a monotonic counter
-/// seeded from a known constant so the CAPTCHA varies each refresh.
-fn now_millis() -> f64 {
+/// Return a varying pseudo-random seed from a thread-local counter.
+/// This is not a real timestamp; we avoid external JS interop and instead
+/// use a monotonic counter seeded from a known constant so the CAPTCHA
+/// varies each refresh.
+#[allow(dead_code)]
+fn next_seed() -> f64 {
     // In a WASM context without direct js_sys, we use gloo_net's
     // internal time or a static counter. For simplicity, use a
     // thread-local counter incremented on each call to provide

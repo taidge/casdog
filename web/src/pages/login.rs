@@ -3,8 +3,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::api::{build_url, request_json};
+use crate::components::InlineMessage;
 
-const LOGIN_PAGE_CSS: &str = r#"
+pub const LOGIN_PAGE_CSS: &str = r#"
 .login-page {
   display: flex;
   align-items: center;
@@ -133,7 +134,7 @@ const LOGIN_PAGE_CSS: &str = r#"
 }
 "#;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct OAuthProvider {
     name: String,
     display_name: Option<String>,
@@ -161,8 +162,8 @@ pub fn LoginPage(
     let mut organization = use_signal(|| "admin".to_string());
     let mut username = use_signal(String::new);
     let mut password = use_signal(String::new);
-    let mut loading = use_signal(|| false);
-    let mut error_message = use_signal(|| None::<String>);
+    let loading = use_signal(|| false);
+    let error_message = use_signal(|| None::<String>);
     let mut show_password = use_signal(|| false);
 
     // Social / OAuth providers
@@ -197,7 +198,12 @@ pub fn LoginPage(
                         .filter(|p: &OAuthProvider| {
                             p.provider_type
                                 .as_deref()
-                                .map(|t| !matches!(t, "Email" | "SMS" | "Payment" | "Storage" | "Captcha"))
+                                .map(|t| {
+                                    !matches!(
+                                        t,
+                                        "Email" | "SMS" | "Payment" | "Storage" | "Captcha"
+                                    )
+                                })
                                 .unwrap_or(true)
                         })
                         .collect();
@@ -208,7 +214,7 @@ pub fn LoginPage(
         });
     }
 
-    let do_login = move |_| {
+    let do_login = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let org = organization();
         let user = username();
@@ -263,11 +269,9 @@ pub fn LoginPage(
 
             loading.set(false);
         });
-    };
+    });
 
     rsx! {
-        style { "{LOGIN_PAGE_CSS}" }
-
         div { class: "login-page",
             div { class: "login-box",
                 h2 { "Sign in" }
@@ -319,7 +323,7 @@ pub fn LoginPage(
                                 oninput: move |evt| password.set(evt.value()),
                                 onkeypress: move |evt: KeyboardEvent| {
                                     if evt.key() == Key::Enter {
-                                        do_login(());
+                                        do_login.call(());
                                     }
                                 },
                             }
@@ -334,7 +338,7 @@ pub fn LoginPage(
 
                     // Error display
                     if let Some(err) = error_message() {
-                        div { class: "inline-message error", "{err}" }
+                        InlineMessage { kind: "error".to_string(), text: err }
                     }
 
                     // Actions
@@ -342,7 +346,7 @@ pub fn LoginPage(
                         button {
                             class: "primary-button",
                             disabled: loading() || username().is_empty() || password().is_empty(),
-                            onclick: do_login,
+                            onclick: move |_| do_login.call(()),
                             if loading() { "Signing in..." } else { "Sign in" }
                         }
                         button {
@@ -358,7 +362,7 @@ pub fn LoginPage(
                 if !providers().is_empty() {
                     div { class: "social-divider", "Or sign in with" }
                     div { class: "social-grid",
-                        {providers().iter().map(|p| {
+                        {providers().into_iter().map(|p| {
                             let name = p.name.clone();
                             let display = p.display_name.clone().unwrap_or_else(|| p.name.clone());
                             let api_base_val = api_base();

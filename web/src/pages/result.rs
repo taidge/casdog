@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde_json::Value;
 
-const RESULT_PAGE_CSS: &str = r#"
+pub const RESULT_PAGE_CSS: &str = r#"
 .result-page {
   display: flex;
   align-items: center;
@@ -180,8 +180,6 @@ pub fn ResultPage(
     }
 
     rsx! {
-        style { "{RESULT_PAGE_CSS}" }
-
         div { class: "result-page",
             div { class: "result-box",
                 // Icon
@@ -215,7 +213,7 @@ pub fn ResultPage(
                         "Back to home"
                     }
                     if !success {
-                        if let Some(retry) = &on_retry {
+                        if let Some(retry) = on_retry {
                             button {
                                 class: "ghost-button",
                                 onclick: move |_| retry.call(()),

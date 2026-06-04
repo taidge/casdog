@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use gloo_storage::Storage;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -75,14 +76,17 @@ impl Default for Locale {
 }
 
 /// Translate a key to the given locale. Falls back to English if no translation exists.
-pub fn t(key: &str, locale: Locale) -> &'static str {
+///
+/// The output lifetime is tied to `key`: matched entries are `'static` string
+/// literals (which coerce down), and the unmatched fallback echoes `key` itself.
+pub fn t(key: &str, locale: Locale) -> &str {
     match locale {
         Locale::Zh => zh(key).unwrap_or_else(|| en(key)),
         _ => en(key),
     }
 }
 
-fn en(key: &str) -> &'static str {
+fn en(key: &str) -> &str {
     match key {
         // Common
         "app.name" => "Casdog",
@@ -208,7 +212,9 @@ fn en(key: &str) -> &'static str {
         "account.mfa_enter_code" => "Enter verification code",
         "account.mfa_verify" => "Verify and enable",
         "account.mfa_recovery_codes" => "Recovery codes",
-        "account.mfa_recovery_warning" => "Save these codes in a secure place. Each code can only be used once.",
+        "account.mfa_recovery_warning" => {
+            "Save these codes in a secure place. Each code can only be used once."
+        }
         "account.webauthn" => "WebAuthn / Passkeys",
         "account.webauthn_register" => "Register new credential",
         "account.webauthn_no_credentials" => "No credentials registered.",
@@ -303,7 +309,9 @@ fn zh(key: &str) -> Option<&'static str> {
 
         // Login
         "login.title" => "\u{767b}\u{5f55}",
-        "login.subtitle" => "\u{767b}\u{5f55}\u{60a8}\u{7684}\u{8d26}\u{6237}\u{4ee5}\u{7ee7}\u{7eed}\u{3002}",
+        "login.subtitle" => {
+            "\u{767b}\u{5f55}\u{60a8}\u{7684}\u{8d26}\u{6237}\u{4ee5}\u{7ee7}\u{7eed}\u{3002}"
+        }
         "login.organization" => "\u{7ec4}\u{7ec7}",
         "login.username" => "\u{7528}\u{6237}\u{540d}",
         "login.password" => "\u{5bc6}\u{7801}",
@@ -312,13 +320,19 @@ fn zh(key: &str) -> Option<&'static str> {
         "login.sign_up_link" => "\u{6ce8}\u{518c}",
         "login.forgot_password" => "\u{5fd8}\u{8bb0}\u{5bc6}\u{7801}\u{ff1f}",
         "login.no_account" => "\u{6ca1}\u{6709}\u{8d26}\u{6237}\u{ff1f}",
-        "login.social_heading" => "\u{6216}\u{901a}\u{8fc7}\u{4ee5}\u{4e0b}\u{65b9}\u{5f0f}\u{767b}\u{5f55}",
-        "login.error_invalid" => "\u{7528}\u{6237}\u{540d}\u{6216}\u{5bc6}\u{7801}\u{65e0}\u{6548}\u{3002}",
+        "login.social_heading" => {
+            "\u{6216}\u{901a}\u{8fc7}\u{4ee5}\u{4e0b}\u{65b9}\u{5f0f}\u{767b}\u{5f55}"
+        }
+        "login.error_invalid" => {
+            "\u{7528}\u{6237}\u{540d}\u{6216}\u{5bc6}\u{7801}\u{65e0}\u{6548}\u{3002}"
+        }
         "login.remember_me" => "\u{8bb0}\u{4f4f}\u{6211}",
 
         // Signup
         "signup.title" => "\u{521b}\u{5efa}\u{8d26}\u{6237}",
-        "signup.subtitle" => "\u{6ce8}\u{518c}\u{65b0}\u{8d26}\u{6237}\u{4ee5}\u{5f00}\u{59cb}\u{4f7f}\u{7528}\u{3002}",
+        "signup.subtitle" => {
+            "\u{6ce8}\u{518c}\u{65b0}\u{8d26}\u{6237}\u{4ee5}\u{5f00}\u{59cb}\u{4f7f}\u{7528}\u{3002}"
+        }
         "signup.organization" => "\u{7ec4}\u{7ec7}",
         "signup.username" => "\u{7528}\u{6237}\u{540d}",
         "signup.display_name" => "\u{663e}\u{793a}\u{540d}\u{79f0}",
@@ -335,19 +349,27 @@ fn zh(key: &str) -> Option<&'static str> {
 
         // Authorize
         "authorize.title" => "\u{6388}\u{6743}\u{5e94}\u{7528}",
-        "authorize.subtitle" => "\u{4e00}\u{4e2a}\u{5e94}\u{7528}\u{6b63}\u{5728}\u{8bf7}\u{6c42}\u{8bbf}\u{95ee}\u{60a8}\u{7684}\u{8d26}\u{6237}\u{3002}",
+        "authorize.subtitle" => {
+            "\u{4e00}\u{4e2a}\u{5e94}\u{7528}\u{6b63}\u{5728}\u{8bf7}\u{6c42}\u{8bbf}\u{95ee}\u{60a8}\u{7684}\u{8d26}\u{6237}\u{3002}"
+        }
         "authorize.scopes" => "\u{8bf7}\u{6c42}\u{7684}\u{6743}\u{9650}",
         "authorize.signed_in_as" => "\u{5df2}\u{767b}\u{5f55}\u{4e3a}",
         "authorize.allow" => "\u{5141}\u{8bb8}",
         "authorize.deny" => "\u{62d2}\u{7edd}",
         "authorize.allowing" => "\u{6388}\u{6743}\u{4e2d}...",
-        "authorize.app_wants_access" => "\u{8bf7}\u{6c42}\u{8bbf}\u{95ee}\u{60a8}\u{7684}\u{8d26}\u{6237}",
+        "authorize.app_wants_access" => {
+            "\u{8bf7}\u{6c42}\u{8bbf}\u{95ee}\u{60a8}\u{7684}\u{8d26}\u{6237}"
+        }
 
         // Consent
         "consent.title" => "\u{6388}\u{6743}\u{7ba1}\u{7406}",
-        "consent.subtitle" => "\u{7ba1}\u{7406}\u{60a8}\u{7684}\u{5e94}\u{7528}\u{6388}\u{6743}\u{3002}",
+        "consent.subtitle" => {
+            "\u{7ba1}\u{7406}\u{60a8}\u{7684}\u{5e94}\u{7528}\u{6388}\u{6743}\u{3002}"
+        }
         "consent.granted_list" => "\u{5df2}\u{6388}\u{6743}\u{5217}\u{8868}",
-        "consent.no_consents" => "\u{5c1a}\u{672a}\u{6388}\u{4e88}\u{4efb}\u{4f55}\u{6388}\u{6743}\u{3002}",
+        "consent.no_consents" => {
+            "\u{5c1a}\u{672a}\u{6388}\u{4e88}\u{4efb}\u{4f55}\u{6388}\u{6743}\u{3002}"
+        }
         "consent.revoke" => "\u{64a4}\u{9500}",
         "consent.revoking" => "\u{64a4}\u{9500}\u{4e2d}...",
         "consent.grant_new" => "\u{6388}\u{4e88}\u{65b0}\u{6388}\u{6743}",
@@ -358,20 +380,26 @@ fn zh(key: &str) -> Option<&'static str> {
 
         // Device auth
         "device_auth.title" => "\u{8bbe}\u{5907}\u{6388}\u{6743}",
-        "device_auth.subtitle" => "\u{8f93}\u{5165}\u{8bbe}\u{5907}\u{4e0a}\u{663e}\u{793a}\u{7684}\u{4ee3}\u{7801}\u{4ee5}\u{6388}\u{6743}\u{3002}",
+        "device_auth.subtitle" => {
+            "\u{8f93}\u{5165}\u{8bbe}\u{5907}\u{4e0a}\u{663e}\u{793a}\u{7684}\u{4ee3}\u{7801}\u{4ee5}\u{6388}\u{6743}\u{3002}"
+        }
         "device_auth.user_code" => "\u{7528}\u{6237}\u{4ee3}\u{7801}",
         "device_auth.verify" => "\u{9a8c}\u{8bc1}",
         "device_auth.verifying" => "\u{9a8c}\u{8bc1}\u{4e2d}...",
         "device_auth.approve" => "\u{6279}\u{51c6}",
         "device_auth.deny" => "\u{62d2}\u{7edd}",
         "device_auth.status_pending" => "\u{7b49}\u{5f85}\u{9a8c}\u{8bc1}...",
-        "device_auth.status_verified" => "\u{4ee3}\u{7801}\u{5df2}\u{9a8c}\u{8bc1}\u{3002}\u{8bf7}\u{6279}\u{51c6}\u{6216}\u{62d2}\u{7edd}\u{6b64}\u{8bbe}\u{5907}\u{3002}",
+        "device_auth.status_verified" => {
+            "\u{4ee3}\u{7801}\u{5df2}\u{9a8c}\u{8bc1}\u{3002}\u{8bf7}\u{6279}\u{51c6}\u{6216}\u{62d2}\u{7edd}\u{6b64}\u{8bbe}\u{5907}\u{3002}"
+        }
         "device_auth.status_approved" => "\u{8bbe}\u{5907}\u{6388}\u{6743}\u{6210}\u{529f}\u{3002}",
         "device_auth.status_denied" => "\u{6388}\u{6743}\u{5df2}\u{62d2}\u{7edd}\u{3002}",
 
         // Account
         "account.title" => "\u{8d26}\u{6237}\u{8bbe}\u{7f6e}",
-        "account.subtitle" => "\u{7ba1}\u{7406}\u{60a8}\u{7684}\u{4e2a}\u{4eba}\u{8d44}\u{6599}\u{3001}\u{5b89}\u{5168}\u{548c}\u{4f1a}\u{8bdd}\u{3002}",
+        "account.subtitle" => {
+            "\u{7ba1}\u{7406}\u{60a8}\u{7684}\u{4e2a}\u{4eba}\u{8d44}\u{6599}\u{3001}\u{5b89}\u{5168}\u{548c}\u{4f1a}\u{8bdd}\u{3002}"
+        }
         "account.profile" => "\u{4e2a}\u{4eba}\u{8d44}\u{6599}",
         "account.display_name" => "\u{663e}\u{793a}\u{540d}\u{79f0}",
         "account.avatar" => "\u{5934}\u{50cf} URL",
@@ -390,19 +418,29 @@ fn zh(key: &str) -> Option<&'static str> {
         "account.mfa_totp" => "\u{9a8c}\u{8bc1}\u{5668}\u{5e94}\u{7528} (TOTP)",
         "account.mfa_enable" => "\u{542f}\u{7528} MFA",
         "account.mfa_disable" => "\u{7981}\u{7528} MFA",
-        "account.mfa_scan_qr" => "\u{4f7f}\u{7528}\u{9a8c}\u{8bc1}\u{5668}\u{5e94}\u{7528}\u{626b}\u{63cf}\u{6b64}\u{4e8c}\u{7ef4}\u{7801}",
+        "account.mfa_scan_qr" => {
+            "\u{4f7f}\u{7528}\u{9a8c}\u{8bc1}\u{5668}\u{5e94}\u{7528}\u{626b}\u{63cf}\u{6b64}\u{4e8c}\u{7ef4}\u{7801}"
+        }
         "account.mfa_enter_code" => "\u{8f93}\u{5165}\u{9a8c}\u{8bc1}\u{7801}",
         "account.mfa_verify" => "\u{9a8c}\u{8bc1}\u{5e76}\u{542f}\u{7528}",
         "account.mfa_recovery_codes" => "\u{6062}\u{590d}\u{4ee3}\u{7801}",
-        "account.mfa_recovery_warning" => "\u{8bf7}\u{5c06}\u{8fd9}\u{4e9b}\u{4ee3}\u{7801}\u{4fdd}\u{5b58}\u{5728}\u{5b89}\u{5168}\u{7684}\u{5730}\u{65b9}\u{3002}\u{6bcf}\u{4e2a}\u{4ee3}\u{7801}\u{53ea}\u{80fd}\u{4f7f}\u{7528}\u{4e00}\u{6b21}\u{3002}",
+        "account.mfa_recovery_warning" => {
+            "\u{8bf7}\u{5c06}\u{8fd9}\u{4e9b}\u{4ee3}\u{7801}\u{4fdd}\u{5b58}\u{5728}\u{5b89}\u{5168}\u{7684}\u{5730}\u{65b9}\u{3002}\u{6bcf}\u{4e2a}\u{4ee3}\u{7801}\u{53ea}\u{80fd}\u{4f7f}\u{7528}\u{4e00}\u{6b21}\u{3002}"
+        }
         "account.webauthn" => "WebAuthn / \u{901a}\u{884c}\u{5bc6}\u{94a5}",
         "account.webauthn_register" => "\u{6ce8}\u{518c}\u{65b0}\u{51ed}\u{8bc1}",
-        "account.webauthn_no_credentials" => "\u{5c1a}\u{672a}\u{6ce8}\u{518c}\u{51ed}\u{8bc1}\u{3002}",
+        "account.webauthn_no_credentials" => {
+            "\u{5c1a}\u{672a}\u{6ce8}\u{518c}\u{51ed}\u{8bc1}\u{3002}"
+        }
         "account.sessions" => "\u{6d3b}\u{8dc3}\u{4f1a}\u{8bdd}",
         "account.sessions_current" => "\u{5f53}\u{524d}\u{4f1a}\u{8bdd}",
         "account.sessions_revoke" => "\u{64a4}\u{9500}",
-        "account.sessions_revoke_all" => "\u{64a4}\u{9500}\u{6240}\u{6709}\u{5176}\u{4ed6}\u{4f1a}\u{8bdd}",
-        "account.sessions_no_others" => "\u{6ca1}\u{6709}\u{5176}\u{4ed6}\u{6d3b}\u{8dc3}\u{4f1a}\u{8bdd}\u{3002}",
+        "account.sessions_revoke_all" => {
+            "\u{64a4}\u{9500}\u{6240}\u{6709}\u{5176}\u{4ed6}\u{4f1a}\u{8bdd}"
+        }
+        "account.sessions_no_others" => {
+            "\u{6ca1}\u{6709}\u{5176}\u{4ed6}\u{6d3b}\u{8dc3}\u{4f1a}\u{8bdd}\u{3002}"
+        }
 
         // Result
         "result.title_success" => "\u{64cd}\u{4f5c}\u{5b8c}\u{6210}",
@@ -415,7 +453,9 @@ fn zh(key: &str) -> Option<&'static str> {
 
         // Forgot password
         "forgot.title" => "\u{91cd}\u{7f6e}\u{5bc6}\u{7801}",
-        "forgot.subtitle" => "\u{8f93}\u{5165}\u{60a8}\u{7684}\u{7535}\u{5b50}\u{90ae}\u{4ef6}\u{5730}\u{5740}\u{4ee5}\u{63a5}\u{6536}\u{9a8c}\u{8bc1}\u{7801}\u{3002}",
+        "forgot.subtitle" => {
+            "\u{8f93}\u{5165}\u{60a8}\u{7684}\u{7535}\u{5b50}\u{90ae}\u{4ef6}\u{5730}\u{5740}\u{4ee5}\u{63a5}\u{6536}\u{9a8c}\u{8bc1}\u{7801}\u{3002}"
+        }
         "forgot.email" => "\u{7535}\u{5b50}\u{90ae}\u{4ef6}\u{5730}\u{5740}",
         "forgot.send_code" => "\u{53d1}\u{9001}\u{9a8c}\u{8bc1}\u{7801}",
         "forgot.sending" => "\u{53d1}\u{9001}\u{4e2d}...",
@@ -425,9 +465,13 @@ fn zh(key: &str) -> Option<&'static str> {
         "forgot.reset" => "\u{91cd}\u{7f6e}\u{5bc6}\u{7801}",
         "forgot.resetting" => "\u{91cd}\u{7f6e}\u{4e2d}...",
         "forgot.back_to_login" => "\u{8fd4}\u{56de}\u{767b}\u{5f55}",
-        "forgot.code_sent" => "\u{9a8c}\u{8bc1}\u{7801}\u{5df2}\u{53d1}\u{9001}\u{5230}\u{60a8}\u{7684}\u{90ae}\u{7bb1}\u{3002}",
+        "forgot.code_sent" => {
+            "\u{9a8c}\u{8bc1}\u{7801}\u{5df2}\u{53d1}\u{9001}\u{5230}\u{60a8}\u{7684}\u{90ae}\u{7bb1}\u{3002}"
+        }
         "forgot.password_mismatch" => "\u{5bc6}\u{7801}\u{4e0d}\u{5339}\u{914d}\u{3002}",
-        "forgot.reset_success" => "\u{5bc6}\u{7801}\u{91cd}\u{7f6e}\u{6210}\u{529f}\u{3002}\u{60a8}\u{73b0}\u{5728}\u{53ef}\u{4ee5}\u{767b}\u{5f55}\u{3002}",
+        "forgot.reset_success" => {
+            "\u{5bc6}\u{7801}\u{91cd}\u{7f6e}\u{6210}\u{529f}\u{3002}\u{60a8}\u{73b0}\u{5728}\u{53ef}\u{4ee5}\u{767b}\u{5f55}\u{3002}"
+        }
 
         // Form fields
         "field.show_password" => "\u{663e}\u{793a}",
@@ -438,7 +482,9 @@ fn zh(key: &str) -> Option<&'static str> {
 
         // CAPTCHA
         "captcha.title" => "\u{9a8c}\u{8bc1}",
-        "captcha.instructions" => "\u{5b8c}\u{6210}\u{9a8c}\u{8bc1}\u{4ee5}\u{7ee7}\u{7eed}\u{3002}",
+        "captcha.instructions" => {
+            "\u{5b8c}\u{6210}\u{9a8c}\u{8bc1}\u{4ee5}\u{7ee7}\u{7eed}\u{3002}"
+        }
         "captcha.placeholder" => "\u{8f93}\u{5165}\u{4e0a}\u{65b9}\u{7684}\u{4ee3}\u{7801}",
         "captcha.refresh" => "\u{83b7}\u{53d6}\u{65b0}\u{4ee3}\u{7801}",
         "captcha.verify" => "\u{9a8c}\u{8bc1}",

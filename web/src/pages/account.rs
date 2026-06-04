@@ -3,9 +3,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::api::{build_url, extract_collection, request_json};
+use crate::components::InlineMessage;
 use crate::components::qr_code::QrCode;
 
-const ACCOUNT_PAGE_CSS: &str = r#"
+pub const ACCOUNT_PAGE_CSS: &str = r#"
 .account-page {
   max-width: 760px;
   margin: 0 auto;
@@ -221,6 +222,7 @@ const ACCOUNT_PAGE_CSS: &str = r#"
 "#;
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
 struct UserProfile {
     #[serde(default)]
     owner: String,
@@ -281,8 +283,6 @@ pub fn AccountPage(
     let mut active_tab = use_signal(|| "profile".to_string());
 
     rsx! {
-        style { "{ACCOUNT_PAGE_CSS}" }
-
         div { class: "account-page",
             h2 { "Account settings" }
             p { class: "subtitle", "Manage your profile, security, and sessions." }
@@ -439,10 +439,7 @@ fn ProfileSection(
                 "bio": bi,
             });
 
-            let url = build_url(
-                &api_base_val,
-                &format!("/api/users/{}/{}", p.owner, p.name),
-            );
+            let url = build_url(&api_base_val, &format!("/api/users/{}/{}", p.owner, p.name));
             match request_json("PUT", &url, token_val.as_deref(), Some(payload)).await {
                 Ok(_) => {
                     message.set(Some((true, "Profile saved successfully.".to_string())));
@@ -460,7 +457,7 @@ fn ProfileSection(
             h3 { "Profile" }
 
             if loading() {
-                div { class: "inline-message neutral", "Loading profile..." }
+                InlineMessage { kind: "neutral".to_string(), text: "Loading profile...".to_string() }
             } else {
                 div { class: "account-form",
                     div { class: "account-field",
@@ -511,10 +508,7 @@ fn ProfileSection(
                     }
 
                     if let Some((ok, msg)) = message() {
-                        div {
-                            class: if ok { "inline-message success" } else { "inline-message error" },
-                            "{msg}"
-                        }
+                        InlineMessage { kind: (if ok { "success" } else { "error" }).to_string(), text: msg }
                     }
 
                     div { class: "account-actions",
@@ -584,10 +578,7 @@ fn SecuritySection(
             let url = build_url(&api_base_val, "/api/set-password");
             match request_json("POST", &url, token_val.as_deref(), Some(payload)).await {
                 Ok(value) => {
-                    let status = value
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("ok");
+                    let status = value.get("status").and_then(|s| s.as_str()).unwrap_or("ok");
                     if status == "error" {
                         let msg = value
                             .get("msg")
@@ -641,7 +632,7 @@ fn SecuritySection(
                         oninput: move |evt| confirm_password.set(evt.value()),
                     }
                     if !passwords_match {
-                        div { class: "inline-message error", "Passwords do not match." }
+                        InlineMessage { kind: "error".to_string(), text: "Passwords do not match.".to_string() }
                     }
                 }
 
@@ -654,10 +645,7 @@ fn SecuritySection(
                 }
 
                 if let Some((ok, msg)) = message() {
-                    div {
-                        class: if ok { "inline-message success" } else { "inline-message error" },
-                        "{msg}"
-                    }
+                    InlineMessage { kind: (if ok { "success" } else { "error" }).to_string(), text: msg }
                 }
 
                 div { class: "account-actions",
@@ -678,20 +666,14 @@ fn SecuritySection(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 enum MfaState {
     Loading,
     Disabled,
-    SetupQr {
-        secret: String,
-        qr_data_url: String,
-    },
-    VerifyCode {
-        secret: String,
-    },
+    SetupQr { secret: String, qr_data_url: String },
+    VerifyCode { secret: String },
     Enabled,
-    ShowRecoveryCodes {
-        codes: Vec<String>,
-    },
+    ShowRecoveryCodes { codes: Vec<String> },
 }
 
 #[component]
@@ -705,13 +687,17 @@ fn MfaSection(
     let mut totp_code = use_signal(String::new);
     let mut message = use_signal(|| None::<(bool, String)>);
     let mut processing = use_signal(|| false);
+    // Hold the owner/name props in Copy signals so the multiple action
+    // callbacks below can each read them without moving the String prop.
+    let user_owner = use_signal(|| user_owner);
+    let user_name = use_signal(|| user_name);
 
     // Check MFA status
     {
         let api_base_val = api_base();
         let token_val = token();
-        let name = user_name.clone();
-        let owner = user_owner.clone();
+        let name = user_name();
+        let owner = user_owner();
 
         use_effect(move || {
             let api_base_val = api_base_val.clone();
@@ -728,14 +714,16 @@ fn MfaSection(
                     Ok(value) => {
                         let enabled = value
                             .get("is_mfa_enabled")
-                            .or_else(|| value.get("totp_secret").map(|s| {
-                                // If there's a secret, MFA is likely enabled
-                                if s.as_str().is_some_and(|v| !v.is_empty()) {
-                                    &Value::Bool(true)
-                                } else {
-                                    &Value::Bool(false)
-                                }
-                            }))
+                            .or_else(|| {
+                                value.get("totp_secret").map(|s| {
+                                    // If there's a secret, MFA is likely enabled
+                                    if s.as_str().is_some_and(|v| !v.is_empty()) {
+                                        &Value::Bool(true)
+                                    } else {
+                                        &Value::Bool(false)
+                                    }
+                                })
+                            })
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
 
@@ -753,11 +741,11 @@ fn MfaSection(
         });
     }
 
-    let do_enable_mfa = move |_| {
+    let do_enable_mfa = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let token_val = token();
-        let owner = user_owner.clone();
-        let name = user_name.clone();
+        let owner = user_owner();
+        let name = user_name();
 
         spawn(async move {
             processing.set(true);
@@ -802,22 +790,27 @@ fn MfaSection(
             }
             processing.set(false);
         });
-    };
+    });
 
-    let do_verify_totp = move |_| {
+    let do_verify_totp = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let token_val = token();
-        let owner = user_owner.clone();
-        let name = user_name.clone();
+        let owner = user_owner();
+        let name = user_name();
         let code = totp_code();
 
         let secret = match mfa_state() {
-            MfaState::SetupQr { ref secret, .. } | MfaState::VerifyCode { ref secret } => secret.clone(),
+            MfaState::SetupQr { ref secret, .. } | MfaState::VerifyCode { ref secret } => {
+                secret.clone()
+            }
             _ => String::new(),
         };
 
         if code.trim().is_empty() {
-            message.set(Some((false, "Please enter the verification code.".to_string())));
+            message.set(Some((
+                false,
+                "Please enter the verification code.".to_string(),
+            )));
             return;
         }
 
@@ -861,13 +854,13 @@ fn MfaSection(
             }
             processing.set(false);
         });
-    };
+    });
 
-    let do_disable_mfa = move |_| {
+    let do_disable_mfa = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let token_val = token();
-        let owner = user_owner.clone();
-        let name = user_name.clone();
+        let owner = user_owner();
+        let name = user_name();
 
         spawn(async move {
             processing.set(true);
@@ -891,7 +884,7 @@ fn MfaSection(
             }
             processing.set(false);
         });
-    };
+    });
 
     rsx! {
         div { class: "account-section",
@@ -899,7 +892,9 @@ fn MfaSection(
 
             match mfa_state() {
                 MfaState::Loading => {
-                    rsx! { div { class: "inline-message neutral", "Checking MFA status..." } }
+                    rsx! {
+                        InlineMessage { kind: "neutral".to_string(), text: "Checking MFA status...".to_string() }
+                    }
                 }
                 MfaState::Disabled => {
                     rsx! {
@@ -908,7 +903,7 @@ fn MfaSection(
                             button {
                                 class: "primary-button",
                                 disabled: processing(),
-                                onclick: do_enable_mfa,
+                                onclick: move |_| do_enable_mfa.call(()),
                                 if processing() { "Setting up..." } else { "Enable MFA" }
                             }
                         }
@@ -937,7 +932,7 @@ fn MfaSection(
                                     oninput: move |evt| totp_code.set(evt.value()),
                                     onkeypress: move |evt: KeyboardEvent| {
                                         if evt.key() == Key::Enter {
-                                            do_verify_totp(());
+                                            do_verify_totp.call(());
                                         }
                                     },
                                 }
@@ -947,7 +942,7 @@ fn MfaSection(
                                 button {
                                     class: "primary-button",
                                     disabled: processing() || totp_code().trim().is_empty(),
-                                    onclick: do_verify_totp,
+                                    onclick: move |_| do_verify_totp.call(()),
                                     if processing() { "Verifying..." } else { "Verify and enable" }
                                 }
                                 button {
@@ -976,7 +971,7 @@ fn MfaSection(
                                 button {
                                     class: "primary-button",
                                     disabled: processing(),
-                                    onclick: do_verify_totp,
+                                    onclick: move |_| do_verify_totp.call(()),
                                     "Verify and enable"
                                 }
                             }
@@ -990,7 +985,7 @@ fn MfaSection(
                             button {
                                 class: "danger-button",
                                 disabled: processing(),
-                                onclick: do_disable_mfa,
+                                onclick: move |_| do_disable_mfa.call(()),
                                 if processing() { "Disabling..." } else { "Disable MFA" }
                             }
                         }
@@ -1020,10 +1015,7 @@ fn MfaSection(
             }
 
             if let Some((ok, msg)) = message() {
-                div {
-                    class: if ok { "inline-message success" } else { "inline-message error" },
-                    "{msg}"
-                }
+                InlineMessage { kind: (if ok { "success" } else { "error" }).to_string(), text: msg }
             }
         }
     }
@@ -1046,13 +1038,15 @@ fn WebAuthnSection(
     let mut registering = use_signal(|| false);
     let mut message = use_signal(|| None::<(bool, String)>);
     let mut refresh_nonce = use_signal(|| 0_u64);
+    let user_owner = use_signal(|| user_owner);
+    let user_name = use_signal(|| user_name);
 
     // Fetch credentials
     {
         let api_base_val = api_base();
         let token_val = token();
-        let owner = user_owner.clone();
-        let name = user_name.clone();
+        let owner = user_owner();
+        let name = user_name();
         let _nonce = refresh_nonce();
 
         use_effect(move || {
@@ -1087,8 +1081,8 @@ fn WebAuthnSection(
     let do_register = move |_| {
         let api_base_val = api_base();
         let token_val = token();
-        let owner = user_owner.clone();
-        let name = user_name.clone();
+        let owner = user_owner();
+        let name = user_name();
         let cn = cred_name();
 
         spawn(async move {
@@ -1125,11 +1119,11 @@ fn WebAuthnSection(
         });
     };
 
-    let do_remove = move |cred_id: String| {
+    let do_remove = use_callback(move |cred_id: String| {
         let api_base_val = api_base();
         let token_val = token();
-        let owner = user_owner.clone();
-        let name = user_name.clone();
+        let owner = user_owner();
+        let name = user_name();
 
         spawn(async move {
             message.set(None);
@@ -1147,7 +1141,7 @@ fn WebAuthnSection(
                 }
             }
         });
-    };
+    });
 
     rsx! {
         div { class: "account-section",
@@ -1175,20 +1169,17 @@ fn WebAuthnSection(
             }
 
             if let Some((ok, msg)) = message() {
-                div {
-                    class: if ok { "inline-message success" } else { "inline-message error" },
-                    "{msg}"
-                }
+                InlineMessage { kind: (if ok { "success" } else { "error" }).to_string(), text: msg }
             }
 
             // Existing credentials
             if loading() {
-                div { class: "inline-message neutral", "Loading credentials..." }
+                InlineMessage { kind: "neutral".to_string(), text: "Loading credentials...".to_string() }
             } else if credentials().is_empty() {
-                div { class: "inline-message neutral", "No credentials registered." }
+                InlineMessage { kind: "neutral".to_string(), text: "No credentials registered.".to_string() }
             } else {
                 div { class: "webauthn-list",
-                    {credentials().iter().map(|cred| {
+                    {credentials().into_iter().map(|cred| {
                         let id = cred.id.clone();
                         let name = cred.name.clone().unwrap_or_else(|| "Unnamed credential".to_string());
                         let created = cred.created_time.clone().unwrap_or_else(|| "Unknown".to_string());
@@ -1202,7 +1193,7 @@ fn WebAuthnSection(
                                 }
                                 button {
                                     class: "danger-button",
-                                    onclick: move |_| do_remove(remove_id.clone()),
+                                    onclick: move |_| do_remove.call(remove_id.clone()),
                                     "Remove"
                                 }
                             }
@@ -1259,7 +1250,7 @@ fn SessionsSection(
         });
     }
 
-    let do_revoke = move |session_id: String| {
+    let do_revoke = use_callback(move |session_id: String| {
         let api_base_val = api_base();
         let token_val = token();
 
@@ -1276,9 +1267,9 @@ fn SessionsSection(
                 }
             }
         });
-    };
+    });
 
-    let do_revoke_all = move |_| {
+    let do_revoke_all = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let token_val = token();
 
@@ -1295,26 +1286,23 @@ fn SessionsSection(
                 }
             }
         });
-    };
+    });
 
     rsx! {
         div { class: "account-section",
             h3 { "Active sessions" }
 
             if let Some((ok, msg)) = message() {
-                div {
-                    class: if ok { "inline-message success" } else { "inline-message error" },
-                    "{msg}"
-                }
+                InlineMessage { kind: (if ok { "success" } else { "error" }).to_string(), text: msg }
             }
 
             if loading() {
-                div { class: "inline-message neutral", "Loading sessions..." }
+                InlineMessage { kind: "neutral".to_string(), text: "Loading sessions...".to_string() }
             } else if sessions().is_empty() {
-                div { class: "inline-message neutral", "No active sessions found." }
+                InlineMessage { kind: "neutral".to_string(), text: "No active sessions found.".to_string() }
             } else {
                 div { class: "session-list",
-                    {sessions().iter().map(|sess| {
+                    {sessions().into_iter().map(|sess| {
                         let id = sess.id.clone();
                         let sid = sess.session_id.clone();
                         let app = sess.application.clone().unwrap_or_else(|| "Unknown".to_string());
@@ -1336,7 +1324,7 @@ fn SessionsSection(
                                 } else {
                                     button {
                                         class: "danger-button",
-                                        onclick: move |_| do_revoke(revoke_id.clone()),
+                                        onclick: move |_| do_revoke.call(revoke_id.clone()),
                                         "Revoke"
                                     }
                                 }
@@ -1349,7 +1337,7 @@ fn SessionsSection(
                     div { class: "account-actions",
                         button {
                             class: "danger-button",
-                            onclick: do_revoke_all,
+                            onclick: move |_| do_revoke_all.call(()),
                             "Revoke all other sessions"
                         }
                     }

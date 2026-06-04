@@ -1,9 +1,10 @@
 use dioxus::prelude::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::api::{build_url, request_json};
+use crate::components::InlineMessage;
 
-const FORGOT_PASSWORD_CSS: &str = r#"
+pub const FORGOT_PASSWORD_CSS: &str = r#"
 .forgot-page {
   display: flex;
   align-items: center;
@@ -145,16 +146,17 @@ pub fn ForgotPasswordPage(
     let mut info_message = use_signal(|| None::<String>);
     let mut show_password = use_signal(|| false);
 
-    let passwords_match = new_password().is_empty() || new_password() == confirm_password();
+    let passwords_match =
+        use_memo(move || new_password().is_empty() || new_password() == confirm_password());
 
-    let step_index = match step() {
+    let step_index = use_memo(move || match step() {
         ForgotStep::Email => 0,
         ForgotStep::Reset => 1,
         ForgotStep::Done => 2,
-    };
+    });
 
     // Step 1: Send verification code
-    let do_send_code = move |_| {
+    let do_send_code = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let org = organization();
         let em = email();
@@ -178,10 +180,7 @@ pub fn ForgotPasswordPage(
             let url = build_url(&api_base_val, "/api/send-verification-code");
             match request_json("POST", &url, None, Some(payload)).await {
                 Ok(value) => {
-                    let status = value
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("ok");
+                    let status = value.get("status").and_then(|s| s.as_str()).unwrap_or("ok");
 
                     if status == "error" {
                         let msg = value
@@ -202,10 +201,10 @@ pub fn ForgotPasswordPage(
 
             loading.set(false);
         });
-    };
+    });
 
     // Step 2: Reset password with code
-    let do_reset = move |_| {
+    let do_reset = use_callback(move |_: ()| {
         let api_base_val = api_base();
         let org = organization();
         let em = email();
@@ -219,7 +218,9 @@ pub fn ForgotPasswordPage(
         }
 
         if c.is_empty() || pw.is_empty() {
-            error_message.set(Some("Verification code and new password are required.".to_string()));
+            error_message.set(Some(
+                "Verification code and new password are required.".to_string(),
+            ));
             return;
         }
 
@@ -238,10 +239,7 @@ pub fn ForgotPasswordPage(
             let url = build_url(&api_base_val, "/api/reset-password");
             match request_json("POST", &url, None, Some(payload)).await {
                 Ok(value) => {
-                    let status = value
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("ok");
+                    let status = value.get("status").and_then(|s| s.as_str()).unwrap_or("ok");
 
                     if status == "error" {
                         let msg = value
@@ -261,19 +259,17 @@ pub fn ForgotPasswordPage(
 
             loading.set(false);
         });
-    };
+    });
 
     rsx! {
-        style { "{FORGOT_PASSWORD_CSS}" }
-
         div { class: "forgot-page",
             div { class: "forgot-box",
                 // Step indicator
                 div { class: "forgot-step-indicator",
                     {(0..3).map(|i| {
-                        let cls = if i < step_index {
+                        let cls = if i < step_index() {
                             "forgot-step done"
-                        } else if i == step_index {
+                        } else if i == step_index() {
                             "forgot-step active"
                         } else {
                             "forgot-step"
@@ -317,21 +313,21 @@ pub fn ForgotPasswordPage(
                                         oninput: move |evt| email.set(evt.value()),
                                         onkeypress: move |evt: KeyboardEvent| {
                                             if evt.key() == Key::Enter {
-                                                do_send_code(());
+                                                do_send_code.call(());
                                             }
                                         },
                                     }
                                 }
 
                                 if let Some(err) = error_message() {
-                                    div { class: "inline-message error", "{err}" }
+                                    InlineMessage { kind: "error".to_string(), text: err }
                                 }
 
                                 div { class: "forgot-actions",
                                     button {
                                         class: "primary-button",
                                         disabled: loading() || email().is_empty(),
-                                        onclick: do_send_code,
+                                        onclick: move |_| do_send_code.call(()),
                                         if loading() { "Sending..." } else { "Send code" }
                                     }
                                 }
@@ -346,7 +342,7 @@ pub fn ForgotPasswordPage(
                             }
 
                             if let Some(info) = info_message() {
-                                div { class: "inline-message success", "{info}" }
+                                InlineMessage { kind: "success".to_string(), text: info }
                             }
 
                             div { class: "forgot-form",
@@ -398,20 +394,20 @@ pub fn ForgotPasswordPage(
                                         value: "{confirm_password}",
                                         oninput: move |evt| confirm_password.set(evt.value()),
                                     }
-                                    if !passwords_match {
-                                        div { class: "inline-message error", "Passwords do not match." }
+                                    if !passwords_match() {
+                                        InlineMessage { kind: "error".to_string(), text: "Passwords do not match.".to_string() }
                                     }
                                 }
 
                                 if let Some(err) = error_message() {
-                                    div { class: "inline-message error", "{err}" }
+                                    InlineMessage { kind: "error".to_string(), text: err }
                                 }
 
                                 div { class: "forgot-actions",
                                     button {
                                         class: "primary-button",
-                                        disabled: loading() || code().is_empty() || new_password().is_empty() || !passwords_match,
-                                        onclick: do_reset,
+                                        disabled: loading() || code().is_empty() || new_password().is_empty() || !passwords_match(),
+                                        onclick: move |_| do_reset.call(()),
                                         if loading() { "Resetting..." } else { "Reset password" }
                                     }
                                     button {

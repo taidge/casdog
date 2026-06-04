@@ -1,10 +1,12 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
+
+use crate::components::InlineMessage;
 
 use crate::api::{build_url, request_json};
 
-const AUTHORIZE_PAGE_CSS: &str = r#"
+pub const AUTHORIZE_PAGE_CSS: &str = r#"
 .authorize-page {
   display: flex;
   align-items: center;
@@ -127,6 +129,7 @@ const AUTHORIZE_PAGE_CSS: &str = r#"
 "#;
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
 struct AppInfo {
     name: String,
     display_name: Option<String>,
@@ -157,10 +160,10 @@ pub fn AuthorizePage(
     #[props(default)] state: String,
     #[props(default = "User".to_string())] user_display_name: String,
 ) -> Element {
-    let mut app_info = use_signal(AppInfo::default);
-    let mut loading = use_signal(|| false);
-    let mut authorizing = use_signal(|| false);
-    let mut error_message = use_signal(|| None::<String>);
+    let app_info = use_signal(AppInfo::default);
+    let loading = use_signal(|| false);
+    let authorizing = use_signal(|| false);
+    let error_message = use_signal(|| None::<String>);
 
     let scopes: Vec<String> = scope
         .split_whitespace()
@@ -211,9 +214,14 @@ pub fn AuthorizePage(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| info.name.clone());
     let has_logo = info.logo.as_ref().is_some_and(|l| !l.is_empty());
-    let first_letter = app_display.chars().next().unwrap_or('A').to_uppercase().to_string();
+    let first_letter = app_display
+        .chars()
+        .next()
+        .unwrap_or('A')
+        .to_uppercase()
+        .to_string();
 
-    let do_authorize = move |allow: bool| {
+    let do_authorize = use_callback(move |allow: bool| {
         let api_base_val = api_base();
         let token_val = token();
         let cid = client_id.clone();
@@ -246,7 +254,10 @@ pub fn AuthorizePage(
                         .or_else(|| value.get("redirect"))
                         .and_then(|r| r.as_str())
                     {
-                        document::eval(&format!("window.location.assign('{}')", redirect.replace('\'', "\\'")));
+                        document::eval(&format!(
+                            "window.location.assign('{}')",
+                            redirect.replace('\'', "\\'")
+                        ));
                     } else if !allow {
                         // Denied - redirect back with error
                         let deny_url = if ruri.contains('?') {
@@ -254,9 +265,14 @@ pub fn AuthorizePage(
                         } else {
                             format!("{ruri}?error=access_denied&state={st}")
                         };
-                        document::eval(&format!("window.location.assign('{}')", deny_url.replace('\'', "\\'")));
+                        document::eval(&format!(
+                            "window.location.assign('{}')",
+                            deny_url.replace('\'', "\\'")
+                        ));
                     } else {
-                        error_message.set(Some("Unexpected response from authorization server.".to_string()));
+                        error_message.set(Some(
+                            "Unexpected response from authorization server.".to_string(),
+                        ));
                     }
                 }
                 Err(err) => {
@@ -266,11 +282,9 @@ pub fn AuthorizePage(
 
             authorizing.set(false);
         });
-    };
+    });
 
     rsx! {
-        style { "{AUTHORIZE_PAGE_CSS}" }
-
         div { class: "authorize-page",
             div { class: "authorize-box",
                 if loading() {
@@ -317,7 +331,7 @@ pub fn AuthorizePage(
 
                     // Error
                     if let Some(err) = error_message() {
-                        div { class: "inline-message error", "{err}" }
+                        InlineMessage { kind: "error".to_string(), text: err }
                     }
 
                     // Actions
@@ -325,13 +339,13 @@ pub fn AuthorizePage(
                         button {
                             class: "primary-button",
                             disabled: authorizing(),
-                            onclick: move |_| do_authorize(true),
+                            onclick: move |_| do_authorize.call(true),
                             if authorizing() { "Authorizing..." } else { "Allow" }
                         }
                         button {
                             class: "danger-button",
                             disabled: authorizing(),
-                            onclick: move |_| do_authorize(false),
+                            onclick: move |_| do_authorize.call(false),
                             "Deny"
                         }
                     }
