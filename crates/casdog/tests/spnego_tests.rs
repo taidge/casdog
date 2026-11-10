@@ -3,93 +3,20 @@
 //!
 //! These tests exercise `casdog::services::spnego_service::SpnegoService`
 //! directly, validating the ASN.1 DER reader, the GSSAPI/SPNEGO decode chain,
-//! and the identity extraction fallback logic.
+//! and rejection of unverified identity claims.
 
 use casdog::services::spnego_service::{SpnegoIdentity, SpnegoService};
 
-// ===================================================================
-// 1.  extract_identity -- proxy header
-// ===================================================================
-
 #[test]
-fn extract_identity_from_proxy_header_strips_realm() {
-    let result = SpnegoService::extract_identity(None, Some("alice@EXAMPLE.COM"), None).unwrap();
-    assert_eq!(result, "alice", "Should strip @REALM from proxy header");
-}
-
-#[test]
-fn extract_identity_from_proxy_header_no_realm() {
-    let result = SpnegoService::extract_identity(None, Some("bob"), None).unwrap();
-    assert_eq!(result, "bob");
-}
-
-#[test]
-fn extract_identity_from_proxy_header_with_whitespace() {
-    let result = SpnegoService::extract_identity(None, Some("  carol@CORP.NET  "), None).unwrap();
-    assert_eq!(result, "carol", "Should trim whitespace and strip realm");
-}
-
-#[test]
-fn extract_identity_empty_proxy_header_falls_through() {
-    // Empty string in proxy header should fall through to query param.
-    let result = SpnegoService::extract_identity(None, Some("   "), Some("fallback-user")).unwrap();
-    assert_eq!(result, "fallback-user");
-}
-
-// ===================================================================
-// 2.  extract_identity -- query parameter
-// ===================================================================
-
-#[test]
-fn extract_identity_from_query_param() {
-    let result = SpnegoService::extract_identity(None, None, Some("query-user")).unwrap();
-    assert_eq!(result, "query-user");
-}
-
-#[test]
-fn extract_identity_from_query_param_with_whitespace() {
-    let result = SpnegoService::extract_identity(None, None, Some("  trimmed  ")).unwrap();
-    assert_eq!(result, "trimmed");
-}
-
-#[test]
-fn extract_identity_empty_query_param_fails() {
-    let result = SpnegoService::extract_identity(None, None, Some("   "));
-    assert!(result.is_err(), "Empty query param should fail");
-}
-
-// ===================================================================
-// 3.  extract_identity -- no input
-// ===================================================================
-
-#[test]
-fn extract_identity_all_none_fails() {
-    let result = SpnegoService::extract_identity(None, None, None);
-    assert!(
-        result.is_err(),
-        "extract_identity with no input must return an error"
-    );
-    let err_msg = format!("{}", result.unwrap_err());
-    assert!(
-        err_msg.contains("No valid Kerberos identity"),
-        "Error message should mention Kerberos identity"
-    );
-}
-
-// ===================================================================
-// 4.  extract_identity -- priority order
-// ===================================================================
-
-#[test]
-fn extract_identity_proxy_header_takes_priority_over_query() {
-    // When both proxy header and query param are present, proxy header wins.
-    let result =
-        SpnegoService::extract_identity(None, Some("proxy-user@REALM"), Some("query-user"))
-            .unwrap();
-    assert_eq!(
-        result, "proxy-user",
-        "Proxy header should take priority over query param"
-    );
+fn caller_supplied_identity_never_authenticates() {
+    for (token, header, query) in [
+        (None, Some("alice@REALM"), None),
+        (None, None, Some("admin")),
+        (Some("invalid"), Some("admin"), Some("admin")),
+        (None, None, None),
+    ] {
+        assert!(SpnegoService::extract_identity(token, header, query).is_err());
+    }
 }
 
 // ===================================================================
@@ -403,8 +330,8 @@ fn parse_synthetic_negotiate_token_extracts_realm_and_service() {
 
     assert_eq!(identity.realm, "TEST.REALM");
     assert_eq!(identity.service_name, vec!["HTTP", "host.test"]);
-    // Without decryption, client_name mirrors service_name.
-    assert_eq!(identity.client_name, vec!["HTTP", "host.test"]);
+    // Unverified service metadata must never become a client identity.
+    assert!(identity.client_name.is_empty());
     assert!(!identity.ap_req_bytes.is_empty());
 }
 
@@ -415,43 +342,15 @@ fn parse_synthetic_token_principal_format() {
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &token_bytes);
 
     let identity = SpnegoService::parse_negotiate_token(&token_b64).unwrap();
-    assert_eq!(identity.principal(), "HTTP/host.test@TEST.REALM");
-    assert_eq!(identity.username(), Some("HTTP"));
+    assert!(identity.client_name.is_empty());
+    assert_eq!(identity.username(), None);
 }
 
 #[test]
-fn extract_identity_prefers_negotiate_token() {
-    let token_bytes = build_synthetic_negotiate_token();
-    let token_b64 =
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &token_bytes);
-
-    // When a valid token is provided, it should take priority over proxy
-    // header and query param.
-    let result = SpnegoService::extract_identity(
-        Some(&token_b64),
-        Some("proxy-user@REALM"),
-        Some("query-user"),
-    )
-    .unwrap();
-
-    // The token's first client_name component is "HTTP" (service principal).
-    assert_eq!(result, "HTTP", "Valid Negotiate token should take priority");
-}
-
-#[test]
-fn extract_identity_falls_back_when_token_parse_fails() {
-    // An invalid token that will fail to parse.
-    let bad_token = base64::Engine::encode(
+fn synthetic_ticket_cannot_authenticate_a_service_principal() {
+    let token = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
-        &[0x60, 0x01, 0xFF], // GSSAPI wrapper with garbage content
+        build_synthetic_negotiate_token(),
     );
-
-    let result =
-        SpnegoService::extract_identity(Some(&bad_token), Some("fallback-user@CORP.NET"), None)
-            .unwrap();
-
-    assert_eq!(
-        result, "fallback-user",
-        "Should fall back to proxy header when token parsing fails"
-    );
+    assert!(SpnegoService::extract_identity(Some(&token), Some("admin"), Some("admin")).is_err());
 }

@@ -398,6 +398,10 @@ impl UserService {
         }
         if let Some(password) = req.password {
             user.password_hash = Self::hash_password(&password)?;
+            user.password_type = Some("argon2".to_string());
+            user.password_salt = None;
+            user.last_change_password_time = Some(Utc::now().to_rfc3339());
+            user.need_update_password = false;
         }
         user.updated_at = Utc::now();
 
@@ -409,6 +413,9 @@ impl UserService {
                 users::avatar.eq(&user.avatar),
                 users::is_admin.eq(user.is_admin),
                 users::password_hash.eq(&user.password_hash),
+                users::password_type.eq(&user.password_type),
+                users::password_salt.eq(&user.password_salt),
+                users::last_change_password_time.eq(&user.last_change_password_time),
                 users::first_name.eq(&user.first_name),
                 users::last_name.eq(&user.last_name),
                 users::avatar_type.eq(&user.avatar_type),

@@ -11,7 +11,11 @@ use crate::services::CertService;
 
 fn issuer_for(application: Option<&str>) -> String {
     let config = AppConfig::get();
-    let issuer = format!("http://{}:{}", config.server.host, config.server.port);
+    let issuer = config
+        .server
+        .public_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}:{}", config.server.host, config.server.port));
     if let Some(application) = application {
         format!("{issuer}/.well-known/{application}")
     } else {
@@ -210,20 +214,44 @@ pub async fn app_oauth_protected_resource_metadata(
 
 /// Userinfo endpoint - fetches full user info from the database
 #[endpoint(tags("oidc"), summary = "Get user information")]
-pub async fn userinfo(depot: &mut Depot) -> Result<Json<UserinfoResponse>, StatusCode> {
-    let user_id = depot
-        .get::<String>("user_id")
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
-
+pub async fn userinfo(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<UserinfoResponse>, StatusCode> {
+    let bearer = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|v| !v.is_empty())
+        .ok_or(StatusCode::UNAUTHORIZED)?
+        .to_string();
     let pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .clone();
+    let mut scopes: Option<String> = None;
+    let user_id = if bearer.matches('.').count() == 2 {
+        crate::hoops::auth::validate_session_claims(&pool, &bearer)
+            .await
+            .map_err(|_| StatusCode::UNAUTHORIZED)?
+            .sub
+    } else {
+        let (id, scope) = sqlx::query_as::<_, (String,String)>("SELECT t.user_id,t.scope FROM tokens t JOIN users u ON u.id=t.user_id AND u.owner=t.organization JOIN applications a ON a.owner=t.owner AND a.name=t.application AND a.organization=t.organization AND NOT a.is_deleted WHERE t.access_token=$1 AND t.access_token <> '' AND t.created_at + t.expires_in * INTERVAL '1 second' > NOW() AND (t.code IS NULL OR t.code_is_used) AND NOT u.is_deleted AND NOT u.is_forbidden AND 'openid' = ANY(string_to_array(t.scope,' '))")
+            .bind(&bearer).fetch_optional(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.ok_or(StatusCode::UNAUTHORIZED)?;
+        scopes = Some(scope);
+        id
+    };
+    let allowed = |scope: &str| {
+        scopes
+            .as_ref()
+            .is_none_or(|value| value.split_whitespace().any(|s| s == scope))
+    };
 
     // Fetch full user info from database
     let user: Option<(String, String, Option<String>, Option<String>, Option<String>, bool)> =
         sqlx::query_as(
-            "SELECT id, name, email, phone, avatar, is_admin FROM users WHERE id = $1 AND is_deleted = FALSE"
+            "SELECT id, name, email, phone, avatar, email_verified FROM users WHERE id = $1 AND is_deleted = FALSE"
         )
         .bind(user_id)
         .fetch_optional(&pool)
@@ -231,10 +259,10 @@ pub async fn userinfo(depot: &mut Depot) -> Result<Json<UserinfoResponse>, Statu
         .unwrap_or(None);
 
     match user {
-        Some((id, name, email, phone, avatar, _is_admin)) => {
+        Some((id, name, email, phone, avatar, verified)) => {
             // Fetch user's groups
             let groups: Vec<(String,)> = sqlx::query_as(
-                "SELECT g.name FROM groups g INNER JOIN user_groups ug ON g.id = ug.group_id WHERE ug.user_id = $1"
+                "SELECT g.name FROM groups g INNER JOIN user_groups ug ON g.id = ug.group_id WHERE ug.user_id = $1 AND g.owner=(SELECT owner FROM users WHERE id=$1)"
             )
             .bind(&id)
             .fetch_all(&pool)
@@ -245,14 +273,18 @@ pub async fn userinfo(depot: &mut Depot) -> Result<Json<UserinfoResponse>, Statu
 
             Ok(Json(UserinfoResponse {
                 sub: id,
-                name: Some(name.clone()),
-                preferred_username: Some(name),
-                email: email.clone(),
-                email_verified: email.as_ref().map(|_| true),
-                phone_number: phone.clone(),
-                phone_number_verified: phone.as_ref().map(|_| false),
-                picture: avatar,
-                groups: if group_names.is_empty() {
+                name: allowed("profile").then(|| name.clone()),
+                preferred_username: allowed("profile").then_some(name),
+                email: allowed("email").then(|| email.clone()).flatten(),
+                email_verified: allowed("email")
+                    .then(|| email.as_ref().map(|_| verified))
+                    .flatten(),
+                phone_number: allowed("phone").then(|| phone.clone()).flatten(),
+                phone_number_verified: allowed("phone")
+                    .then(|| phone.as_ref().map(|_| false))
+                    .flatten(),
+                picture: allowed("profile").then_some(avatar).flatten(),
+                groups: if group_names.is_empty() || !allowed("groups") {
                     None
                 } else {
                     Some(group_names)
@@ -277,7 +309,11 @@ pub async fn authorize(
     nonce: QueryParam<String, false>,
 ) -> Result<(), StatusCode> {
     let config = AppConfig::get();
-    let base_url = format!("http://{}:{}", config.server.host, config.server.port);
+    let base_url = config
+        .server
+        .public_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}:{}", config.server.host, config.server.port));
 
     // Build login URL with OAuth parameters
     let mut login_url = format!(

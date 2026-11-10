@@ -1,0 +1,352 @@
+{
+  "date": "2026-10-29",
+  "reference_revision": "47da539f886d5b09d2c35cf6ae78d8b6b5f30a43",
+  "baseline_missing": 64,
+  "newly_declared": 55,
+  "remaining_undeclared": 9,
+  "note": "Route declarations are not full functional parity. See parity-review.md phase four for remaining behavior and actual database evidence.",
+  "routes": [
+    {
+      "route": "GET /api/get-agent",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-agents",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-coupon",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-coupons",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-dashboard-heatmap",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-dashboard-mfa",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-dashboard-providers",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-email-and-phone",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-entries",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-entry",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-global-forms",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-global-keys",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-idp-discovery",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-init-admin-status",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-integration",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-integrations",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-key",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-keys",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-marketplace-bundle",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-marketplace-index",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-mcp-access-token",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-online-servers",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-openclaw-session-graph",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-openclaw-session-transcript",
+      "status": "missing"
+    },
+    {
+      "route": "GET /api/get-server",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-servers",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-setting",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-upgrade-info",
+      "status": "missing"
+    },
+    {
+      "route": "GET /api/get-webhook-event-detail",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/get-webhook-events",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/is-session-duplicated",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "GET /api/scan",
+      "status": "missing"
+    },
+    {
+      "route": "POST /api/add-agent",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/add-coupon",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/add-entry",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/add-key",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/add-server",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/buy-product",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/cancel-device-auth",
+      "status": "missing"
+    },
+    {
+      "route": "POST /api/delete-agent",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/delete-coupon",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/delete-entry",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/delete-integration",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/delete-key",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/delete-server",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/delete-webhook-event",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/device-auth-complete",
+      "status": "missing"
+    },
+    {
+      "route": "POST /api/init-admin-password",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/install-integration",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/replay-webhook-event",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/set-subscription-auto-renew",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/sync-intranet-servers",
+      "status": "missing"
+    },
+    {
+      "route": "POST /api/sync-mcp-tool",
+      "status": "missing"
+    },
+    {
+      "route": "POST /api/update-agent",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/update-cert-domain-expire",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/update-coupon",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/update-entry",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/update-key",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/update-permissions",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/update-server",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/update-setting",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/upgrade-system",
+      "status": "missing"
+    },
+    {
+      "route": "POST /api/validate-coupon",
+      "status": "implemented_with_documented_scope"
+    },
+    {
+      "route": "POST /api/verify-identification",
+      "status": "missing"
+    }
+  ],
+  "validation": {
+    "test_programs": 18,
+    "test_executions_passed": 366,
+    "failed": 0,
+    "ignored": 0,
+    "postgresql_scenarios_passed": 62,
+    "new_postgresql_scenarios": 18,
+    "frontend_tests_passed": 6,
+    "wasm_check": "passed",
+    "migrations": "001-022",
+    "log": "D:/BuildCache/casdog/phase4-passed-tests.log",
+    "program_results": [
+      {
+        "program": "unittests src\\lib.rs",
+        "passed": 37
+      },
+      {
+        "program": "unittests src\\main.rs",
+        "passed": 37
+      },
+      {
+        "program": "tests\\api_parity_tests.rs",
+        "passed": 179
+      },
+      {
+        "program": "tests\\auth_security_tests.rs",
+        "passed": 12
+      },
+      {
+        "program": "tests\\authorization_tests.rs",
+        "passed": 7
+      },
+      {
+        "program": "tests\\legacy_crud_tests.rs",
+        "passed": 2
+      },
+      {
+        "program": "tests\\parity_operations_tests.rs",
+        "passed": 4
+      },
+      {
+        "program": "tests\\parity_resources_tests.rs",
+        "passed": 8
+      },
+      {
+        "program": "tests\\parity_system_tests.rs",
+        "passed": 4
+      },
+      {
+        "program": "tests\\password_mfa_tests.rs",
+        "passed": 7
+      },
+      {
+        "program": "tests\\password_reset_tests.rs",
+        "passed": 5
+      },
+      {
+        "program": "tests\\saml_signing_tests.rs",
+        "passed": 23
+      },
+      {
+        "program": "tests\\social_link_tests.rs",
+        "passed": 6
+      },
+      {
+        "program": "tests\\social_login_tests.rs",
+        "passed": 1
+      },
+      {
+        "program": "tests\\social_mfa_tests.rs",
+        "passed": 10
+      },
+      {
+        "program": "tests\\social_state_tests.rs",
+        "passed": 7
+      },
+      {
+        "program": "tests\\spnego_tests.rs",
+        "passed": 16
+      },
+      {
+        "program": "tests\\verification_security_tests.rs",
+        "passed": 1
+      }
+    ]
+  }
+}

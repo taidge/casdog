@@ -92,3 +92,7 @@ pub use subscription_service::SubscriptionService;
 pub use ticket_service::TicketService;
 pub use transaction_service::TransactionService;
 pub use webhook_executor::{WebhookExecutor, WebhookPayload};
+
+pub mod password_reset_service;
+
+pub mod social_state_service;

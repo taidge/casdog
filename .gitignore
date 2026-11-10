@@ -1,4 +1,4 @@
-# Top-level .gitignore for casdog (Rust backend + Vite/TS frontend)
+# Top-level .gitignore for casdog (Rust backend + Glory/Sapid WASM frontend)
 
 # Rust/Cargo
 /target/
@@ -30,7 +30,7 @@ Desktop.ini
 # Emacs/Editor temp (e.g., flycheck)
 flycheck*
 
-# Frontend (Vite/React) in web/
+# Frontend (Trunk/Glory/Sapid) in web/
 web/node_modules/
 web/Cargo.lock
 web/dist/

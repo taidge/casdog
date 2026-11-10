@@ -1,0 +1,10 @@
+{
+  "name": "casdog-web-checks",
+  "private": true,
+  "scripts": {
+    "check": "node ../scripts/check-web.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.65.0"
+  }
+}

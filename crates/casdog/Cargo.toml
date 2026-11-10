@@ -25,6 +25,10 @@ rust-embed.workspace = true
 sqlx.workspace = true
 jsonwebtoken.workspace = true
 argon2.workspace = true
+bcrypt = "0.17"
+md-5 = "0.10"
+pbkdf2 = "0.12"
+subtle = "2"
 casbin.workspace = true
 sqlx-adapter.workspace = true
 serde.workspace = true
@@ -47,6 +51,7 @@ async-trait.workspace = true
 rsa.workspace = true
 p256.workspace = true
 sha2.workspace = true
+sha1.workspace = true
 reqwest.workspace = true
 lettre.workspace = true
 totp-rs.workspace = true
@@ -64,6 +69,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 serde_json.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
 salvo = { workspace = true, features = ["test"] }
 rsa.workspace = true
 sha2.workspace = true

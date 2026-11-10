@@ -117,11 +117,13 @@ pub struct OAuthTokenResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct IntrospectRequest {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
     pub token: String,
     pub token_type_hint: Option<String>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct IntrospectResponse {
     pub active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,6 +148,8 @@ pub struct IntrospectResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RevokeRequest {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
     pub token: String,
     pub token_type_hint: Option<String>,
 }

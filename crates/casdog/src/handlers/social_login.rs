@@ -1,419 +1,373 @@
-use salvo::oapi::extract::JsonBody;
 use salvo::oapi::{ToSchema, endpoint};
 use salvo::prelude::*;
-use serde::{Deserialize, Serialize};
-use sqlx::{Pool, Postgres};
+use serde::Serialize;
+use serde_json::{Value, json};
+use sqlx::{PgConnection, PgPool};
 
-use crate::diesel_pool::DieselPool;
+pub use super::social_link::{
+    unlink_compat as unlink_provider_compat, unlink_link as unlink_provider,
+};
+pub use super::social_session::consume_social_session;
+use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
-use crate::models::UserResponse;
-use crate::services::auth_service::LoginResponse;
-use crate::services::providers::oauth_provider::{ProviderUserInfo, create_oauth_provider};
-use crate::services::{AuthService, ProviderService, UserService};
+use crate::models::{Application, Provider, User};
+use crate::services::check_service::CheckService;
+use crate::services::providers::oauth_provider::{OAuthProviderTrait, create_oauth_provider};
+use crate::services::social_state_service::{
+    self, COMPLETION_TTL_SECONDS, NewCompletion, NewOAuthFlow,
+};
+
+const BROWSER_COOKIE: &str = "casdog_oauth_browser";
+const SESSION_COOKIE: &str = "casdog_oauth_completion";
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuthUrlResponse {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UnlinkRequest {
-    #[serde(rename = "providerType")]
-    pub provider_type: String,
-    #[serde(rename = "userId")]
-    pub user_id: Option<String>,
+pub(crate) fn public_origin() -> AppResult<String> {
+    let config = AppConfig::get();
+    let origin = config
+        .server
+        .public_url
+        .unwrap_or_else(|| format!("http://{}:{}", config.server.host, config.server.port));
+    let parsed = reqwest::Url::parse(&origin)
+        .map_err(|_| AppError::Config("Invalid server.public_url".into()))?;
+    let loopback = matches!(
+        parsed.host_str(),
+        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+    );
+    if (parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback))
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(AppError::Config(
+            "server.public_url must be an HTTPS origin (HTTP loopback allowed for development)"
+                .into(),
+        ));
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+pub(crate) fn cookie(req: &Request, name: &str) -> Option<String> {
+    req.headers()
+        .get("cookie")?
+        .to_str()
+        .ok()?
+        .split(';')
+        .find_map(|part| {
+            let (key, value) = part.trim().split_once('=')?;
+            (key == name && !value.is_empty()).then(|| value.to_string())
+        })
+}
+pub(crate) fn set_cookie(res: &mut Response, name: &str, value: &str, seconds: u32, secure: bool) {
+    let header = format!(
+        "{name}={value}; Path=/api/auth; HttpOnly; SameSite=Lax; Max-Age={seconds}{}",
+        if secure { "; Secure" } else { "" }
+    );
+    res.headers_mut().append(
+        "set-cookie",
+        header
+            .parse()
+            .expect("fixed cookie names and URL-safe nonces"),
+    );
+    res.headers_mut()
+        .insert("cache-control", "no-store".parse().unwrap());
+    res.headers_mut()
+        .insert("referrer-policy", "no-referrer".parse().unwrap());
+}
+pub(crate) fn pg_pool(depot: &Depot) -> AppResult<PgPool> {
+    depot
+        .obtain::<PgPool>()
+        .cloned()
+        .map_err(|_| AppError::Internal("Database pool not available".into()))
+}
+pub(crate) async fn application(pool: &PgPool, reference: &str) -> AppResult<Application> {
+    let mut conn = pool.acquire().await?;
+    application_conn(&mut conn, reference).await
+}
+pub(crate) async fn application_conn(
+    conn: &mut PgConnection,
+    reference: &str,
+) -> AppResult<Application> {
+    // Bare names are confined to the canonical application owner; callers may
+    // supply owner/name or an opaque ID for another explicitly configured app.
+    sqlx::query_as("SELECT * FROM applications WHERE is_deleted = false AND (id = $1 OR owner || '/' || name = $1 OR (owner = 'admin' AND name = $1))")
+        .bind(reference).fetch_optional(&mut *conn).await?
+        .ok_or_else(|| AppError::NotFound("Application not found".into()))
+}
+fn allowed_provider(app: &Application, provider: &Provider) -> Option<bool> {
+    app.providers.as_ref()?.as_array()?.iter().find_map(|item| {
+        let name = item.get("name")?.as_str()?;
+        let matches = name == format!("{}/{}", provider.owner, provider.name)
+            || (name == provider.name && provider.owner == app.owner);
+        if !matches
+            || !item
+                .get("canSignIn")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        {
+            return None;
+        }
+        Some(
+            item.get("canSignUp")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+    })
+}
+pub(crate) fn oauth_provider(provider: &Provider) -> AppResult<Box<dyn OAuthProviderTrait>> {
+    if provider.category != "OAuth" {
+        return Err(AppError::Validation("OAuth provider required".into()));
+    }
+    create_oauth_provider(
+        &provider.provider_type,
+        provider.client_id.as_deref().unwrap_or_default(),
+        provider.client_secret.as_deref().unwrap_or_default(),
+        provider.custom_auth_url.as_deref(),
+        provider.custom_token_url.as_deref(),
+        provider.custom_user_info_url.as_deref(),
+        provider.scopes.as_deref(),
+    )
+    .ok_or_else(|| AppError::Validation("Unsupported OAuth provider".into()))
+}
+pub(crate) async fn provider_for_application(
+    pool: &PgPool,
+    app: &Application,
+    name: &str,
+) -> AppResult<Provider> {
+    let mut conn = pool.acquire().await?;
+    provider_for_application_conn(&mut conn, app, name).await
+}
+pub(crate) async fn provider_for_application_conn(
+    conn: &mut PgConnection,
+    app: &Application,
+    name: &str,
+) -> AppResult<Provider> {
+    // The route's provider name is resolved only among configured application entries.
+    let candidates: Vec<Provider> =
+        sqlx::query_as("SELECT * FROM providers WHERE name = $1 AND category = 'OAuth'")
+            .bind(name)
+            .fetch_all(&mut *conn)
+            .await?;
+    let mut allowed = candidates
+        .into_iter()
+        .filter(|provider| allowed_provider(app, provider).is_some());
+    let provider = allowed.next().ok_or_else(|| {
+        AppError::Authorization("Provider is not enabled for this application".into())
+    })?;
+    if allowed.next().is_some() {
+        return Err(AppError::Validation(
+            "Ambiguous provider configuration".into(),
+        ));
+    }
+    Ok(provider)
 }
 
-/// Get OAuth provider auth URL for redirect
-#[endpoint(
-    tags("Social Login"),
-    parameters(
-        ("provider" = String, Path, description = "Provider name (e.g. github, google)"),
-        ("redirect_uri" = String, Query, description = "Redirect URI after auth"),
-        ("state" = Option<String>, Query, description = "State parameter"),
-        ("application" = Option<String>, Query, description = "Application name"),
-    ),
-    responses(
-        (status_code = 200, description = "Auth URL", body = AuthUrlResponse),
-    )
-)]
+/// Public, application-scoped list. Never serializes provider credentials.
+#[endpoint(tags("Social Login"))]
+pub async fn list_social_providers(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
+    let pool = pg_pool(depot)?;
+    let reference = req
+        .query::<String>("application")
+        .ok_or_else(|| AppError::Validation("application is required".into()))?;
+    let app = application(&pool, &reference).await?;
+    let providers: Vec<Provider> =
+        sqlx::query_as("SELECT * FROM providers WHERE category = 'OAuth' ORDER BY name")
+            .fetch_all(&pool)
+            .await?;
+    let data: Vec<Value> = providers
+        .iter()
+        .filter(|p| allowed_provider(&app, p).is_some() && oauth_provider(p).is_ok())
+        .map(|p| json!({"name": p.name, "display_name": p.display_name, "type": p.provider_type}))
+        .collect();
+    Ok(Json(
+        json!({"status": "ok", "data": data, "organization": app.organization}),
+    ))
+}
+
+/// Generate authorization state on the server and bind it to this browser.
+#[endpoint(tags("Social Login"))]
 pub async fn get_provider_auth_url(
     depot: &mut Depot,
     req: &mut Request,
-) -> Result<Json<AuthUrlResponse>, AppError> {
-    let pool = depot
-        .obtain::<Pool<Postgres>>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
-
-    let provider_name = req
+    res: &mut Response,
+) -> AppResult<Json<AuthUrlResponse>> {
+    let pool = pg_pool(depot)?;
+    let name = req
         .param::<String>("provider")
-        .ok_or_else(|| AppError::Validation("Provider name is required".to_string()))?;
-    let redirect_uri = req
+        .ok_or_else(|| AppError::Validation("Provider required".into()))?;
+    let reference = req
+        .query::<String>("application")
+        .ok_or_else(|| AppError::Validation("application is required".into()))?;
+    let app = application(&pool, &reference).await?;
+    let provider = provider_for_application(&pool, &app, &name).await?;
+    let origin = public_origin()?;
+    let redirect_uri = format!("{origin}/api/auth/{}/callback", urlencoding::encode(&name));
+    // A client-supplied redirect can never alter the code exchange destination.
+    if req
         .query::<String>("redirect_uri")
-        .ok_or_else(|| AppError::Validation("redirect_uri is required".to_string()))?;
-    let state = req
-        .query::<String>("state")
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let application = req.query::<String>("application");
-
-    // Get provider config from database (full Provider needed for secrets & custom URLs)
-    let provider = ProviderService::get_by_name_internal(&pool, &provider_name)
-        .await
-        .map_err(|_| AppError::NotFound(format!("Provider '{}' not found", provider_name)))?;
-
-    // Create OAuth provider instance
-    let oauth_provider = create_oauth_provider(
-        &provider.provider_type,
-        provider.client_id.as_deref().unwrap_or(""),
-        provider.client_secret.as_deref().unwrap_or(""),
-        provider.custom_auth_url.as_deref(),
-        provider.custom_token_url.as_deref(),
-        provider.custom_user_info_url.as_deref(),
-        provider.scopes.as_deref(),
+        .is_some_and(|value| value != redirect_uri)
+    {
+        return Err(AppError::Validation("OAuth callback URI mismatch".into()));
+    }
+    let (state, browser) = social_state_service::create_flow(
+        &pool,
+        &NewOAuthFlow {
+            provider_id: provider.id.clone(),
+            provider_name: name,
+            application_id: app.id,
+            organization: app.organization,
+            redirect_uri: redirect_uri.clone(),
+            purpose: "signin".into(),
+            context: json!({}),
+        },
     )
-    .ok_or_else(|| {
-        AppError::Internal(format!(
-            "Unsupported provider type: {}",
-            provider.provider_type
-        ))
-    })?;
-
-    // Build state with application context
-    let full_state = if let Some(app) = application {
-        format!("{}:{}", state, app)
-    } else {
-        state
-    };
-
-    let url = oauth_provider.get_auth_url(&redirect_uri, &full_state, None);
-
+    .await?;
+    let url = oauth_provider(&provider)?.get_auth_url(&redirect_uri, &state, None);
+    set_cookie(
+        res,
+        BROWSER_COOKIE,
+        &browser,
+        300,
+        origin.starts_with("https://"),
+    );
     Ok(Json(AuthUrlResponse { url }))
 }
 
-/// OAuth provider callback - exchange code, get user, create/link, return JWT
-#[endpoint(
-    tags("Social Login"),
-    parameters(
-        ("provider" = String, Path, description = "Provider name"),
-        ("code" = String, Query, description = "Authorization code"),
-        ("state" = String, Query, description = "State parameter"),
-    ),
-    responses(
-        (status_code = 200, description = "Login response", body = LoginResponse),
-    )
-)]
+/// Validated callback sends only a one-use completion cookie, never a JWT in a URL.
+#[endpoint(tags("Social Login"))]
 pub async fn provider_callback(
     depot: &mut Depot,
     req: &mut Request,
-) -> Result<Json<LoginResponse>, AppError> {
-    let diesel_pool = depot
-        .obtain::<DieselPool>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
-    let pool = depot
-        .obtain::<Pool<Postgres>>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
-
-    let provider_name = req
-        .param::<String>("provider")
-        .ok_or_else(|| AppError::Validation("Provider name is required".to_string()))?;
+    res: &mut Response,
+) -> AppResult<()> {
+    let name = req.param::<String>("provider").unwrap_or_default();
+    let state = req.query::<String>("state").unwrap_or_default();
+    let browser = cookie(req, BROWSER_COOKIE)
+        .ok_or_else(|| AppError::Authentication("OAuth browser binding missing".into()))?;
+    let pool = pg_pool(depot)?;
+    let flow = social_state_service::consume_flow(&pool, &state, &browser, &name).await?;
     let code = req
         .query::<String>("code")
-        .ok_or_else(|| AppError::Validation("Authorization code is required".to_string()))?;
-    let state = req.query::<String>("state").unwrap_or_default();
-
-    // Parse application from state if present (format: "uuid:application_name")
-    let (original_state, _application_name) = if let Some(idx) = state.rfind(':') {
-        (state[..idx].to_string(), Some(state[idx + 1..].to_string()))
-    } else {
-        (state, None)
-    };
-
-    // Get provider config (full Provider needed for secrets & custom URLs)
-    let provider = ProviderService::get_by_name_internal(&pool, &provider_name)
-        .await
-        .map_err(|_| AppError::NotFound(format!("Provider '{}' not found", provider_name)))?;
-
-    // Create OAuth provider instance
-    let oauth_provider = create_oauth_provider(
-        &provider.provider_type,
-        provider.client_id.as_deref().unwrap_or(""),
-        provider.client_secret.as_deref().unwrap_or(""),
-        provider.custom_auth_url.as_deref(),
-        provider.custom_token_url.as_deref(),
-        provider.custom_user_info_url.as_deref(),
-        provider.scopes.as_deref(),
-    )
-    .ok_or_else(|| {
-        AppError::Internal(format!(
-            "Unsupported provider type: {}",
-            provider.provider_type
-        ))
-    })?;
-
-    // Build redirect_uri for code exchange (must match what was used in get_auth_url)
-    let base_url = provider
-        .domain
-        .as_deref()
-        .unwrap_or("http://localhost:8000");
-    let redirect_uri = format!("{}/api/auth/{}/callback", base_url, provider_name);
-
-    // Exchange code for access token
-    let access_token = oauth_provider.exchange_code(&code, &redirect_uri).await?;
-
-    // Get user info from provider
-    let provider_user = oauth_provider.get_user_info(&access_token).await?;
-
-    // Try to find existing user by provider link
-    let existing_user =
-        find_user_by_provider_link(&pool, &provider.provider_type, &provider_user.id).await?;
-
-    let user_service = UserService::new(diesel_pool.clone());
-
-    let user_response = if let Some(user) = existing_user {
-        // Existing linked user - update last signin
-        user_service
-            .update_signin_tracking(&user.id, true, None)
-            .await
-            .ok();
-        user
-    } else {
-        // Try to find by email
-        let email_user = if let Some(ref email) = provider_user.email {
-            user_service.get_by_email(email).await?
-        } else {
-            None
-        };
-
-        if let Some(user) = email_user {
-            // Found user by email - link provider and convert to UserResponse
-            let user_resp: UserResponse = user.into();
-            user_service
-                .link_provider(&user_resp.id, &provider.provider_type, &provider_user.id)
-                .await?;
-            user_service
-                .update_signin_tracking(&user_resp.id, true, None)
-                .await
-                .ok();
-            user_resp
-        } else {
-            // Create new user from provider info
-            let username = generate_unique_username(&pool, &provider_user).await?;
-            let owner = "built-in".to_string();
-
-            let create_req = crate::models::CreateUserRequest {
-                owner: owner.clone(),
-                name: username.clone(),
-                password: None, // No password for social login users
-                display_name: if provider_user.display_name.is_empty() {
-                    username.clone()
-                } else {
-                    provider_user.display_name.clone()
-                },
-                email: provider_user.email.clone(),
-                phone: None,
-                avatar: provider_user.avatar_url.clone(),
-                is_admin: None,
-                user_type: Some("normal-user".to_string()),
-                first_name: None,
-                last_name: None,
-                country_code: None,
-                region: None,
-                location: None,
-                affiliation: None,
-                tag: None,
-                language: None,
-                gender: None,
-                birthday: None,
-                education: None,
-                bio: None,
-                homepage: None,
-                signup_application: _application_name.clone(),
-                id_card_type: None,
-                id_card: None,
-                real_name: None,
-                properties: None,
-            };
-
-            let new_user = user_service.create(create_req).await?;
-
-            // Link provider to new user
-            user_service
-                .link_provider(&new_user.id, &provider.provider_type, &provider_user.id)
-                .await?;
-
-            new_user
-        }
-    };
-
-    // Generate JWT token
-    let auth_service = AuthService::new(user_service);
-    let token = auth_service.generate_token(&user_response)?;
-
-    Ok(Json(LoginResponse {
-        token,
-        token_type: "Bearer".to_string(),
-        expires_in: 24 * 3600, // Default 24h
-        user: user_response,
-        redirect_uri: None,
-        code: None,
-        state: Some(original_state),
-        mfa_required: None,
-        mfa_types: None,
-        password_expired: None,
-    }))
-}
-
-/// Unlink a provider from current user
-#[endpoint(
-    tags("Social Login"),
-    parameters(
-        ("provider" = String, Path, description = "Provider type to unlink"),
-    ),
-    responses(
-        (status_code = 200, description = "Provider unlinked"),
-    )
-)]
-pub async fn unlink_provider(
-    depot: &mut Depot,
-    req: &mut Request,
-) -> Result<&'static str, AppError> {
-    let pool = depot
-        .obtain::<DieselPool>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
-
-    let user_id = depot
-        .get::<String>("user_id")
-        .cloned()
-        .map_err(|_| AppError::Authentication("Not authenticated".to_string()))?;
-    let provider_type = req
-        .param::<String>("provider")
-        .ok_or_else(|| AppError::Validation("Provider type is required".to_string()))?;
-
-    let user_service = UserService::new(pool);
-    user_service
-        .unlink_provider(&user_id, &provider_type)
-        .await?;
-    Ok("Provider unlinked successfully")
-}
-
-/// Casdoor-compatible unlink endpoint using a JSON body.
-#[endpoint(tags("Social Login"), summary = "Unlink provider")]
-pub async fn unlink_provider_compat(
-    depot: &mut Depot,
-    body: JsonBody<UnlinkRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let pool = depot
-        .obtain::<DieselPool>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
-    let current_user_id = depot
-        .get::<String>("user_id")
-        .cloned()
-        .map_err(|_| AppError::Authentication("Not authenticated".to_string()))?;
-    let is_admin = depot.get::<bool>("is_admin").copied().unwrap_or(false);
-    let req = body.into_inner();
-    let target_user_id = req.user_id.unwrap_or_else(|| current_user_id.clone());
-
-    if target_user_id != current_user_id && !is_admin {
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| AppError::Authentication("Provider did not authorize login".into()))?;
+    let app = application(&pool, &flow.application_id).await?;
+    if app.organization != flow.organization {
         return Err(AppError::Authentication(
-            "Only admins can unlink providers for another user".to_string(),
+            "Application organization changed".into(),
         ));
     }
-
-    let user_service = UserService::new(pool);
-    user_service
-        .unlink_provider(&target_user_id, &req.provider_type)
-        .await?;
-
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "msg": "Provider unlinked successfully",
-        "userId": target_user_id,
-        "providerType": req.provider_type
-    })))
-}
-
-/// Find user by provider ID stored in the JSONB `provider_ids` field
-async fn find_user_by_provider_link(
-    pool: &Pool<Postgres>,
-    provider_type: &str,
-    provider_id: &str,
-) -> AppResult<Option<UserResponse>> {
-    // provider_ids is a JSONB field like {"GitHub": "12345", "Google": "67890"}
-    let user: Option<crate::models::User> = sqlx::query_as(
-        "SELECT * FROM users WHERE provider_ids->>$1 = $2 AND is_deleted = false LIMIT 1",
-    )
-    .bind(provider_type)
-    .bind(provider_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(user.map(|u| u.into()))
-}
-
-/// Generate a unique username from provider user info
-async fn generate_unique_username(
-    pool: &Pool<Postgres>,
-    provider_user: &ProviderUserInfo,
-) -> AppResult<String> {
-    // Try provider username first, then email prefix, then provider ID prefix
-    let base = if !provider_user.username.is_empty() {
-        // Sanitize: only allow alphanumeric + underscore
-        provider_user
-            .username
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_')
-            .collect::<String>()
-    } else if let Some(ref email) = provider_user.email {
-        email.split('@').next().unwrap_or("user").to_string()
-    } else {
-        format!(
-            "user_{}",
-            &provider_user.id[..8.min(provider_user.id.len())]
-        )
-    };
-
-    // Ensure username is not empty and starts with a letter
-    let base = if base.is_empty() {
-        "user".to_string()
-    } else if base
-        .chars()
-        .next()
-        .map(|c| c.is_alphabetic())
-        .unwrap_or(false)
-    {
-        base
-    } else {
-        format!("u{}", base)
-    };
-
-    // Check uniqueness, append number if needed
-    let mut username = base.clone();
-    let mut counter = 1u32;
-    loop {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM users WHERE name = $1 AND is_deleted = false)",
-        )
-        .bind(&username)
-        .fetch_one(pool)
-        .await?;
-
-        if !exists {
-            return Ok(username);
-        }
-        username = format!("{}_{}", base, counter);
-        counter += 1;
-        if counter > 100 {
-            // Fall back to UUID suffix to guarantee uniqueness
-            let suffix = &uuid::Uuid::new_v4().to_string().replace('-', "")[..6];
-            username = format!("{}_{}", base, suffix);
-            break;
-        }
+    let provider = provider_for_application(&pool, &app, &name).await?;
+    if provider.id != flow.provider_id {
+        return Err(AppError::Authentication(
+            "Provider configuration changed".into(),
+        ));
     }
+    let oauth = oauth_provider(&provider)?;
+    let token = oauth.exchange_code(&code, &flow.redirect_uri).await?;
+    let info = oauth.get_user_info(&token).await?;
+    if info.id.trim().is_empty() || info.id == "unknown" {
+        return Err(AppError::Authentication(
+            "Provider returned no stable subject".into(),
+        ));
+    }
+    if flow.purpose == "link" {
+        super::social_link::finalize_link(&pool, &flow, &provider, &info.id).await?;
+        set_cookie(
+            res,
+            BROWSER_COOKIE,
+            "",
+            0,
+            flow.redirect_uri.starts_with("https://"),
+        );
+        res.render(salvo::writing::Redirect::other("/?social=linked"));
+        return Ok(());
+    }
+    if flow.purpose != "signin" {
+        return Err(AppError::Authentication("Unexpected OAuth purpose".into()));
+    }
+    // Namespace the link by provider configuration, not provider type. Identical
+    // subject strings from two OAuth client configurations are not the same identity.
+    let link_key = format!("oauth:{}", provider.id);
+    let mut transaction = pool.begin().await?;
+    super::social_link::lock_identity(&mut transaction, &app.organization, &provider.id, &info.id)
+        .await?;
+    let existing = super::social_link::find_identity(
+        &mut transaction,
+        &app.organization,
+        &provider.id,
+        &info.id,
+    )
+    .await?;
+    let user = match existing {
+        Some(user) => user,
+        None => {
+            if !app.enable_idp_signup || allowed_provider(&app, &provider) != Some(true) {
+                return Err(AppError::Authorization(
+                    "Social sign-up is disabled; link an account before signing in".into(),
+                ));
+            }
+            // Never merge accounts merely because a provider claims an email.
+            let id = uuid::Uuid::new_v4().to_string();
+            let name = format!("social_{}", uuid::Uuid::new_v4().simple());
+            let links = json!({link_key.clone(): info.id});
+            sqlx::query_as::<_, User>("INSERT INTO users (id, owner, name, password_hash, display_name, email, email_verified, avatar, provider_ids, signup_application) VALUES ($1, $2, $3, '', $4, $5, false, $6, $7, $8) RETURNING *")
+                .bind(id).bind(&app.organization).bind(&name).bind(if info.display_name.is_empty() { &name } else { &info.display_name })
+                .bind(&info.email).bind(&info.avatar_url).bind(links).bind(format!("{}/{}", app.owner, app.name))
+                .fetch_one(&mut *transaction).await?
+        }
+    };
+    if user.is_forbidden {
+        return Err(AppError::Authentication("User account is disabled".into()));
+    }
+    transaction.commit().await?;
+    ensure_social_account_policy(&pool, &user).await?;
+    CheckService::check_login_permission(&pool, &user.id, &app.id).await?;
+    let completion = social_state_service::create_completion(
+        &pool,
+        &NewCompletion {
+            user_id: user.id,
+            organization: app.organization,
+            application_id: app.id,
+            provider_name: name,
+            provider_id: provider.id,
+            context: json!({"link_key":link_key,"subject":info.id}),
+        },
+    )
+    .await?;
+    let secure = flow.redirect_uri.starts_with("https://");
+    set_cookie(res, BROWSER_COOKIE, "", 0, secure);
+    set_cookie(
+        res,
+        SESSION_COOKIE,
+        &completion,
+        COMPLETION_TTL_SECONDS,
+        secure,
+    );
+    res.render(salvo::writing::Redirect::other("/?social=complete"));
+    Ok(())
+}
 
-    Ok(username)
+pub(crate) async fn ensure_social_account_policy(pool: &PgPool, user: &User) -> AppResult<()> {
+    let mut conn = pool.acquire().await?;
+    ensure_social_account_policy_conn(&mut conn, user).await
+}
+pub(crate) async fn ensure_social_account_policy_conn(
+    conn: &mut PgConnection,
+    user: &User,
+) -> AppResult<()> {
+    if user.is_deleted || user.is_forbidden {
+        return Err(AppError::Authentication("User account is disabled".into()));
+    }
+    let enabled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE name = $1 AND is_deleted = false AND disable_signin = false)")
+        .bind(&user.owner).fetch_one(&mut *conn).await?;
+    if !enabled {
+        return Err(AppError::Authentication(
+            "Organization sign-in is disabled".into(),
+        ));
+    }
+    Ok(())
 }

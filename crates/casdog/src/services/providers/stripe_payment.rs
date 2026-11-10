@@ -32,6 +32,7 @@ struct StripeProviderMetadata {
 struct CheckoutSession {
     id: String,
     url: Option<String>,
+    invoice: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,11 +286,102 @@ impl PaymentProvider for StripePaymentProvider {
     }
 
     async fn get_invoice(&self, order_id: &str) -> AppResult<String> {
-        // In a real implementation, you would fetch the invoice from Stripe
-        // For now, return a placeholder URL
-        Ok(format!(
-            "https://dashboard.stripe.com/invoices/{}",
+        if order_id.starts_with("http://") || order_id.starts_with("https://") {
+            return Ok(order_id.to_string());
+        }
+
+        if order_id.starts_with("in_") {
+            return self.retrieve_invoice_url(order_id).await;
+        }
+
+        let url = format!(
+            "{}/checkout/sessions/{}?expand[]=invoice",
+            self.get_api_url(),
+            urlencoding::encode(order_id)
+        );
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.secret_key)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Stripe API request failed: {}", e)))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(AppError::Internal(format!(
+                "Stripe checkout session lookup failed with status {}: {}",
+                status, body
+            )));
+        }
+
+        let session: CheckoutSession = response.json().await.map_err(|e| {
+            AppError::Internal(format!("Failed to parse Stripe session response: {}", e))
+        })?;
+        if let Some(invoice_url) = invoice_url_from_value(session.invoice.as_ref()) {
+            return Ok(invoice_url);
+        }
+        if let Some(invoice_id) = session.invoice.as_ref().and_then(|value| value.as_str()) {
+            return self.retrieve_invoice_url(invoice_id).await;
+        }
+
+        Err(AppError::NotFound(format!(
+            "Stripe checkout session '{}' has no invoice",
             order_id
-        ))
+        )))
     }
+}
+
+impl StripePaymentProvider {
+    async fn retrieve_invoice_url(&self, invoice_id: &str) -> AppResult<String> {
+        let url = format!(
+            "{}/invoices/{}",
+            self.get_api_url(),
+            urlencoding::encode(invoice_id)
+        );
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.secret_key)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Stripe API request failed: {}", e)))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(AppError::Internal(format!(
+                "Stripe invoice lookup failed with status {}: {}",
+                status, body
+            )));
+        }
+
+        let invoice: serde_json::Value = response.json().await.map_err(|e| {
+            AppError::Internal(format!("Failed to parse Stripe invoice response: {}", e))
+        })?;
+        invoice_url_from_value(Some(&invoice)).ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Stripe invoice '{}' has no hosted_invoice_url or invoice_pdf",
+                invoice_id
+            ))
+        })
+    }
+}
+
+fn invoice_url_from_value(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    if let Some(invoice_id) = value.as_str() {
+        return Some(invoice_id.to_string()).filter(|id| id.starts_with("http"));
+    }
+    value
+        .get("hosted_invoice_url")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| value.get("invoice_pdf").and_then(serde_json::Value::as_str))
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }

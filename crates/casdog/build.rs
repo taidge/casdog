@@ -4,21 +4,18 @@ fn main() {
     let manifest_path = std::path::Path::new(&manifest_dir);
 
     // Search candidates in order:
-    // 1. Dioxus configured dist directory
-    // 2. Dioxus default target output
-    // 3. cargo package:     target/package/casdog-0.1.0/ -> ../../../web/dist
-    // 4. cargo install:     local web-dist/ bundled in published crate
+    // 1. Trunk frontend output directory
+    // 2. cargo package:     target/package/casdog-0.1.0/ -> ../../../web/dist
+    // 3. cargo install:     local web-dist/ bundled in published crate
     let candidates = [
         manifest_path.join("../../web/dist"),
-        manifest_path.join("../../web/target/dx/casdog-web/debug/web/public"),
-        manifest_path.join("../../web/target/dx/casdog-web/release/web/public"),
         manifest_path.join("../../../web/dist"),
         manifest_path.join("web-dist"),
     ];
 
     let dist_path = candidates
         .iter()
-        .find(|p| p.exists())
+        .find(|p| p.join("index.html").is_file())
         .map(|p| p.canonicalize().unwrap())
         .unwrap_or_else(|| {
             let fallback_dir = std::path::Path::new(&out_dir).join("casdog-web-fallback");
@@ -61,7 +58,7 @@ fn main() {
     <main>
       <h1>Casdog frontend is not bundled yet</h1>
       <p>
-        Build the Dioxus app in <code>web/</code> to replace this fallback page.
+        Run <code>trunk build --release</code> in <code>web/</code> to replace this fallback page.
         The backend still starts and serves API routes normally.
       </p>
     </main>

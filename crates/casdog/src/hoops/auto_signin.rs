@@ -1,10 +1,8 @@
 use base64::Engine as _;
 use base64::engine::general_purpose;
-use jsonwebtoken::{DecodingKey, Validation, decode};
 use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
 
-use crate::config::AppConfig;
 use crate::services::auth_service::Claims;
 
 /// Multi-source authentication hoop.
@@ -27,31 +25,17 @@ impl Handler for AutoSigninFilter {
         res: &mut Response,
         ctrl: &mut FlowCtrl,
     ) {
-        let config = AppConfig::get();
-
-        // 1. Try Bearer token from Authorization header
-        if let Some(token) = extract_bearer_token(req) {
-            if let Ok(token_data) = decode::<Claims>(
-                &token,
-                &DecodingKey::from_secret(config.jwt.secret.as_bytes()),
-                &Validation::default(),
-            ) {
-                set_depot_from_claims(depot, &token_data.claims);
-                ctrl.call_next(req, depot, res).await;
-                return;
-            }
-        }
-
-        // 2. Try access_token from query param
-        if let Some(token) = req.query::<String>("accessToken") {
-            if let Ok(token_data) = decode::<Claims>(
-                &token,
-                &DecodingKey::from_secret(config.jwt.secret.as_bytes()),
-                &Validation::default(),
-            ) {
-                set_depot_from_claims(depot, &token_data.claims);
-                ctrl.call_next(req, depot, res).await;
-                return;
+        // JWTs from any transport share live-account and revocation validation.
+        for token in [
+            extract_bearer_token(req),
+            req.query::<String>("accessToken"),
+        ] {
+            if let (Some(token), Ok(pool)) = (token, depot.obtain::<Pool<Postgres>>()) {
+                if let Ok(claims) = super::auth::validate_session_claims(pool, &token).await {
+                    set_depot_from_claims(depot, &claims);
+                    ctrl.call_next(req, depot, res).await;
+                    return;
+                }
             }
         }
 
@@ -132,7 +116,7 @@ async fn lookup_user_by_access_key(
     access_secret: &str,
 ) -> Result<(String, String, String, bool), ()> {
     let row: Option<(String, String, String, bool)> = sqlx::query_as(
-        "SELECT id, owner, name, is_admin FROM users WHERE access_key = $1 AND access_secret = $2 AND is_deleted = false",
+        "SELECT id, owner, name, is_admin FROM users WHERE access_key = $1 AND access_secret = $2 AND is_deleted = false AND is_forbidden = false AND access_key <> '' AND access_secret <> ''",
     )
     .bind(access_key)
     .bind(access_secret)

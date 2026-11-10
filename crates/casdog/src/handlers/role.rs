@@ -190,6 +190,10 @@ pub async fn get_user_roles(
         .clone();
     let role_service = RoleService::new(pool);
 
-    let response = role_service.get_user_roles(&user_id.into_inner()).await?;
+    let mut response = role_service.get_user_roles(&user_id.into_inner()).await?;
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if !principal.global_admin() {
+        response.retain(|role| role.owner == principal.owner);
+    }
     Ok(Json(response))
 }

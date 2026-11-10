@@ -4,6 +4,7 @@ pub mod application;
 pub mod auth;
 pub mod cas;
 pub mod casbin_cli;
+pub mod casdoor_compat;
 pub mod cert;
 pub mod cert_extra;
 pub mod consent;
@@ -16,6 +17,7 @@ pub mod impersonation;
 pub mod invitation;
 pub mod ldap;
 pub mod login_compat;
+pub mod mcp;
 pub mod messaging;
 pub mod mfa;
 pub mod model;
@@ -53,3 +55,17 @@ pub mod user_extra;
 pub mod verification;
 pub mod webauthn;
 pub mod webhook;
+
+pub mod password_reset;
+
+pub mod social_session;
+
+pub mod social_link;
+
+pub mod parity_system;
+
+pub mod parity_resources;
+
+pub mod password_mfa;
+
+pub mod parity_operations;

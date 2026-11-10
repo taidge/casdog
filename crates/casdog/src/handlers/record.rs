@@ -48,8 +48,13 @@ pub async fn filter_records(
     let page_val = page.into_inner().unwrap_or(1);
     let page_size_val = page_size.into_inner().unwrap_or(10);
 
+    let mut filter = body.into_inner();
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if !principal.global_admin() {
+        filter.owner = Some(principal.owner);
+    }
     let (records, total) =
-        RecordService::list_filtered(&pool, body.into_inner(), page_val, page_size_val).await?;
+        RecordService::list_filtered(&pool, filter, page_val, page_size_val).await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",

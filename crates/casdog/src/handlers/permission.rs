@@ -192,8 +192,12 @@ pub async fn get_role_permissions(
         .clone();
     let permission_service = PermissionService::new(pool);
 
-    let response = permission_service
+    let mut response = permission_service
         .get_role_permissions(&role_id.into_inner())
         .await?;
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if !principal.global_admin() {
+        response.retain(|permission| permission.owner == principal.owner);
+    }
     Ok(Json(response))
 }

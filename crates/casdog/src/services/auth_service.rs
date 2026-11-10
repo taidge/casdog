@@ -1,6 +1,4 @@
 use chrono::{Duration, Utc};
-use diesel::prelude::*;
-use diesel_async::RunQueryDsl;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use salvo::oapi::ToSchema;
 use serde::{Deserialize, Serialize};
@@ -10,7 +8,7 @@ use crate::config::AppConfig;
 use crate::diesel_pool::DieselPool;
 use crate::error::{AppError, AppResult};
 use crate::models::UserResponse;
-use crate::schema::users;
+use crate::services::mfa_service::MfaService;
 use crate::services::{
     AppService, CheckService, OrgService, PasswordService, TokenService, UserService,
 };
@@ -33,54 +31,209 @@ pub struct Claims {
     pub impersonation_application: Option<String>,
     pub exp: i64,
     pub iat: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
     pub iss: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(try_from = "LoginRequestInput")]
 pub struct LoginRequest {
+    #[serde(alias = "organization")]
     pub owner: String,
+    #[serde(alias = "username")]
     pub name: String,
     pub password: String,
     // OAuth context fields
+    #[serde(alias = "responseType")]
     pub response_type: Option<String>,
+    #[serde(alias = "clientId")]
     pub client_id: Option<String>,
+    #[serde(alias = "redirectUri")]
     pub redirect_uri: Option<String>,
     pub scope: Option<String>,
     pub state: Option<String>,
     pub nonce: Option<String>,
+    #[serde(alias = "codeChallenge")]
     pub code_challenge: Option<String>,
+    #[serde(alias = "codeChallengeMethod")]
     pub code_challenge_method: Option<String>,
     // Login type: "password", "code", "provider", "ldap", "face"
+    #[serde(alias = "type")]
     pub login_type: Option<String>,
     // Verification code for code-based login
     pub code: Option<String>,
     // Social provider name
     pub provider: Option<String>,
     // Captcha
+    #[serde(alias = "captchaType")]
     pub captcha_type: Option<String>,
+    #[serde(alias = "captchaToken")]
     pub captcha_token: Option<String>,
     // MFA
+    #[serde(alias = "mfaType")]
     pub mfa_type: Option<String>, // "app", "sms", "email"
     pub passcode: Option<String>, // MFA passcode
     // Auto-signin
+    #[serde(alias = "autoSignin")]
     pub auto_signin: Option<bool>,
     // Application context
     pub application: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(try_from = "SignupRequestInput")]
 pub struct SignupRequest {
+    #[serde(alias = "organization")]
     pub owner: String,
+    #[serde(alias = "username")]
     pub name: String,
     pub password: String,
+    #[serde(alias = "displayName")]
     pub display_name: String,
     pub email: Option<String>,
     pub phone: Option<String>,
     // NEW fields
+    #[serde(alias = "invitationCode")]
     pub invitation_code: Option<String>,
     pub application: Option<String>,
+    #[serde(alias = "captchaType")]
     pub captcha_type: Option<String>,
+    #[serde(alias = "captchaToken")]
     pub captcha_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LoginRequestInput {
+    owner: Option<String>,
+    organization: Option<String>,
+    name: Option<String>,
+    username: Option<String>,
+    password: String,
+    // OAuth context fields
+    #[serde(alias = "responseType")]
+    response_type: Option<String>,
+    #[serde(alias = "clientId")]
+    client_id: Option<String>,
+    #[serde(alias = "redirectUri")]
+    redirect_uri: Option<String>,
+    scope: Option<String>,
+    state: Option<String>,
+    nonce: Option<String>,
+    #[serde(alias = "codeChallenge")]
+    code_challenge: Option<String>,
+    #[serde(alias = "codeChallengeMethod")]
+    code_challenge_method: Option<String>,
+    // Login type: "password", "code", "provider", "ldap", "face"
+    #[serde(alias = "type")]
+    login_type: Option<String>,
+    // Verification code for code-based login
+    code: Option<String>,
+    // Social provider name
+    provider: Option<String>,
+    // Captcha
+    #[serde(alias = "captchaType")]
+    captcha_type: Option<String>,
+    #[serde(alias = "captchaToken")]
+    captcha_token: Option<String>,
+    // MFA
+    #[serde(alias = "mfaType")]
+    mfa_type: Option<String>, // "app", "sms", "email"
+    passcode: Option<String>, // MFA passcode
+    // Auto-signin
+    #[serde(alias = "autoSignin")]
+    auto_signin: Option<bool>,
+    // Application context
+    application: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SignupRequestInput {
+    owner: Option<String>,
+    organization: Option<String>,
+    name: Option<String>,
+    username: Option<String>,
+    password: String,
+    #[serde(alias = "displayName")]
+    display_name: Option<String>,
+    email: Option<String>,
+    phone: Option<String>,
+    // NEW fields
+    #[serde(alias = "invitationCode")]
+    invitation_code: Option<String>,
+    application: Option<String>,
+    #[serde(alias = "captchaType")]
+    captcha_type: Option<String>,
+    #[serde(alias = "captchaToken")]
+    captcha_token: Option<String>,
+}
+
+// Casdoor's AuthForm sends both username (login ID) and name (display name).
+// These are distinct inputs, not serde aliases of one field.
+impl TryFrom<LoginRequestInput> for LoginRequest {
+    type Error = &'static str;
+
+    fn try_from(input: LoginRequestInput) -> Result<Self, Self::Error> {
+        Ok(Self {
+            owner: input
+                .owner
+                .or(input.organization)
+                .ok_or("missing field `owner` or `organization`")?,
+            name: input
+                .username
+                .or(input.name)
+                .ok_or("missing field `name` or `username`")?,
+            password: input.password,
+            response_type: input.response_type,
+            client_id: input.client_id,
+            redirect_uri: input.redirect_uri,
+            scope: input.scope,
+            state: input.state,
+            nonce: input.nonce,
+            code_challenge: input.code_challenge,
+            code_challenge_method: input.code_challenge_method,
+            login_type: input.login_type,
+            code: input.code,
+            provider: input.provider,
+            captcha_type: input.captcha_type,
+            captcha_token: input.captcha_token,
+            mfa_type: input.mfa_type,
+            passcode: input.passcode,
+            auto_signin: input.auto_signin,
+            application: input.application,
+        })
+    }
+}
+
+impl TryFrom<SignupRequestInput> for SignupRequest {
+    type Error = &'static str;
+
+    fn try_from(input: SignupRequestInput) -> Result<Self, Self::Error> {
+        let display_name = input
+            .display_name
+            .or_else(|| input.username.as_ref().and(input.name.clone()))
+            .ok_or("missing field `display_name` (or Casdoor `name` with `username`)")?;
+        Ok(Self {
+            owner: input
+                .owner
+                .or(input.organization)
+                .ok_or("missing field `owner` or `organization`")?,
+            name: input
+                .username
+                .or(input.name)
+                .ok_or("missing field `name` or `username`")?,
+            display_name,
+            password: input.password,
+            email: input.email,
+            phone: input.phone,
+            invitation_code: input.invitation_code,
+            application: input.application,
+            captcha_type: input.captcha_type,
+            captcha_token: input.captcha_token,
+        })
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -162,8 +315,17 @@ impl AuthService {
         // 2. Get application signup_items if application is specified
         let signup_items = if let Some(ref app_name) = req.application {
             let app_service = AppService::new(pool.clone());
-            let application = app_service.get_by_name(&req.owner, app_name).await.ok();
-            application.and_then(|a| a.signup_items)
+            let (app_owner, name) = app_name.split_once('/').unwrap_or((&req.owner, app_name));
+            let application = app_service.get_by_name(app_owner, name).await?;
+            if application.is_deleted
+                || application.organization != req.owner
+                || !application.enable_internal_signup
+            {
+                return Err(AppError::Authorization(
+                    "Signup is not enabled for this organization/application".into(),
+                ));
+            }
+            application.signup_items
         } else {
             None
         };
@@ -260,7 +422,10 @@ impl AuthService {
         } else if let Some(ref app_name) = req.application {
             Some(
                 AppService::new(pool.clone())
-                    .get_by_name(&req.owner, app_name)
+                    .get_by_name(
+                        app_name.split_once('/').map(|x| x.0).unwrap_or(&req.owner),
+                        app_name.split_once('/').map(|x| x.1).unwrap_or(app_name),
+                    )
                     .await
                     .map_err(|_| AppError::Authentication("Application not found".to_string()))?,
             )
@@ -268,6 +433,13 @@ impl AuthService {
             None
         };
 
+        if let Some(app) = &application {
+            if app.is_deleted || app.organization != req.owner {
+                return Err(AppError::Authentication(
+                    "Application organization mismatch".into(),
+                ));
+            }
+        }
         // 2. Check if org allows signin
         let org = OrgService::new(pool.clone())
             .get_internal(&req.owner)
@@ -345,23 +517,15 @@ impl AuthService {
             }
         }
 
-        // 8. Reset signin error count on success
-        CheckService::reset_signin_error(pg_pool, &user.id).await?;
-
         // 9. Check MFA requirement
-        if user.mfa_enabled {
-            if req.passcode.is_none() {
+        let mfa_types = MfaService::login_methods(pg_pool, &user).await?;
+        if user.mfa_enabled || !mfa_types.is_empty() {
+            if req
+                .passcode
+                .as_deref()
+                .is_none_or(|code| code.trim().is_empty())
+            {
                 // MFA is required but no passcode provided - return MFA challenge
-                let mut mfa_types = Vec::new();
-                if user.totp_secret.is_some() {
-                    mfa_types.push("app".to_string());
-                }
-                if user.mfa_phone_enabled {
-                    mfa_types.push("sms".to_string());
-                }
-                if user.mfa_email_enabled {
-                    mfa_types.push("email".to_string());
-                }
 
                 // Return a partial response indicating MFA is needed
                 let user_response: UserResponse = user.into();
@@ -378,10 +542,32 @@ impl AuthService {
                     password_expired: None,
                 });
             }
-            // If passcode provided, MFA verification would be delegated to MFA service.
-            // For now, we trust that the MFA service will be called separately
-            // or integrated in a future enhancement.
+            // Generic verification records are not proof of a password-bound
+            // login ceremony. Email/SMS must use the browser challenge API.
+            let method = req
+                .mfa_type
+                .as_deref()
+                .or(user.preferred_mfa_type.as_deref())
+                .unwrap_or("app");
+            if matches!(method, "email" | "sms") {
+                return Err(AppError::Authentication(
+                    "Complete the password MFA challenge before signing in".into(),
+                ));
+            }
+            if !MfaService::verify_login(
+                pg_pool,
+                &user,
+                req.mfa_type.as_deref(),
+                req.passcode.as_deref().unwrap_or_default(),
+            )
+            .await?
+            {
+                CheckService::record_signin_error(pg_pool, &user.id, 5, 15).await?;
+                return Err(AppError::Authentication("Invalid MFA code".to_string()));
+            }
         }
+        // A correct password alone must not reset failed second-factor attempts.
+        CheckService::reset_signin_error(pg_pool, &user.id).await?;
 
         // 10. Check password expiration
         let password_expire_days = if org.password_expire_days > 0 {
@@ -394,7 +580,7 @@ impl AuthService {
             password_expire_days,
         )?;
 
-        if (password_expired || user.need_update_password) && req.passcode.is_none() {
+        if password_expired || user.need_update_password {
             // Return response with password_expired flag - user must change password
             let user_response: UserResponse = user.into();
             let token = self.generate_token(&user_response)?;
@@ -504,6 +690,8 @@ impl AuthService {
             impersonation_application: None,
             exp: exp.timestamp(),
             iat: now.timestamp(),
+            issued_at_ms: Some(now.timestamp_millis()),
+            jti: Some(uuid::Uuid::new_v4().to_string()),
             iss: self.jwt_issuer.clone(),
         }
     }
@@ -549,48 +737,88 @@ impl AuthService {
     ) -> AppResult<()> {
         let user = self.user_service.get_by_id_internal(user_id).await?;
 
-        let is_valid = UserService::verify_password(old_password, &user.password_hash)?;
+        let is_valid = PasswordService::verify_password(
+            old_password,
+            &user.password_hash,
+            user.password_type.as_deref().unwrap_or("argon2"),
+            user.password_salt.as_deref(),
+        )?;
         if !is_valid {
             return Err(AppError::Authentication("Invalid old password".to_string()));
         }
 
+        let org = OrgService::new(self.user_service.pool().clone())
+            .get_internal(&user.owner)
+            .await?;
+        CheckService::check_password_complexity(new_password, org.password_options.as_ref())?;
         let new_hash = UserService::hash_password(new_password)?;
-        let mut conn = self
-            .user_service
-            .pool()
-            .get()
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        diesel::update(users::table.filter(users::id.eq(user_id)))
-            .set((
-                users::password_hash.eq(&new_hash),
-                users::updated_at.eq(Utc::now()),
-            ))
-            .execute(&mut conn)
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let pg = self
+            .pg_pool
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("Password change database unavailable".into()))?;
+        let mut tx = pg.begin().await?;
+        let changed = sqlx::query("UPDATE users SET password_hash=$1,password_type='argon2',password_salt=NULL,last_change_password_time=$2,need_update_password=false,updated_at=NOW() WHERE id=$3 AND password_hash=$4 AND NOT is_deleted AND NOT is_forbidden")
+            .bind(new_hash).bind(Utc::now().to_rfc3339()).bind(user_id).bind(&user.password_hash).execute(&mut *tx).await?;
+        if changed.rows_affected() != 1 {
+            return Err(AppError::Authentication(
+                "Credentials changed; please sign in again".into(),
+            ));
+        }
+        sqlx::query("DELETE FROM tokens WHERE user_id=$1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM sessions WHERE user_id=$1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
 
         Ok(())
     }
 
     pub async fn check_password(&self, user_id: &str, password: &str) -> AppResult<bool> {
         let user = self.user_service.get_by_id_internal(user_id).await?;
-        UserService::verify_password(password, &user.password_hash)
+        PasswordService::verify_password(
+            password,
+            &user.password_hash,
+            user.password_type.as_deref().unwrap_or("argon2"),
+            user.password_salt.as_deref(),
+        )
     }
 
-    pub async fn sso_logout(pool: &DieselPool, user_id: &str) -> AppResult<()> {
-        // Delete all tokens for this user
-        TokenService::delete_by_user(pool, user_id).await?;
-        // Delete all sessions for this user
-        use crate::schema::sessions;
-        let mut conn = pool
-            .get()
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        diesel::delete(sessions::table.filter(sessions::user_id.eq(user_id)))
-            .execute(&mut conn)
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+    pub async fn sso_logout(pool: &PgPool, user_id: &str) -> AppResult<()> {
+        Self::logout_session(pool, user_id, None).await
+    }
+
+    /// Serialize revocation with social completion, account binding and credential changes.
+    /// All session removal and the cutoff commit together after acquiring the user lock.
+    pub async fn logout_session(
+        pool: &PgPool,
+        user_id: &str,
+        token: Option<(&str, i64)>,
+    ) -> AppResult<()> {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| AppError::Authentication("User unavailable".into()))?;
+        if let Some((fingerprint, expires_at)) = token {
+            sqlx::query("INSERT INTO revoked_session_tokens(token_hash,user_id,expires_at) VALUES($1,$2,to_timestamp($3)) ON CONFLICT DO NOTHING")
+                .bind(fingerprint).bind(user_id).bind(expires_at as f64).execute(&mut *tx).await?;
+        }
+        sqlx::query("DELETE FROM tokens WHERE user_id=$1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM sessions WHERE user_id=$1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO user_session_epochs(user_id,invalid_before) VALUES($1,clock_timestamp()) ON CONFLICT(user_id) DO UPDATE SET invalid_before=GREATEST(user_session_epochs.invalid_before,EXCLUDED.invalid_before)")
+            .bind(user_id).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 }

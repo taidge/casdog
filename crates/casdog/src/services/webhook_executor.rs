@@ -25,7 +25,7 @@ use crate::error::{AppError, AppResult};
 ///     data: serde_json::to_value(&user).unwrap_or_default(),
 /// }).await;
 /// ```
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, serde::Deserialize, Clone)]
 pub struct WebhookPayload {
     /// Fully-qualified event name, e.g. "user.created", "update-user".
     pub event: String,
@@ -54,6 +54,7 @@ pub struct WebhookPayload {
 #[derive(Debug, sqlx::FromRow)]
 struct WebhookInfo {
     id: String,
+    owner: String,
     name: String,
     url: String,
     method: String,
@@ -194,59 +195,74 @@ impl WebhookExecutor {
             return Ok(());
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| AppError::Internal(format!("HTTP client error: {}", e)))?;
-
         for webhook in &webhooks {
-            // First attempt.
-            let result = Self::send_webhook(&client, webhook, payload).await;
-
-            match result {
-                Ok(status) => {
-                    tracing::info!(
-                        webhook_name = %webhook.name,
-                        webhook_id = %webhook.id,
-                        status,
-                        "Webhook fired successfully"
-                    );
-                }
-                Err(ref first_err) => {
-                    tracing::warn!(
-                        webhook_name = %webhook.name,
-                        webhook_id = %webhook.id,
-                        error = %first_err,
-                        "Webhook failed on first attempt, retrying once"
-                    );
-
-                    // Retry once after a short delay.
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                    match Self::send_webhook(&client, webhook, payload).await {
-                        Ok(status) => {
-                            tracing::info!(
-                                webhook_name = %webhook.name,
-                                webhook_id = %webhook.id,
-                                status,
-                                "Webhook succeeded on retry"
-                            );
-                        }
-                        Err(retry_err) => {
-                            tracing::error!(
-                                webhook_name = %webhook.name,
-                                webhook_id = %webhook.id,
-                                first_error = %first_err,
-                                retry_error = %retry_err,
-                                "Webhook failed after retry"
-                            );
-                        }
-                    }
-                }
+            let event_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query("INSERT INTO webhook_events(id,owner,name,organization,webhook_id,event,payload) VALUES($1,$2,$1,$3,$4,$5,$6)")
+                .bind(&event_id).bind(&webhook.owner).bind(&payload.owner).bind(&webhook.id)
+                .bind(&payload.event).bind(serde_json::to_value(payload).map_err(|e| AppError::Internal(e.to_string()))?)
+                .execute(pool).await?;
+            let result = Self::replay_event(pool, &event_id).await?;
+            if result.get("state").and_then(serde_json::Value::as_str) == Some("Failed") {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                Self::replay_event(pool, &event_id).await?;
             }
         }
 
         Ok(())
+    }
+
+    /// Retry one persisted delivery. The compare-and-set claim prevents concurrent
+    /// replays; a process interrupted during delivery can be retried after two minutes.
+    pub async fn replay_event(pool: &PgPool, event_id: &str) -> AppResult<serde_json::Value> {
+        let event: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(t) FROM webhook_events t WHERE id=$1")
+                .bind(event_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::NotFound("Webhook event not found".into()))?;
+        let webhook_id = event["webhook_id"]
+            .as_str()
+            .ok_or_else(|| AppError::Validation("Event webhook is missing".into()))?;
+        let webhook: WebhookInfo=sqlx::query_as("SELECT id,owner,name,url,method,content_type,headers,events,organization,is_user_extended FROM webhooks WHERE id=$1 AND is_enabled=true")
+            .bind(webhook_id).fetch_optional(pool).await?
+            .ok_or_else(|| AppError::Validation("Webhook no longer exists or is disabled".into()))?;
+        if event["owner"].as_str() != Some(webhook.owner.as_str()) {
+            return Err(AppError::Authorization("Webhook owner changed".into()));
+        }
+        let payload: WebhookPayload = serde_json::from_value(event["payload"].clone())
+            .map_err(|_| AppError::Validation("Stored webhook payload is invalid".into()))?;
+        if event["organization"].as_str() != Some(payload.owner.as_str()) {
+            return Err(AppError::Authorization(
+                "Event organization does not match payload".into(),
+            ));
+        }
+        let claimed=sqlx::query("UPDATE webhook_events SET state='Retrying',attempts=attempts+1,updated_at=NOW() WHERE id=$1 AND (state<>'Retrying' OR updated_at<NOW()-INTERVAL '2 minutes')")
+            .bind(event_id).execute(pool).await?;
+        if claimed.rows_affected() != 1 {
+            return Err(AppError::Conflict(
+                "Webhook replay already in progress".into(),
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let (state, status, response, error) =
+            match Self::send_webhook(&client, &webhook, &payload).await {
+                Ok((status, body)) if (200..300).contains(&status) => {
+                    ("Success", Some(i32::from(status)), Some(body), None)
+                }
+                Ok((status, body)) => (
+                    "Failed",
+                    Some(i32::from(status)),
+                    Some(body),
+                    Some(format!("Webhook returned HTTP {status}")),
+                ),
+                Err(error) => ("Failed", None, None, Some(error)),
+            };
+        sqlx::query_scalar("UPDATE webhook_events SET state=$2,status_code=$3,response_body=$4,error_text=$5,updated_at=NOW() WHERE id=$1 RETURNING to_jsonb(webhook_events)")
+            .bind(event_id).bind(state).bind(status).bind(response).bind(error).fetch_one(pool).await.map_err(AppError::from)
     }
 
     // -------------------------------------------------------------------
@@ -268,7 +284,7 @@ impl WebhookExecutor {
     ) -> AppResult<Vec<WebhookInfo>> {
         let rows: Vec<WebhookInfo> = sqlx::query_as(
             r#"
-            SELECT id, name, url, method, content_type,
+            SELECT id, owner, name, url, method, content_type,
                    headers, events, organization, is_user_extended
             FROM webhooks
             WHERE is_enabled = true
@@ -316,7 +332,7 @@ impl WebhookExecutor {
         client: &reqwest::Client,
         webhook: &WebhookInfo,
         payload: &WebhookPayload,
-    ) -> Result<u16, String> {
+    ) -> Result<(u16, String), String> {
         let body =
             serde_json::to_string(payload).map_err(|e| format!("Serialization error: {}", e))?;
 
@@ -361,7 +377,7 @@ impl WebhookExecutor {
             }
         }
 
-        let response = request
+        let mut response = request
             .body(body)
             .send()
             .await
@@ -369,10 +385,19 @@ impl WebhookExecutor {
 
         let status = response.status().as_u16();
 
-        // Read (and discard) the body so the connection can be reused.
-        let _body = response.text().await.unwrap_or_default();
-
-        Ok(status)
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "Cannot read webhook response".to_string())?
+        {
+            let available = 65536usize.saturating_sub(bytes.len());
+            bytes.extend_from_slice(&chunk[..chunk.len().min(available)]);
+            if bytes.len() >= 65536 {
+                break;
+            }
+        }
+        Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
     }
 }
 

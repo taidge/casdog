@@ -311,6 +311,26 @@ impl TokenService {
         code_challenge: Option<&str>,
         code_challenge_method: Option<&str>,
     ) -> AppResult<String> {
+        let user = UserService::new(pool.clone())
+            .get_by_id_internal(user_id)
+            .await?;
+        if user.owner != application.organization || user.is_forbidden || user.is_deleted {
+            return Err(AppError::Authorization(
+                "User cannot authorize this application".into(),
+            ));
+        }
+        if !application
+            .redirect_uris
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .any(|uri| !uri.is_empty() && uri == redirect_uri)
+        {
+            return Err(AppError::Authentication("Unregistered redirect URI".into()));
+        }
+        if code_challenge.is_some()
+            && !matches!(code_challenge_method.unwrap_or("plain"), "plain" | "S256")
+        {
+            return Err(AppError::Validation("Unsupported PKCE method".into()));
+        }
         let id = Uuid::new_v4().to_string();
         let code = Self::generate_token();
         let now = Utc::now();
@@ -358,22 +378,29 @@ impl TokenService {
     ) -> AppResult<OAuthTokenResponse> {
         let token = Self::get_by_code(pool, code).await?;
 
+        let user = UserService::new(pool.clone())
+            .get_by_id_internal(&token.user)
+            .await?;
+        if user.is_deleted || user.is_forbidden || user.owner != application.organization {
+            return Err(AppError::Authentication("Account unavailable".into()));
+        }
         // Verify the code belongs to this application
-        if token.application != application.name {
+        if token.application != application.name
+            || token.owner != application.owner
+            || token.organization != application.organization
+        {
             return Err(AppError::Authentication(
                 "Code does not match application".to_string(),
             ));
         }
 
-        // Verify redirect_uri matches
-        if let Some(uri) = redirect_uri {
-            if let Some(ref stored_uri) = token.redirect_uri {
-                if uri != stored_uri {
-                    return Err(AppError::Authentication(
-                        "Redirect URI mismatch".to_string(),
-                    ));
-                }
-            }
+        if redirect_uri != token.redirect_uri.as_deref() {
+            return Err(AppError::Authentication("Redirect URI mismatch".into()));
+        }
+        if application.client_secret.is_empty() && token.code_challenge.is_none() {
+            return Err(AppError::Authentication(
+                "PKCE is required for public clients".into(),
+            ));
         }
 
         // Verify PKCE code_challenge
@@ -402,15 +429,12 @@ impl TokenService {
         if let Some(code_expire) = token.code_expire_in {
             let created = token.created_at.timestamp();
             let now = Utc::now().timestamp();
-            if now - created > code_expire {
+            if now - created >= code_expire {
                 return Err(AppError::Authentication(
                     "Authorization code expired".to_string(),
                 ));
             }
         }
-
-        // Mark code as used (prevents replay attacks)
-        Self::mark_code_used(pool, code).await?;
 
         // Generate new access_token and refresh_token
         let access_token = Self::generate_token();
@@ -422,18 +446,30 @@ impl TokenService {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        diesel::update(tokens::table.filter(tokens::id.eq(&token.id)))
-            .set((
-                tokens::access_token.eq(&access_token),
-                tokens::refresh_token.eq(&refresh_token),
-                tokens::expires_in.eq(expires_in),
-            ))
-            .execute(&mut conn)
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let consumed = diesel::update(
+            tokens::table
+                .filter(tokens::id.eq(&token.id))
+                .filter(tokens::code_is_used.eq(false)),
+        )
+        .set((
+            tokens::code_is_used.eq(true),
+            tokens::access_token.eq(&access_token),
+            tokens::refresh_token.eq(&refresh_token),
+            tokens::expires_in.eq(expires_in),
+            tokens::created_at.eq(Utc::now()),
+        ))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+        if consumed != 1 {
+            return Err(AppError::Authentication(
+                "Authorization code already consumed".into(),
+            ));
+        }
+        drop(conn);
 
         // Generate ID token if scope includes openid
-        let id_token = if token.scope.contains("openid") {
+        let id_token = if token.scope.split_whitespace().any(|s| s == "openid") {
             let id_token = IdTokenService::generate_id_token(
                 pool,
                 &token.user,
@@ -469,12 +505,27 @@ impl TokenService {
             .await
             .map_err(|_| AppError::Authentication("Invalid refresh token".to_string()))?;
 
-        if token.application != application.name {
+        if token.application != application.name
+            || token.owner != application.owner
+            || token.organization != application.organization
+        {
             return Err(AppError::Authentication(
                 "Refresh token does not match application".to_string(),
             ));
         }
 
+        if token.created_at
+            + chrono::Duration::hours(i64::from(application.refresh_expire_in_hours))
+            <= Utc::now()
+        {
+            return Err(AppError::Authentication("Refresh token expired".into()));
+        }
+        let user = UserService::new(pool.clone())
+            .get_by_id_internal(&token.user)
+            .await?;
+        if user.is_forbidden || user.is_deleted || user.owner != application.organization {
+            return Err(AppError::Authentication("Account unavailable".into()));
+        }
         let new_access_token = Self::generate_token();
         let new_refresh_token = Self::generate_token();
         let expires_in = application.expire_in_hours as i64 * 3600;
@@ -484,19 +535,30 @@ impl TokenService {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        diesel::update(tokens::table.filter(tokens::id.eq(&token.id)))
-            .set((
-                tokens::access_token.eq(&new_access_token),
-                tokens::refresh_token.eq(&new_refresh_token),
-                tokens::expires_in.eq(expires_in),
-                tokens::created_at.eq(Utc::now()),
-            ))
-            .execute(&mut conn)
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let consumed = diesel::update(
+            tokens::table
+                .filter(tokens::id.eq(&token.id))
+                .filter(tokens::refresh_token.eq(refresh_token_str)),
+        )
+        .set((
+            tokens::access_token.eq(&new_access_token),
+            tokens::refresh_token.eq(&new_refresh_token),
+            tokens::expires_in.eq(expires_in),
+            tokens::created_at.eq(Utc::now()),
+        ))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if consumed != 1 {
+            return Err(AppError::Authentication(
+                "Refresh token already consumed".into(),
+            ));
+        }
+        drop(conn);
 
         // Generate ID token if scope includes openid
-        let id_token = if token.scope.contains("openid") {
+        let id_token = if token.scope.split_whitespace().any(|s| s == "openid") {
             let id_token = IdTokenService::generate_id_token(
                 pool,
                 &token.user,
@@ -576,29 +638,53 @@ impl TokenService {
         password: &str,
         scope: Option<&str>,
     ) -> AppResult<OAuthTokenResponse> {
+        let user = UserService::new(pool.clone())
+            .get_by_name(&application.organization, username)
+            .await
+            .map_err(|_| AppError::Authentication("Invalid credentials".into()))?;
+        if user.is_deleted
+            || user.is_forbidden
+            || user.mfa_enabled
+            || user.mfa_phone_enabled
+            || user.mfa_email_enabled
+            || user.need_update_password
+            || !application.enable_password
+        {
+            return Err(AppError::Authentication(
+                "Interactive sign-in required".into(),
+            ));
+        }
         let mut conn = pool
             .get()
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
-
-        // Find and verify user
-        use crate::schema::users;
-        let user_row: (String, String, String) = users::table
-            .filter(users::name.eq(username))
-            .filter(users::owner.eq(&application.organization))
-            .filter(users::is_deleted.eq(false))
-            .select((users::id, users::name, users::password_hash))
-            .first(&mut conn)
-            .await
-            .optional()
-            .map_err(|e| AppError::Internal(e.to_string()))?
-            .ok_or_else(|| AppError::Authentication("Invalid credentials".to_string()))?;
-
-        let (user_id, user_name, password_hash) = user_row;
-
-        if !UserService::verify_password(password, &password_hash)? {
-            return Err(AppError::Authentication("Invalid credentials".to_string()));
+        use diesel::sql_types::{Bool, Text};
+        #[derive(diesel::QueryableByName)]
+        struct MfaCheck {
+            #[diesel(sql_type = Bool)]
+            enabled: bool,
         }
+        let mfa: MfaCheck = diesel::sql_query(
+            "SELECT EXISTS(SELECT 1 FROM user_mfa WHERE user_id=$1 AND is_enabled=true) AS enabled",
+        )
+        .bind::<Text, _>(&user.id)
+        .get_result(&mut conn)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+        if mfa.enabled
+            || !crate::services::PasswordService::verify_password(
+                password,
+                &user.password_hash,
+                user.password_type.as_deref().unwrap_or("argon2"),
+                user.password_salt.as_deref(),
+            )?
+        {
+            return Err(AppError::Authentication(
+                "Invalid credentials or interactive sign-in required".into(),
+            ));
+        }
+        let user_id = user.id;
+        let user_name = user.name;
 
         let id = Uuid::new_v4().to_string();
         let access_token = Self::generate_token();
@@ -627,8 +713,9 @@ impl TokenService {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
+        drop(conn);
         // Generate ID token if scope includes openid
-        let id_token = if scope.contains("openid") {
+        let id_token = if scope.split_whitespace().any(|s| s == "openid") {
             let id_token = IdTokenService::generate_id_token(
                 pool,
                 &user_id,
@@ -661,7 +748,11 @@ impl TokenService {
         token_type_hint: Option<&str>,
     ) -> AppResult<IntrospectResponse> {
         let config = AppConfig::get();
-        let issuer = format!("http://{}:{}", config.server.host, config.server.port);
+        let issuer = config
+            .server
+            .public_url
+            .clone()
+            .unwrap_or_else(|| format!("http://{}:{}", config.server.host, config.server.port));
 
         let token = match token_type_hint {
             Some("refresh_token") => Self::get_by_refresh_token(pool, token_str).await.ok(),
@@ -679,7 +770,17 @@ impl TokenService {
             Some(t) => {
                 let created = t.created_at.timestamp();
                 let exp = created + t.expires_in;
-                let is_active = Utc::now().timestamp() < exp;
+                let account_active = if t.user.is_empty() {
+                    true
+                } else {
+                    UserService::new(pool.clone())
+                        .get_by_id_internal(&t.user)
+                        .await
+                        .is_ok_and(|u| {
+                            !u.is_deleted && !u.is_forbidden && u.owner == t.organization
+                        })
+                };
+                let is_active = Utc::now().timestamp() < exp && account_active;
 
                 Ok(IntrospectResponse {
                     active: is_active,

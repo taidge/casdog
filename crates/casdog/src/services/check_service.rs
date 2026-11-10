@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 
 use regex::Regex;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use crate::error::{AppError, AppResult};
 
@@ -396,87 +396,143 @@ impl CheckService {
         }
     }
 
-    /// Check login permission - whether user has permission to access app
-    /// If allow-only permissions exist for this app and user is not in allow list, deny.
-    /// If deny permissions exist for this app and user is in deny list, deny.
+    /// Evaluate application login restrictions against the normalized RBAC schema.
+    /// Permissions are tenant-owned; membership is represented by user_roles and
+    /// role_permissions, never by nonexistent JSON columns on permissions/roles.
     pub async fn check_login_permission(
         pool: &PgPool,
         user_id: &str,
         app_id: &str,
     ) -> AppResult<()> {
-        // Check if there are any "allow" permissions for this app
-        let allow_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM permissions WHERE resource_id = $1 AND effect = 'allow' AND is_deleted = false",
+        let mut conn = pool.acquire().await?;
+        Self::check_login_permission_conn(&mut conn, user_id, app_id).await
+    }
+
+    /// Reuse the caller's transaction connection so locked login flows need no
+    /// second pool slot and policy reads share the transaction.
+    pub async fn check_login_permission_conn(
+        conn: &mut PgConnection,
+        user_id: &str,
+        app_id: &str,
+    ) -> AppResult<()> {
+        let (user_owner, admin): (String, bool) = sqlx::query_as(
+            "SELECT owner,is_admin FROM users WHERE id=$1 AND is_deleted=false AND is_forbidden=false")
+            .bind(user_id).fetch_optional(&mut *conn).await?
+            .ok_or_else(|| AppError::Authorization("User is unavailable".into()))?;
+        let (app_owner, app_name, organization): (String, String, String) = sqlx::query_as(
+            "SELECT owner,name,organization FROM applications WHERE id=$1 AND is_deleted=false",
         )
         .bind(app_id)
-        .fetch_one(pool)
-        .await?;
-
-        if allow_count > 0 {
-            // There are allow-list permissions; check if user is in the allow list
-            let user_allowed: bool = sqlx::query_scalar(
-                r#"
-                SELECT EXISTS(
-                    SELECT 1 FROM permissions p
-                    WHERE p.resource_id = $1
-                      AND p.effect = 'allow'
-                      AND p.is_deleted = false
-                      AND (
-                          p.users::jsonb @> to_jsonb($2::text)
-                          OR EXISTS (
-                              SELECT 1 FROM roles r
-                              WHERE r.is_deleted = false
-                                AND p.roles::jsonb @> to_jsonb(r.name::text)
-                                AND r.users::jsonb @> to_jsonb($2::text)
-                          )
-                      )
-                )
-                "#,
-            )
-            .bind(app_id)
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
-
-            if !user_allowed {
-                return Err(AppError::Authorization(
-                    "You do not have permission to access this application".to_string(),
-                ));
-            }
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| AppError::Authorization("Application is unavailable".into()))?;
+        if user_owner == "built-in" && admin {
+            return Ok(());
         }
-
-        // Check if there are any "deny" permissions for this user on this app
-        let user_denied: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 FROM permissions p
-                WHERE p.resource_id = $1
-                  AND p.effect = 'deny'
-                  AND p.is_deleted = false
-                  AND (
-                      p.users::jsonb @> to_jsonb($2::text)
-                      OR EXISTS (
-                          SELECT 1 FROM roles r
-                          WHERE r.is_deleted = false
-                            AND p.roles::jsonb @> to_jsonb(r.name::text)
-                            AND r.users::jsonb @> to_jsonb($2::text)
-                      )
-                  )
-            )
-            "#,
-        )
-        .bind(app_id)
-        .bind(user_id)
-        .fetch_one(pool)
-        .await?;
-
-        if user_denied {
+        if user_owner != organization {
             return Err(AppError::Authorization(
-                "Access to this application has been denied for your account".to_string(),
+                "Application belongs to another organization".into(),
             ));
         }
-
+        // Tenant administrators can maintain their own applications even while a
+        // login permission is being configured, matching the upstream admin rule.
+        if admin {
+            return Ok(());
+        }
+        let permissions: Vec<(String, String, String, bool)> = sqlx::query_as(
+            r#"SELECT p.resources,p.actions,p.effect,
+                EXISTS(SELECT 1 FROM role_permissions rp
+                    JOIN roles r ON r.id=rp.role_id
+                    JOIN user_roles ur ON ur.role_id=r.id
+                    WHERE rp.permission_id=p.id AND ur.user_id=$1
+                      AND r.owner=$2 AND r.is_enabled=true AND r.is_deleted=false)
+                FROM permissions p WHERE p.owner=$2 AND lower(p.resource_type)='application'
+                  AND p.is_enabled=true AND p.is_deleted=false"#,
+        )
+        .bind(user_id)
+        .bind(&organization)
+        .fetch_all(&mut *conn)
+        .await?;
+        let qualified_name = format!("{app_owner}/{app_name}");
+        let mut has_allow = false;
+        let mut allowed = false;
+        for (resources, actions, effect, member) in permissions {
+            let resources = Self::permission_entries(&resources)?;
+            let applicable = resources.iter().any(|resource| {
+                // '*' is the only pattern metacharacter; everything else is literal.
+                let pattern = format!("^{}$", regex::escape(resource).replace("\\*", ".*"));
+                Regex::new(&pattern).is_ok_and(|re| {
+                    [app_id, app_name.as_str(), qualified_name.as_str()]
+                        .iter()
+                        .any(|name| re.is_match(name))
+                })
+            });
+            if !applicable {
+                continue;
+            }
+            let actions = Self::permission_entries(&actions)?;
+            if !actions.iter().any(|action| {
+                matches!(
+                    action.to_ascii_lowercase().as_str(),
+                    "*" | "read" | "login" | "signin"
+                )
+            }) {
+                continue;
+            }
+            match effect.trim().to_ascii_lowercase().as_str() {
+                "deny" if member => {
+                    return Err(AppError::Authorization(
+                        "Access to this application is denied".into(),
+                    ));
+                }
+                "deny" => {}
+                "allow" => {
+                    has_allow = true;
+                    allowed |= member;
+                }
+                _ => {
+                    return Err(AppError::Authorization(
+                        "Invalid application permission effect".into(),
+                    ));
+                }
+            }
+        }
+        if has_allow && !allowed {
+            return Err(AppError::Authorization(
+                "You do not have permission to access this application".into(),
+            ));
+        }
         Ok(())
+    }
+
+    fn permission_entries(raw: &str) -> AppResult<Vec<String>> {
+        let raw = raw.trim();
+        if raw.starts_with('[') || raw.starts_with('"') {
+            let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
+                AppError::Authorization("Invalid application permission list".into())
+            })?;
+            match value {
+                serde_json::Value::String(value) => Ok(vec![value]),
+                serde_json::Value::Array(values) => values
+                    .into_iter()
+                    .map(|value| {
+                        value.as_str().map(str::to_owned).ok_or_else(|| {
+                            AppError::Authorization("Invalid application permission entry".into())
+                        })
+                    })
+                    .collect(),
+                _ => Err(AppError::Authorization(
+                    "Invalid application permission list".into(),
+                )),
+            }
+        } else {
+            Ok(raw
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect())
+        }
     }
 
     /// Record signin error and check if account should be locked.

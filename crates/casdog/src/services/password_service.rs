@@ -1,291 +1,194 @@
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use md5::Md5;
 use sha2::{Digest, Sha256, Sha512};
+use subtle::ConstantTimeEq;
 
 use crate::error::{AppError, AppResult};
 
 pub struct PasswordService;
 
+// Bound work derived from imported hash strings before invoking a password KDF.
+const MAX_PBKDF2_ITERATIONS: u32 = 2_000_000;
+
 impl PasswordService {
-    /// Hash password using the specified algorithm
-    /// Supported: "argon2" (default), "bcrypt", "pbkdf2-sha256", "sha256-salt", "sha512-salt",
-    /// "md5-salt", "plain"
+    /// Supports all Casdoor credential types and the original Casdog aliases.
     pub fn hash_password(
         password: &str,
         password_type: &str,
         salt: Option<&str>,
     ) -> AppResult<String> {
+        let salt = salt.unwrap_or_default();
         match password_type.to_lowercase().as_str() {
-            "argon2" | "" => {
-                // Use argon2 (default)
-                let argon2 = Argon2::default();
-                let salt_string = SaltString::generate(&mut OsRng);
-                let password_hash = argon2
-                    .hash_password(password.as_bytes(), &salt_string)
-                    .map_err(|e| AppError::Internal(format!("Failed to hash password: {}", e)))?;
-                Ok(password_hash.to_string())
-            }
-            "sha256-salt" => {
-                let salt = salt.ok_or_else(|| {
-                    AppError::Validation("Salt required for sha256-salt".to_string())
-                })?;
-                let mut hasher = Sha256::new();
-                hasher.update(password.as_bytes());
-                hasher.update(salt.as_bytes());
-                let result = hasher.finalize();
-                Ok(hex::encode(result))
-            }
-            "sha512-salt" => {
-                let salt = salt.ok_or_else(|| {
-                    AppError::Validation("Salt required for sha512-salt".to_string())
-                })?;
-                let mut hasher = Sha512::new();
-                hasher.update(password.as_bytes());
-                hasher.update(salt.as_bytes());
-                let result = hasher.finalize();
-                Ok(hex::encode(result))
-            }
-            "md5-salt" => {
-                // NOTE: MD5 is insecure but needed for compatibility
-                // Since md5 crate is not available, we use SHA256 as a fallback
-                // This should be replaced with proper MD5 when the md5 crate is added to
-                // dependencies
-                let salt = salt.ok_or_else(|| {
-                    AppError::Validation("Salt required for md5-salt".to_string())
-                })?;
-                tracing::warn!(
-                    "MD5 hashing requested but md5 crate not available, using SHA256 fallback"
-                );
-                let mut hasher = Sha256::new();
-                hasher.update(password.as_bytes());
-                hasher.update(salt.as_bytes());
-                let result = hasher.finalize();
-                Ok(format!("$md5-fallback${}", hex::encode(result)))
-            }
-            "pbkdf2-sha256" => {
-                // Manual PBKDF2 implementation using HMAC-SHA256
-                // For production, consider adding the pbkdf2 crate for proper implementation
-                let salt = salt.ok_or_else(|| {
-                    AppError::Validation("Salt required for pbkdf2-sha256".to_string())
-                })?;
-                let iterations = 100_000;
-                let derived_key =
-                    Self::pbkdf2_sha256(password.as_bytes(), salt.as_bytes(), iterations, 32)?;
-                Ok(format!(
-                    "$pbkdf2-sha256${}${}${}",
-                    iterations,
-                    salt,
-                    hex::encode(derived_key)
-                ))
-            }
+            "argon2" | "argon2id" | "" => Argon2::default()
+                .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+                .map(|hash| hash.to_string())
+                .map_err(|e| AppError::Internal(format!("Failed to hash password: {e}"))),
             "bcrypt" => {
-                // NOTE: bcrypt crate is not available in dependencies
-                // Using SHA256 as a placeholder fallback
-                // This should be replaced with proper bcrypt when the bcrypt crate is added
-                tracing::warn!(
-                    "Bcrypt hashing requested but bcrypt crate not available, using SHA256 fallback"
-                );
-                let mut hasher = Sha256::new();
-                hasher.update(password.as_bytes());
-                let result = hasher.finalize();
-                Ok(format!("$bcrypt-fallback${}", hex::encode(result)))
+                // Go's bcrypt rejects overlong input when creating credentials.
+                if password.len() > 72 {
+                    return Err(AppError::Validation(
+                        "Bcrypt passwords cannot exceed 72 bytes".to_string(),
+                    ));
+                }
+                bcrypt::hash(password, 10)
+                    .map_err(|e| AppError::Validation(format!("Failed to hash password: {e}")))
             }
-            "plain" => {
-                // Plain text password (insecure, for testing/migration only)
-                tracing::warn!(
-                    "Plain text password storage is insecure and should only be used for testing"
-                );
-                Ok(password.to_string())
+            "salt" => Ok(Self::salted_digest::<Sha256>(password, salt)),
+            "sha512-salt" => Ok(Self::salted_digest::<Sha512>(password, salt)),
+            "md5-salt" => Ok(Self::salted_digest::<Md5>(password, salt)),
+            // Original Casdog format, distinct from Casdoor's `salt` algorithm.
+            "sha256-salt" => Ok(hex::encode(Sha256::digest(format!("{password}{salt}")))),
+            "pbkdf2-salt" => {
+                let decoded = STANDARD
+                    .decode(salt)
+                    .map_err(|_| AppError::Validation("Invalid base64 PBKDF2 salt".to_string()))?;
+                Ok(STANDARD.encode(Self::derive_key::<64>(password, &decoded, 27_500)))
             }
+            "pbkdf2-django" | "pbkdf2-sha256" => {
+                if salt.contains('$') {
+                    return Err(AppError::Validation("Salt cannot contain '$'".to_string()));
+                }
+                if password_type.eq_ignore_ascii_case("pbkdf2-django") {
+                    let key = Self::derive_key::<32>(password, salt.as_bytes(), 260_000);
+                    Ok(format!(
+                        "pbkdf2_sha256$260000${salt}${}",
+                        STANDARD.encode(key)
+                    ))
+                } else {
+                    let key = Self::derive_key::<32>(password, salt.as_bytes(), 100_000);
+                    Ok(format!("$pbkdf2-sha256$100000${salt}${}", hex::encode(key)))
+                }
+            }
+            "plain" => Ok(password.to_string()),
             _ => Err(AppError::Validation(format!(
-                "Unsupported password type: {}",
-                password_type
+                "Unsupported password type: {password_type}"
             ))),
         }
     }
 
-    /// Verify password against hash using the specified algorithm
     pub fn verify_password(
         password: &str,
         password_hash: &str,
         password_type: &str,
         salt: Option<&str>,
     ) -> AppResult<bool> {
-        match password_type.to_lowercase().as_str() {
-            "argon2" | "" => {
-                // Use argon2 (default)
-                let parsed_hash = PasswordHash::new(password_hash).map_err(|e| {
-                    AppError::Internal(format!("Failed to parse password hash: {}", e))
-                })?;
-                let argon2 = Argon2::default();
-                Ok(argon2
-                    .verify_password(password.as_bytes(), &parsed_hash)
-                    .is_ok())
-            }
-            "sha256-salt" => {
-                let salt = salt.ok_or_else(|| {
-                    AppError::Validation("Salt required for sha256-salt".to_string())
-                })?;
-                let mut hasher = Sha256::new();
-                hasher.update(password.as_bytes());
-                hasher.update(salt.as_bytes());
-                let result = hasher.finalize();
-                let computed_hash = hex::encode(result);
-                Ok(computed_hash == password_hash)
-            }
-            "sha512-salt" => {
-                let salt = salt.ok_or_else(|| {
-                    AppError::Validation("Salt required for sha512-salt".to_string())
-                })?;
-                let mut hasher = Sha512::new();
-                hasher.update(password.as_bytes());
-                hasher.update(salt.as_bytes());
-                let result = hasher.finalize();
-                let computed_hash = hex::encode(result);
-                Ok(computed_hash == password_hash)
-            }
-            "md5-salt" => {
-                // Check if it's the fallback format
-                if password_hash.starts_with("$md5-fallback$") {
-                    let hash_part = password_hash.strip_prefix("$md5-fallback$").unwrap();
-                    let salt = salt.ok_or_else(|| {
-                        AppError::Validation("Salt required for md5-salt".to_string())
-                    })?;
-                    let mut hasher = Sha256::new();
-                    hasher.update(password.as_bytes());
-                    hasher.update(salt.as_bytes());
-                    let result = hasher.finalize();
-                    let computed_hash = hex::encode(result);
-                    Ok(computed_hash == hash_part)
-                } else {
-                    // Legacy MD5 hash - would need md5 crate to verify
-                    Err(AppError::Internal(
-                        "Legacy MD5 verification requires md5 crate".to_string(),
-                    ))
-                }
-            }
-            "pbkdf2-sha256" => {
-                // Parse the hash format: $pbkdf2-sha256$iterations$salt$hash
-                let parts: Vec<&str> = password_hash.split('$').collect();
-                if parts.len() != 5 || parts[1] != "pbkdf2-sha256" {
-                    return Err(AppError::Validation(
-                        "Invalid pbkdf2-sha256 hash format".to_string(),
-                    ));
-                }
-
-                let iterations: u32 = parts[2]
-                    .parse()
-                    .map_err(|_| AppError::Validation("Invalid iterations in hash".to_string()))?;
-                let stored_salt = parts[3];
-                let stored_hash = parts[4];
-
-                let derived_key = Self::pbkdf2_sha256(
-                    password.as_bytes(),
-                    stored_salt.as_bytes(),
-                    iterations,
-                    32,
-                )?;
-                let computed_hash = hex::encode(derived_key);
-                Ok(computed_hash == stored_hash)
+        let salt = salt.unwrap_or_default();
+        let kind = password_type.to_lowercase();
+        match kind.as_str() {
+            "argon2" | "argon2id" | "" => {
+                let Ok(parsed) = PasswordHash::new(password_hash) else {
+                    return Ok(false);
+                };
+                let valid = Argon2::default()
+                    .verify_password(password.as_bytes(), &parsed)
+                    .is_ok();
+                // Casdoor accepts older records hashed with password + salt, too.
+                Ok(valid
+                    || (kind == "argon2id"
+                        && !salt.is_empty()
+                        && Argon2::default()
+                            .verify_password(format!("{password}{salt}").as_bytes(), &parsed)
+                            .is_ok()))
             }
             "bcrypt" => {
-                // Check if it's the fallback format
-                if password_hash.starts_with("$bcrypt-fallback$") {
-                    let hash_part = password_hash.strip_prefix("$bcrypt-fallback$").unwrap();
-                    let mut hasher = Sha256::new();
-                    hasher.update(password.as_bytes());
-                    let result = hasher.finalize();
-                    let computed_hash = hex::encode(result);
-                    Ok(computed_hash == hash_part)
-                } else {
-                    // Legacy bcrypt hash - would need bcrypt crate to verify
-                    Err(AppError::Internal(
-                        "Legacy bcrypt verification requires bcrypt crate".to_string(),
-                    ))
+                // Read legacy Casdog fallback hashes for migration, never generate them.
+                if let Some(old) = password_hash.strip_prefix("$bcrypt-fallback$") {
+                    return Ok(Self::equal(&hex::encode(Sha256::digest(password)), old));
                 }
+                let Some(cost) = password_hash
+                    .split('$')
+                    .nth(2)
+                    .and_then(|s| s.parse::<u32>().ok())
+                else {
+                    return Ok(false);
+                };
+                if !(4..=16).contains(&cost) {
+                    return Ok(false);
+                }
+                Ok(bcrypt::verify(password, password_hash).unwrap_or(false))
             }
-            "plain" => {
-                // Plain text comparison
-                Ok(password == password_hash)
+            "salt" => Ok(Self::verify_digest::<Sha256>(password, password_hash, salt)),
+            "sha512-salt" => Ok(Self::verify_digest::<Sha512>(password, password_hash, salt)
+                // Read the old Casdog single-hash format as well.
+                || Self::equal(&hex::encode(Sha512::digest(format!("{password}{salt}"))), password_hash)),
+            "md5-salt" => {
+                if let Some(old) = password_hash.strip_prefix("$md5-fallback$") {
+                    return Ok(Self::equal(
+                        &hex::encode(Sha256::digest(format!("{password}{salt}"))),
+                        old,
+                    ));
+                }
+                Ok(Self::verify_digest::<Md5>(password, password_hash, salt))
+            }
+            "pbkdf2-django" | "pbkdf2-sha256" => {
+                let parts: Vec<_> = password_hash.split('$').collect();
+                let (rounds, stored_salt, expected, django) = match parts.as_slice() {
+                    ["pbkdf2_sha256", rounds, salt, hash] if kind == "pbkdf2-django" => {
+                        (*rounds, *salt, *hash, true)
+                    }
+                    ["", "pbkdf2-sha256", rounds, salt, hash] if kind == "pbkdf2-sha256" => {
+                        (*rounds, *salt, *hash, false)
+                    }
+                    _ => return Ok(false),
+                };
+                let Ok(rounds) = rounds.parse::<u32>() else {
+                    return Ok(false);
+                };
+                if !(1..=MAX_PBKDF2_ITERATIONS).contains(&rounds) {
+                    return Ok(false);
+                }
+                let key = Self::derive_key::<32>(password, stored_salt.as_bytes(), rounds);
+                let computed = if django {
+                    STANDARD.encode(key)
+                } else {
+                    hex::encode(key)
+                };
+                Ok(Self::equal(&computed, expected))
+            }
+            "pbkdf2-salt" | "sha256-salt" | "plain" => {
+                let computed = Self::hash_password(password, &kind, Some(salt))?;
+                Ok(Self::equal(&computed, password_hash))
             }
             _ => Err(AppError::Validation(format!(
-                "Unsupported password type: {}",
-                password_type
+                "Unsupported password type: {password_type}"
             ))),
         }
     }
 
-    /// Generate a random salt
     pub fn generate_salt() -> String {
-        let salt = SaltString::generate(&mut OsRng);
-        salt.to_string()
+        SaltString::generate(&mut OsRng).to_string()
     }
 
-    /// Manual PBKDF2-HMAC-SHA256 implementation
-    /// This is a simplified implementation. For production, use the pbkdf2 crate.
-    fn pbkdf2_sha256(
-        password: &[u8],
-        salt: &[u8],
-        iterations: u32,
-        output_len: usize,
-    ) -> AppResult<Vec<u8>> {
-        let mut result = Vec::with_capacity(output_len);
-        let mut block_index = 1u32;
-
-        while result.len() < output_len {
-            // HMAC for block
-            let mut u = Self::hmac_sha256(password, &[salt, &block_index.to_be_bytes()].concat());
-            let mut current_block = u.clone();
-
-            for _ in 1..iterations {
-                u = Self::hmac_sha256(password, &u);
-                for (i, &byte) in u.iter().enumerate() {
-                    current_block[i] ^= byte;
-                }
-            }
-
-            result.extend_from_slice(&current_block);
-            block_index += 1;
-        }
-
-        result.truncate(output_len);
-        Ok(result)
+    fn equal(left: &str, right: &str) -> bool {
+        bool::from(left.as_bytes().ct_eq(right.as_bytes()))
     }
 
-    /// Simple HMAC-SHA256 implementation
-    fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-        const BLOCK_SIZE: usize = 64;
-
-        let mut key_padded = vec![0u8; BLOCK_SIZE];
-        if key.len() > BLOCK_SIZE {
-            let mut hasher = Sha256::new();
-            hasher.update(key);
-            let hashed = hasher.finalize();
-            key_padded[..hashed.len()].copy_from_slice(&hashed);
+    // Casdoor hashes the hex digest again when a nonempty salt is present.
+    fn salted_digest<D: Digest>(password: &str, salt: &str) -> String {
+        let first = hex::encode(D::digest(password.as_bytes()));
+        if salt.is_empty() {
+            first
         } else {
-            key_padded[..key.len()].copy_from_slice(key);
+            hex::encode(D::digest(format!("{first}{salt}")))
         }
+    }
 
-        let mut ipad = vec![0x36u8; BLOCK_SIZE];
-        let mut opad = vec![0x5cu8; BLOCK_SIZE];
+    fn verify_digest<D: Digest>(password: &str, expected: &str, salt: &str) -> bool {
+        Self::equal(&Self::salted_digest::<D>(password, salt), expected)
+            || (salt.is_empty()
+                && Self::equal(
+                    &Self::salted_digest::<D>(&hex::encode(D::digest(password.as_bytes())), ""),
+                    expected,
+                ))
+    }
 
-        for i in 0..BLOCK_SIZE {
-            ipad[i] ^= key_padded[i];
-            opad[i] ^= key_padded[i];
-        }
-
-        let mut inner_hasher = Sha256::new();
-        inner_hasher.update(&ipad);
-        inner_hasher.update(data);
-        let inner_hash = inner_hasher.finalize();
-
-        let mut outer_hasher = Sha256::new();
-        outer_hasher.update(&opad);
-        outer_hasher.update(&inner_hash);
-        let outer_hash = outer_hasher.finalize();
-
-        outer_hash.to_vec()
+    fn derive_key<const N: usize>(password: &str, salt: &[u8], rounds: u32) -> [u8; N] {
+        let mut key = [0u8; N];
+        pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, rounds, &mut key);
+        key
     }
 }
 
@@ -294,111 +197,187 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_argon2_hash_and_verify() {
-        let password = "SecurePassword123!";
-        let hash = PasswordService::hash_password(password, "argon2", None).unwrap();
-
-        // Verify correct password
-        assert!(PasswordService::verify_password(password, &hash, "argon2", None).unwrap());
-
-        // Verify incorrect password
-        assert!(!PasswordService::verify_password("WrongPassword", &hash, "argon2", None).unwrap());
+    fn casdoor_digest_vectors() {
+        // Independently calculated with Python hashlib using Casdoor cred/*.go formats.
+        for (kind, salt, expected) in [
+            (
+                "salt",
+                "salt",
+                "92d690d4eb4a598d5362f7196dba110e3974a9ea58eb9363be73e987d738afc6",
+            ),
+            ("md5-salt", "salt", "d514dee5e76bbb718084294c835f312c"),
+            (
+                "sha512-salt",
+                "salt",
+                "0a610f0bbf7a92accc7e962c53ef3ed7d7d2cabb16139ae169555a6685056b405fa4a3edb041f27e6d8c29bea70eb9bd89bad9fcfcdf05e23b1b8b99ad1256a5",
+            ),
+            (
+                "salt",
+                "",
+                "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
+            ),
+            ("md5-salt", "", "5f4dcc3b5aa765d61d8327deb882cf99"),
+        ] {
+            assert_eq!(
+                PasswordService::hash_password("password", kind, Some(salt)).unwrap(),
+                expected
+            );
+            assert!(
+                PasswordService::verify_password("password", expected, kind, Some(salt)).unwrap()
+            );
+            assert!(
+                !PasswordService::verify_password("wrong", expected, kind, Some(salt)).unwrap()
+            );
+        }
     }
 
     #[test]
-    fn test_sha256_salt_hash_and_verify() {
-        let password = "SecurePassword123!";
-        let salt = "randomsalt123";
-        let hash = PasswordService::hash_password(password, "sha256-salt", Some(salt)).unwrap();
+    fn casdoor_unsalted_legacy_digest_vectors() {
+        for (kind, expected) in [
+            (
+                "salt",
+                "113459eb7bb31bddee85ade5230d6ad5d8b2fb52879e00a84ff6ae1067a210d3",
+            ),
+            ("md5-salt", "696d29e0940a4957748fe3fc9efd22a3"),
+            (
+                "sha512-salt",
+                "afe99137967ee6f5ec8f08df89dd8076db932e13d4ca8d7b32feda3dc919ae3e1657cf30616523d28500727755eddad5a6e18fe255b407a9c5f6dd8de1a43b99",
+            ),
+        ] {
+            assert!(PasswordService::verify_password("password", expected, kind, None).unwrap());
+            assert!(!PasswordService::verify_password("wrong", expected, kind, None).unwrap());
+        }
+    }
 
-        // Verify correct password
-        assert!(
-            PasswordService::verify_password(password, &hash, "sha256-salt", Some(salt)).unwrap()
+    #[test]
+    fn casdoor_pbkdf2_vectors() {
+        let keycloak = "p6XETX9kSIy9ZwWTiGafUdPW9KUJsfJSWQD9lWRuomav7bGCMfY03kxznJu2emdUprJ3DVemHMlpE5c0+dmsAA==";
+        let django = "pbkdf2_sha256$260000$salt$BOAEc9gQ0CEXQRxBUdHBbIFI/Fh0OEwXzUsCN5cI+kQ=";
+        assert_eq!(
+            PasswordService::hash_password("password", "pbkdf2-salt", Some("c2FsdA==")).unwrap(),
+            keycloak
         );
-
-        // Verify incorrect password
+        assert_eq!(
+            PasswordService::hash_password("password", "pbkdf2-django", Some("salt")).unwrap(),
+            django
+        );
         assert!(
-            !PasswordService::verify_password("WrongPassword", &hash, "sha256-salt", Some(salt))
+            PasswordService::verify_password("password", keycloak, "pbkdf2-salt", Some("c2FsdA=="))
                 .unwrap()
         );
-    }
-
-    #[test]
-    fn test_sha512_salt_hash_and_verify() {
-        let password = "SecurePassword123!";
-        let salt = "randomsalt456";
-        let hash = PasswordService::hash_password(password, "sha512-salt", Some(salt)).unwrap();
-
-        // Verify correct password
         assert!(
-            PasswordService::verify_password(password, &hash, "sha512-salt", Some(salt)).unwrap()
-        );
-
-        // Verify incorrect password
-        assert!(
-            !PasswordService::verify_password("WrongPassword", &hash, "sha512-salt", Some(salt))
+            !PasswordService::verify_password("wrong", keycloak, "pbkdf2-salt", Some("c2FsdA=="))
                 .unwrap()
         );
+        assert!(
+            PasswordService::verify_password("password", django, "pbkdf2-django", None).unwrap()
+        );
+        assert!(!PasswordService::verify_password("wrong", django, "pbkdf2-django", None).unwrap());
     }
 
     #[test]
-    fn test_pbkdf2_sha256_hash_and_verify() {
-        let password = "SecurePassword123!";
-        let salt = "randomsalt789";
-        let hash = PasswordService::hash_password(password, "pbkdf2-sha256", Some(salt)).unwrap();
-
-        // Verify correct password
-        assert!(PasswordService::verify_password(password, &hash, "pbkdf2-sha256", None).unwrap());
-
-        // Verify incorrect password
+    fn malformed_pbkdf2_is_rejected_before_expensive_work() {
+        for hash in [
+            "",
+            "pbkdf2_sha256$0$salt$hash",
+            "pbkdf2_sha256$-1$salt$hash",
+            "pbkdf2_sha256$4294967295$salt$hash",
+            "pbkdf2_sha1$1$salt$hash",
+        ] {
+            assert!(
+                !PasswordService::verify_password("password", hash, "pbkdf2-django", None).unwrap()
+            );
+        }
         assert!(
-            !PasswordService::verify_password("WrongPassword", &hash, "pbkdf2-sha256", None)
-                .unwrap()
+            PasswordService::hash_password("password", "pbkdf2-salt", Some("!invalid!")).is_err()
         );
     }
 
     #[test]
-    fn test_plain_hash_and_verify() {
-        let password = "PlainPassword";
-        let hash = PasswordService::hash_password(password, "plain", None).unwrap();
-
-        assert_eq!(hash, password);
-        assert!(PasswordService::verify_password(password, &hash, "plain", None).unwrap());
-        assert!(!PasswordService::verify_password("WrongPassword", &hash, "plain", None).unwrap());
+    fn real_bcrypt_and_argon2id_roundtrip() {
+        for kind in [
+            "bcrypt",
+            "argon2id",
+            "argon2",
+            "pbkdf2-sha256",
+            "sha256-salt",
+            "plain",
+        ] {
+            let hash = PasswordService::hash_password("password", kind, Some("salt")).unwrap();
+            assert!(!hash.contains("fallback"));
+            if kind == "bcrypt" {
+                assert!(hash.starts_with("$2"));
+            }
+            assert!(
+                PasswordService::verify_password("password", &hash, kind, Some("salt")).unwrap()
+            );
+            assert!(!PasswordService::verify_password("wrong", &hash, kind, Some("salt")).unwrap());
+        }
     }
 
     #[test]
-    fn test_generate_salt() {
-        let salt1 = PasswordService::generate_salt();
-        let salt2 = PasswordService::generate_salt();
-
-        // Salts should be different
-        assert_ne!(salt1, salt2);
-        assert!(!salt1.is_empty());
+    fn imported_bcrypt_vectors_and_invalid_inputs() {
+        // Interoperability vectors from the bcrypt crate's Python and Node tests.
+        for hash in [
+            "$2b$04$EGdrhbKUv8Oc9vGiXX0HQOxSg445d458Muh7DAHskb6QbtCvdxcie",
+            "$2a$04$n4Uy0eSnMfvnESYL.bLwuuj0U/ETSsoTpRT9GVk5bektyVVa5xnIi",
+        ] {
+            assert!(
+                PasswordService::verify_password(
+                    "correctbatteryhorsestapler",
+                    hash,
+                    "bcrypt",
+                    None
+                )
+                .unwrap()
+            );
+            assert!(!PasswordService::verify_password("wrong", hash, "bcrypt", None).unwrap());
+        }
+        for hash in ["invalid", "$2a$xx$invalid", "$2b$31$invalid"] {
+            assert!(!PasswordService::verify_password("password", hash, "bcrypt", None).unwrap());
+        }
+        assert!(PasswordService::hash_password(&"x".repeat(73), "bcrypt", None).is_err());
     }
 
     #[test]
-    fn test_bcrypt_fallback() {
-        let password = "TestPassword123";
-        let hash = PasswordService::hash_password(password, "bcrypt", None).unwrap();
-
-        assert!(hash.starts_with("$bcrypt-fallback$"));
-        assert!(PasswordService::verify_password(password, &hash, "bcrypt", None).unwrap());
+    fn casdoor_argon2id_legacy_salt_is_accepted() {
+        let hash = PasswordService::hash_password("passwordsalt", "argon2id", None).unwrap();
+        assert!(
+            PasswordService::verify_password("password", &hash, "argon2id", Some("salt")).unwrap()
+        );
+        assert!(
+            !PasswordService::verify_password("password", &hash, "argon2id", Some("other"))
+                .unwrap()
+        );
+        assert!(
+            !PasswordService::verify_password("password", "invalid", "argon2id", None).unwrap()
+        );
     }
 
     #[test]
-    fn test_md5_fallback() {
-        let password = "TestPassword456";
-        let salt = "testsalt";
-        let hash = PasswordService::hash_password(password, "md5-salt", Some(salt)).unwrap();
-
-        assert!(hash.starts_with("$md5-fallback$"));
-        assert!(PasswordService::verify_password(password, &hash, "md5-salt", Some(salt)).unwrap());
+    fn previous_casdog_fallbacks_remain_readable() {
+        let bcrypt = format!(
+            "$bcrypt-fallback${}",
+            hex::encode(Sha256::digest("password"))
+        );
+        let md5 = format!(
+            "$md5-fallback${}",
+            hex::encode(Sha256::digest("passwordsalt"))
+        );
+        for (kind, hash) in [("bcrypt", bcrypt), ("md5-salt", md5)] {
+            assert!(
+                PasswordService::verify_password("password", &hash, kind, Some("salt")).unwrap()
+            );
+            assert!(!PasswordService::verify_password("wrong", &hash, kind, Some("salt")).unwrap());
+        }
     }
 
     #[test]
-    fn test_unsupported_password_type() {
-        let result = PasswordService::hash_password("password", "unsupported", None);
-        assert!(result.is_err());
+    fn unsupported_type_and_random_salts() {
+        assert!(PasswordService::hash_password("password", "unsupported", None).is_err());
+        assert_ne!(
+            PasswordService::generate_salt(),
+            PasswordService::generate_salt()
+        );
     }
 }

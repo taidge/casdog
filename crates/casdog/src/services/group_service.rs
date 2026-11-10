@@ -162,7 +162,7 @@ impl GroupService {
 
     pub async fn get_users_in_group(pool: &PgPool, group_id: &str) -> AppResult<Vec<String>> {
         let users: Vec<(String,)> =
-            sqlx::query_as("SELECT user_id FROM user_groups WHERE group_id = $1")
+            sqlx::query_as("SELECT ug.user_id FROM user_groups ug JOIN users u ON u.id=ug.user_id JOIN groups g ON g.id=ug.group_id WHERE ug.group_id=$1 AND u.owner=g.owner")
                 .bind(group_id)
                 .fetch_all(pool)
                 .await?;
@@ -171,7 +171,7 @@ impl GroupService {
 
     pub async fn get_groups_for_user(pool: &PgPool, user_id: &str) -> AppResult<Vec<String>> {
         let groups: Vec<(String,)> =
-            sqlx::query_as("SELECT group_id FROM user_groups WHERE user_id = $1")
+            sqlx::query_as("SELECT ug.group_id FROM user_groups ug JOIN users u ON u.id=ug.user_id JOIN groups g ON g.id=ug.group_id WHERE ug.user_id=$1 AND u.owner=g.owner")
                 .bind(user_id)
                 .fetch_all(pool)
                 .await?;

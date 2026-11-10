@@ -1,60 +1,300 @@
-use base64::Engine as _;
-use base64::engine::general_purpose;
 use salvo::prelude::*;
+use serde_json::Value;
 use sqlx::{Pool, Postgres};
 
-use crate::error::ErrorResponse;
-use crate::services::{CasbinService, RecordService};
+use crate::error::{AppError, AppResult};
 
-/// Routes that skip authorization entirely (public endpoints).
-/// These are matched by prefix -- if the request path starts with any of these, it is allowed.
-const PUBLIC_PREFIXES: &[&str] = &[
-    "/api/health",
-    "/api/signup",
-    "/api/login",
-    "/api/captcha",
-    "/api/verify-captcha",
-    "/api/get-email-and-phone",
-    "/api/userinfo",
-    "/api/get-app-login",
-    "/api/get-captcha-status",
-    "/api/get-captcha",
-    "/api/callback",
-    "/api/logout",
-    "/api/sso-logout",
-    "/api/webhook",
-    "/api/send-verification-code",
-    "/api/verify-code",
-    "/login/oauth/",
-    "/.well-known/",
-    "/swagger-ui/",
-    "/api-doc/",
-];
+/// Identity supplied only by the validating authentication hoop. Request parameters
+/// and credential-shaped headers are never a source of authorization decisions.
+#[derive(Debug, Clone)]
+pub struct Principal {
+    pub id: String,
+    pub owner: String,
+    pub name: String,
+    pub admin: bool,
+}
 
-/// Exact paths that are always public regardless of method.
-const PUBLIC_EXACT: &[&str] = &[
-    "/api/health",
-    "/api/signup",
-    "/api/login",
-    "/api/get-account",
-    "/api/userinfo",
-    "/api/user",
-    "/api/get-app-login",
-];
+impl Principal {
+    pub fn from_depot(depot: &Depot) -> AppResult<Self> {
+        let read = |key| {
+            depot
+                .get::<String>(key)
+                .ok()
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::Authentication("Authenticated user required".into()))
+        };
+        Ok(Self {
+            id: read("user_id")?,
+            owner: read("user_owner")?,
+            name: read("user_name")?,
+            admin: depot.get::<bool>("is_admin").copied().unwrap_or(false),
+        })
+    }
+    pub fn global_admin(&self) -> bool {
+        self.admin && self.owner == "built-in"
+    }
+    pub fn check_owner(&self, object: &Value, table: &str) -> AppResult<()> {
+        if self.global_admin() {
+            return Ok(());
+        }
+        let own = if table == "organizations" {
+            object.get("name").and_then(Value::as_str) == Some(self.owner.as_str())
+        } else {
+            object.get("owner").and_then(Value::as_str) == Some(self.owner.as_str())
+        };
+        let sync_target_allowed = table != "syncers"
+            || object.get("organization").and_then(Value::as_str) == Some(self.owner.as_str());
+        if own && sync_target_allowed {
+            Ok(())
+        } else {
+            Err(denied())
+        }
+    }
+    pub fn owns_user(&self, object: &Value) -> bool {
+        object.get("owner").and_then(Value::as_str) == Some(self.owner.as_str())
+            && object.get("id").and_then(Value::as_str) == Some(self.id.as_str())
+    }
+}
 
-/// Comprehensive authorization filter hoop.
-///
-/// Based on Casdoor's `routers/authz_filter.go` (`ApiFilter`), this hoop:
-///
-/// 1. Extracts the subject identity from multiple sources (JWT in depot, Basic Auth,
-///    clientId/clientSecret query params, accessKey/accessSecret query params, or anonymous).
-/// 2. Extracts the object owner and name from the request (query params or JSON body).
-/// 3. Enforces authorization using the Casbin 6-tuple: `(sub_owner, sub_name, method, url_path,
-///    obj_owner, obj_name)`.
-/// 4. Skips enforcement for public routes and admin users.
-/// 5. Logs denied requests via `RecordService`.
+fn denied() -> AppError {
+    AppError::Authorization("Permission denied for this tenant or operation".into())
+}
+
+/// Closed table mapping: no request-controlled SQL identifiers.
+pub fn resource_table(resource: &str) -> Option<&'static str> {
+    Some(match resource {
+        "users" => "users",
+        "organizations" => "organizations",
+        "applications" => "applications",
+        "roles" => "roles",
+        "permissions" => "permissions",
+        "providers" => "providers",
+        "tokens" => "tokens",
+        "groups" => "groups",
+        "sessions" => "sessions",
+        "certs" => "certificates",
+        "resources" => "resources",
+        "webhooks" => "webhooks",
+        "syncers" => "syncers",
+        "invitations" => "invitations",
+        "records" => "records",
+        "models" => "casbin_models",
+        "adapters" => "casbin_adapters",
+        "enforcers" => "casbin_enforcers",
+        "rules" => "rules",
+        "sites" => "sites",
+        "products" => "products",
+        "plans" => "plans",
+        "pricings" => "pricings",
+        "subscriptions" => "subscriptions",
+        "payments" => "payments",
+        "transactions" => "transactions",
+        "orders" => "orders",
+        "tickets" => "tickets",
+        "forms" => "forms",
+        _ => return None,
+    })
+}
+
+pub async fn stored_object(pool: &Pool<Postgres>, table: &str, id: &str) -> AppResult<Value> {
+    // All callers pass a literal or resource_table result. REST identifiers are exact IDs.
+    sqlx::query_scalar::<_, Value>(&format!("SELECT to_jsonb(t) FROM {table} t WHERE id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Resource not found".into()))
+}
+
+/// Validate foreign references as well as the row's owner. Otherwise a tenant-owned
+/// membership/application can still grant access to another tenant's identity.
+pub async fn validate_references(
+    pool: &Pool<Postgres>,
+    principal: &Principal,
+    body: &Value,
+) -> AppResult<()> {
+    if principal.global_admin() {
+        return Ok(());
+    }
+    let Some(object) = body.as_object() else {
+        return Err(denied());
+    };
+    for (key, value) in object {
+        let key = snake_case(key);
+        if matches!(key.as_str(), "owner" | "organization") {
+            if value
+                .as_str()
+                .is_some_and(|value| !value.is_empty() && value != principal.owner)
+            {
+                return Err(denied());
+            }
+        }
+        let table = match key.as_str() {
+            "user_id" => Some("users"),
+            "role_id" => Some("roles"),
+            "permission_id" => Some("permissions"),
+            "group_id" | "parent_id" => Some("groups"),
+            "application_id" => Some("applications"),
+            "provider_id" => Some("providers"),
+            "invitation_id" => Some("invitations"),
+            "payment_id" => Some("payments"),
+            "order_id" => Some("orders"),
+            _ => None,
+        };
+        if let Some(table) = table {
+            if let Some(id) = value.as_str().filter(|s| !s.is_empty()) {
+                principal.check_owner(&stored_object(pool, table, id).await?, table)?;
+            }
+        }
+        if matches!(
+            key.as_str(),
+            "application" | "provider" | "model" | "adapter"
+        ) {
+            if let Some(reference) = value.as_str().filter(|s| !s.is_empty()) {
+                let table = match key.as_str() {
+                    "application" => "applications",
+                    "provider" => "providers",
+                    "model" => "casbin_models",
+                    _ => "casbin_adapters",
+                };
+                check_named_reference(pool, principal, table, reference).await?;
+            }
+        }
+        if matches!(
+            key.as_str(),
+            "users" | "roles" | "groups" | "providers" | "permissions"
+        ) {
+            if let Some(values) = value.as_array() {
+                let table = resource_table(&key).ok_or_else(denied)?;
+                for value in values {
+                    let reference = value
+                        .as_str()
+                        .or_else(|| value.get("name").and_then(Value::as_str));
+                    if let Some(reference) = reference {
+                        check_named_reference(pool, principal, table, reference).await?;
+                    } else {
+                        return Err(denied());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Singular commerce/token `user` fields are IAM references; Syncer.user is an
+/// external database login and must not be interpreted as an IAM identity.
+pub async fn validate_resource_references(
+    pool: &Pool<Postgres>,
+    principal: &Principal,
+    body: &Value,
+    table: &str,
+) -> AppResult<()> {
+    validate_references(pool, principal, body).await?;
+    if !principal.global_admin()
+        && matches!(
+            table,
+            "tokens" | "orders" | "payments" | "subscriptions" | "transactions"
+        )
+    {
+        if let Some(user) = body
+            .get("user")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            check_named_reference(pool, principal, "users", user).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn validate_order_targets(
+    pool: &Pool<Postgres>,
+    principal: &Principal,
+    object: &Value,
+) -> AppResult<()> {
+    let mut references = serde_json::Map::new();
+    for key in ["user", "application", "provider", "payment_id"] {
+        if let Some(value) = object.get(key) {
+            references.insert(key.into(), value.clone());
+        }
+    }
+    validate_resource_references(pool, principal, &Value::Object(references), "orders").await
+}
+
+async fn check_named_reference(
+    pool: &Pool<Postgres>,
+    p: &Principal,
+    table: &str,
+    reference: &str,
+) -> AppResult<()> {
+    let object: Option<Value> = if let Some((owner, name)) = reference.split_once('/') {
+        if owner != p.owner {
+            return Err(denied());
+        }
+        sqlx::query_scalar(&format!(
+            "SELECT to_jsonb(t) FROM {table} t WHERE owner=$1 AND name=$2"
+        ))
+        .bind(owner)
+        .bind(name)
+        .fetch_optional(pool)
+        .await?
+    } else {
+        // Downstream resolvers prefer UUIDs over names. Check that exact resolution,
+        // so naming an owned object after another tenant's UUID cannot bypass scope.
+        sqlx::query_scalar(&format!("SELECT to_jsonb(t) FROM {table} t WHERE id=$1 OR (owner=$2 AND name=$1) ORDER BY (id=$1) DESC LIMIT 1"))
+            .bind(reference).bind(&p.owner).fetch_optional(pool).await?
+    };
+    p.check_owner(&object.ok_or_else(denied)?, table)
+}
+
+pub fn validate_profile(body: &Value) -> AppResult<()> {
+    let object = body.as_object().ok_or_else(denied)?;
+    const FIELDS: &[&str] = &[
+        "display_name",
+        "avatar",
+        "first_name",
+        "last_name",
+        "location",
+        "address",
+        "country_code",
+        "region",
+        "language",
+        "affiliation",
+        "title",
+        "homepage",
+        "bio",
+        "tag",
+        "gender",
+        "birthday",
+        "education",
+    ];
+    if object
+        .keys()
+        .all(|key| FIELDS.contains(&snake_case(key).as_str()))
+    {
+        Ok(())
+    } else {
+        Err(denied())
+    }
+}
+
+fn snake_case(key: &str) -> String {
+    let mut result = String::new();
+    for c in key.chars() {
+        if c.is_ascii_uppercase() {
+            result.push('_');
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Mounted only on protected routes, after JwtAuth. Every route is either explicitly
+/// tenant-scoped, delegates to an audited self-service handler, or requires global admin.
 pub struct AuthzFilter;
-
 #[async_trait]
 impl Handler for AuthzFilter {
     async fn handle(
@@ -64,388 +304,409 @@ impl Handler for AuthzFilter {
         res: &mut Response,
         ctrl: &mut FlowCtrl,
     ) {
-        let path = req.uri().path().to_string();
-        let method = req.method().as_str().to_string();
-
-        // Skip public paths
-        if is_public_path(&path) {
-            ctrl.call_next(req, depot, res).await;
-            return;
-        }
-
-        // Check if admin -- admins bypass authorization
-        let is_admin = depot.get::<bool>("is_admin").copied().ok().unwrap_or(false);
-        if is_admin {
-            ctrl.call_next(req, depot, res).await;
-            return;
-        }
-
-        // Extract subject from depot (set by JwtAuth) or try alternative auth sources
-        let (sub_owner, sub_name) = extract_subject(req, depot);
-
-        // "app" subjects (authenticated via clientId/clientSecret) are always allowed,
-        // mirroring Casdoor's `if subOwner == "app" { return true }` in authz.go.
-        if sub_owner == "app" {
-            ctrl.call_next(req, depot, res).await;
-            return;
-        }
-
-        // Normalize the URL path for Casbin matching (collapse protocol-specific sub-paths)
-        let url_path = normalize_url_path(&path);
-
-        // Extract object info from request
-        let (obj_owner, obj_name) = extract_object(req, &path, &method);
-
-        // Get Casbin service from depot (injected via AffixList)
-        let casbin_service = match depot.obtain::<CasbinService>() {
-            Ok(service) => service.clone(),
-            Err(_) => {
-                // If no Casbin service is available, allow through (service may not be configured)
-                tracing::warn!("CasbinService not found in depot, allowing request through");
-                ctrl.call_next(req, depot, res).await;
-                return;
-            }
-        };
-
-        // Enforce authorization: (sub_owner, sub_name, method, url_path, obj_owner, obj_name)
-        match casbin_service
-            .enforce_ex(
-                &sub_owner, &sub_name, &method, &url_path, &obj_owner, &obj_name,
-            )
-            .await
-        {
-            Ok(true) => {
-                if will_log(
-                    &sub_owner, &sub_name, &method, &url_path, &obj_owner, &obj_name,
-                ) {
-                    tracing::debug!(
-                        "Authorization allowed: {}/{} {} {} on {}/{}",
-                        sub_owner,
-                        sub_name,
-                        method,
-                        url_path,
-                        obj_owner,
-                        obj_name
-                    );
-                }
+        match authorize(req, depot).await {
+            Ok(()) => {
                 ctrl.call_next(req, depot, res).await;
             }
-            Ok(false) => {
-                tracing::warn!(
-                    "Authorization denied: {}/{} {} {} on {}/{}",
-                    sub_owner,
-                    sub_name,
-                    method,
-                    url_path,
-                    obj_owner,
-                    obj_name
-                );
-
-                // Log denied request asynchronously via RecordService
-                if let Ok(pool) = depot.obtain::<Pool<Postgres>>() {
-                    let pool = pool.clone();
-                    let owner = sub_owner.clone();
-                    let user = sub_name.clone();
-                    let m = method.clone();
-                    let p = url_path.clone();
-                    tokio::spawn(async move {
-                        let _ = RecordService::log_action(
-                            &pool,
-                            &owner,
-                            Some(&owner),
-                            None,
-                            Some(&user),
-                            &m,
-                            &p,
-                            "authz-denied",
-                            None,
-                        )
-                        .await;
-                    });
-                }
-
-                res.status_code(StatusCode::FORBIDDEN);
-                res.render(Json(ErrorResponse::new(403, "Permission denied")));
+            Err(error) => {
+                error.write(req, depot, res).await;
                 ctrl.skip_rest();
             }
-            Err(e) => {
-                tracing::error!("Authorization check error: {:?}", e);
-                // On error, fail-open for availability -- allow through but log
-                ctrl.call_next(req, depot, res).await;
-            }
         }
     }
 }
 
-/// Determines if a path is public and should skip authorization.
-fn is_public_path(path: &str) -> bool {
-    // Check prefix matches (e.g. "/.well-known/" covers all sub-paths)
-    for prefix in PUBLIC_PREFIXES {
-        if path.starts_with(prefix) {
-            return true;
-        }
+async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
+    let p = Principal::from_depot(depot)?;
+    if p.global_admin() {
+        return Ok(());
     }
-
-    // Check exact matches
-    for exact in PUBLIC_EXACT {
-        if path == *exact {
-            return true;
-        }
-    }
-
-    // Static files are always public
-    if !path.starts_with("/api/")
-        && !path.starts_with("/login/")
-        && !path.starts_with("/cas/")
-        && !path.starts_with("/scim/")
+    let path = req
+        .uri()
+        .path()
+        .trim_end_matches('/')
+        .trim_start_matches("/api/")
+        .to_string();
+    let method = req.method().as_str().to_string();
+    // These handlers bind identity/proofs to the authenticated user themselves.
+    if matches!(
+        path.as_str(),
+        "logout"
+            | "get-account"
+            | "is-session-duplicated"
+            | "get-idp-discovery"
+            | "set-password"
+            | "check-user-password"
+            | "reset-email-or-phone"
+            | "grant-consent"
+            | "revoke-consent"
+            | "sso-logout"
+            | "unlink"
+            | "exit-impersonate-user"
+            | "mfa/setup"
+            | "mfa/verify"
+            | "mfa/enable"
+            | "mfa/setup/initiate"
+            | "mfa/setup/verify"
+            | "mfa/setup/enable"
+            | "mfa/delete"
+            | "mfa/set-preferred"
+            | "delete-mfa"
+            | "set-preferred-mfa"
+            | "webauthn/signup/begin"
+            | "webauthn/signup/finish"
+            | "webauthn/credentials"
+            | "send-email"
+            | "send-sms"
+            | "send-notification"
+            | "oauth/register"
+            | "verification/send-code"
+            | "verification/verify-code"
+            | "verification/reset-email-or-phone"
+    ) || (path.starts_with("webauthn/credentials/") && method == "DELETE")
+        || path == "auth/links"
+        || (path.starts_with("auth/") && (path.ends_with("/unlink") || path.ends_with("/link")))
+        || path == "scim/v2/Users"
+        || path.starts_with("scim/v2/Users/")
     {
-        return true;
+        return Ok(());
     }
 
-    false
-}
-
-/// Extracts the subject (owner, name) from the depot or request.
-///
-/// Priority order:
-/// 1. JWT claims already in depot (set by the JwtAuth hoop)
-/// 2. ClientId + ClientSecret from Basic Auth header or query params
-/// 3. AccessKey + AccessSecret from query params
-/// 4. Falls back to ("anonymous", "anonymous")
-fn extract_subject(req: &Request, depot: &Depot) -> (String, String) {
-    // 1. Try JWT claims from depot (set by JwtAuth or OptionalJwtAuth)
-    let user_owner = depot.get::<String>("user_owner").cloned().ok();
-    let user_name = depot.get::<String>("user_name").cloned().ok();
-    if let (Some(owner), Some(name)) = (user_owner, user_name) {
-        if !owner.is_empty() && !name.is_empty() {
-            return (owner, name);
-        }
+    // These handlers enforce tenant and resource policy against persisted rows.
+    if matches!(
+        path.as_str(),
+        "get-agents"
+            | "get-agent"
+            | "add-agent"
+            | "update-agent"
+            | "delete-agent"
+            | "get-entries"
+            | "get-entry"
+            | "add-entry"
+            | "update-entry"
+            | "delete-entry"
+            | "get-keys"
+            | "get-key"
+            | "add-key"
+            | "update-key"
+            | "delete-key"
+            | "get-servers"
+            | "get-server"
+            | "add-server"
+            | "update-server"
+            | "delete-server"
+            | "get-global-keys"
+            | "get-mcp-access-token"
+            | "get-online-servers"
+            | "get-integrations"
+            | "get-integration"
+            | "install-integration"
+            | "delete-integration"
+            | "get-marketplace-index"
+            | "get-marketplace-bundle"
+            | "get-openclaw-session-graph"
+            | "get-webhook-events"
+            | "get-webhook-event-detail"
+            | "delete-webhook-event"
+            | "replay-webhook-event"
+            | "get-coupons"
+            | "get-coupon"
+            | "add-coupon"
+            | "update-coupon"
+            | "delete-coupon"
+            | "validate-coupon"
+            | "buy-product"
+            | "set-subscription-auto-renew"
+            | "get-dashboard-heatmap"
+            | "get-dashboard-mfa"
+            | "get-dashboard-providers"
+            | "get-setting"
+            | "update-setting"
+            | "get-email-and-phone"
+            | "update-permissions"
+            | "update-cert-domain-expire"
+    ) {
+        return Ok(());
     }
 
-    // 2. Try clientId + clientSecret from Basic Auth or query params
-    if let Some((owner, name)) = extract_from_client_credentials(req) {
-        return (owner, name);
-    }
-
-    // 3. Try accessKey + accessSecret from query params
-    if let Some((_access_key, _access_secret)) = extract_access_keys(req) {
-        // In the Go implementation, this would look up the user by access key.
-        // For now, we return anonymous and let the Casbin policy decide.
-        // A full implementation would call UserService::get_by_access_key here.
-    }
-
-    // 4. Fall back to anonymous
-    ("anonymous".to_string(), "anonymous".to_string())
-}
-
-/// Tries to extract client credentials from Basic Auth header or query params.
-/// Returns `Some(("app", app_name))` if credentials are found and valid-looking.
-fn extract_from_client_credentials(req: &Request) -> Option<(String, String)> {
-    // Try Basic Auth header first
-    let (client_id, client_secret) = if let Some(auth_header) = req
-        .headers()
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(basic) = auth_header.strip_prefix("Basic ") {
-            if let Ok(decoded) = general_purpose::STANDARD.decode(basic.trim()) {
-                if let Ok(credentials) = String::from_utf8(decoded) {
-                    if let Some((id, secret)) = credentials.split_once(':') {
-                        (Some(id.to_string()), Some(secret.to_string()))
-                    } else {
-                        (None, None)
-                    }
-                } else {
-                    (None, None)
-                }
-            } else {
-                (None, None)
-            }
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Authorization database unavailable".into()))?;
+    let body = if matches!(method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
+        let bytes = req
+            .payload()
+            .await
+            .map_err(|_| AppError::Validation("Cannot read request body".into()))?;
+        if bytes.is_empty() {
+            Value::Null
         } else {
-            (None, None)
+            serde_json::from_slice(bytes)
+                .map_err(|_| AppError::Validation("Invalid JSON body".into()))?
         }
     } else {
-        (None, None)
+        Value::Null
     };
 
-    // Fall back to query params
-    let client_id = client_id.or_else(|| req.query::<String>("clientId"));
-    let client_secret = client_secret.or_else(|| req.query::<String>("clientSecret"));
-
-    if let (Some(id), Some(_secret)) = (client_id, client_secret) {
-        if !id.is_empty() {
-            // In the Go implementation, this validates against the application table.
-            // We return "app" as the owner to indicate app-level authentication.
-            // The actual app name would come from looking up the application by client ID.
-            return Some(("app".to_string(), id));
-        }
-    }
-
-    None
-}
-
-/// Tries to extract access key and secret from query params.
-fn extract_access_keys(req: &Request) -> Option<(String, String)> {
-    let access_key = req.query::<String>("accessKey");
-    let access_secret = req.query::<String>("accessSecret");
-
-    if let (Some(key), Some(secret)) = (access_key, access_secret) {
-        if !key.is_empty() && !secret.is_empty() {
-            return Some((key, secret));
-        }
-    }
-
-    None
-}
-
-/// Extracts the object owner and name from the request.
-///
-/// For GET requests, looks at `id` and `owner` query params.
-/// For POST/PUT/DELETE requests, looks at the request body JSON for `owner` and `name` fields.
-fn extract_object(req: &Request, path: &str, method: &str) -> (String, String) {
-    if method == "GET" {
-        // For list endpoints (get-*s pattern), only use owner
-        let is_list =
-            path.starts_with("/api/get-") && path.ends_with('s') && path != "/api/get-policies";
-
-        if !is_list {
-            // Try "id" query param (format: "owner/name")
-            if let Some(id) = req.query::<String>("id") {
-                if let Some((owner, name)) = parse_owner_name_id(&id) {
-                    return (owner, name);
-                }
-            }
-        }
-
-        // Try "owner" query param
-        if let Some(owner) = req.query::<String>("owner") {
-            if !owner.is_empty() {
-                return (owner, String::new());
-            }
-        }
-
-        (String::new(), String::new())
-    } else {
-        // For POST/PUT/DELETE -- try query param "id" first for certain paths
-        if path == "/api/add-policy"
-            || path == "/api/remove-policy"
-            || path == "/api/update-policy"
-            || path == "/api/send-invitation"
+    // Generic compatibility CRUD already checks actual rows, explicit policy grants,
+    // self profile fields and list ownership. Still validate cross-resource references.
+    if let Some((verb, resource)) = path.split_once('-') {
+        let plural = if resource == "pricings" {
+            resource.to_string()
+        } else {
+            format!("{resource}s")
+        };
+        if matches!(verb, "get" | "add" | "update" | "delete")
+            && (resource_table(resource).is_some() || resource_table(&plural).is_some())
         {
-            if let Some(id) = req.query::<String>("id") {
-                if let Some((owner, name)) = parse_owner_name_id(&id) {
-                    return (owner, name);
+            if resource == "organization" && matches!(verb, "add" | "delete") {
+                return Err(denied());
+            }
+            if !body.is_null() {
+                let mut references = body.clone();
+                if resource == "organization" {
+                    if let Some(object) = references.as_object_mut() {
+                        object.remove("owner");
+                    }
                 }
+                let table = resource_table(resource)
+                    .or_else(|| resource_table(&plural))
+                    .ok_or_else(denied)?;
+                validate_resource_references(pool, &p, &references, table).await?;
+            }
+            return Ok(());
+        }
+    }
+    if matches!(
+        path.as_str(),
+        "get-user-orders" | "get-user-payments" | "get-records-filter" | "add-user-keys"
+    ) {
+        if !body.is_null() {
+            validate_references(pool, &p, &body).await?;
+        }
+        return Ok(());
+    }
+
+    if matches!(
+        path.as_str(),
+        "remove-user-from-group"
+            | "get-invitation-info"
+            | "send-invitation"
+            | "run-syncer"
+            | "add-ticket-message"
+    ) {
+        if !p.admin {
+            return Err(denied());
+        }
+        return Ok(()); // each wrapper resolves and authorizes its stored target(s)
+    }
+    if matches!(
+        path.as_str(),
+        "get-sorted-users"
+            | "get-user-count"
+            | "get-organization-applications"
+            | "get-default-application"
+            | "get-ldaps"
+    ) || (path == "ldap" && method == "GET")
+    {
+        if !p.admin {
+            return Err(denied());
+        }
+        if req
+            .query::<String>("owner")
+            .is_some_and(|o| !o.is_empty() && o != p.owner)
+        {
+            return Err(denied());
+        }
+        req.queries_mut().insert("owner".into(), p.owner.clone());
+        return Ok(());
+    }
+    if path == "get-user-application" {
+        if !p.admin {
+            return Err(denied());
+        }
+        let user_id = req.query::<String>("user_id").ok_or_else(denied)?;
+        p.check_owner(&stored_object(pool, "users", &user_id).await?, "users")?;
+        return Ok(());
+    }
+    if path == "get-permissions-by-submitter" {
+        if !p.admin || req.query::<String>("submitter").as_deref() != Some(p.owner.as_str()) {
+            return Err(denied());
+        }
+        return Ok(());
+    }
+    if path == "get-permissions-by-role" {
+        if !p.admin {
+            return Err(denied());
+        }
+        let id = req.query::<String>("role_id").ok_or_else(denied)?;
+        p.check_owner(&stored_object(pool, "roles", &id).await?, "roles")?;
+        return Ok(());
+    }
+    if path == "add-ldap" || (path == "ldap" && method == "POST") {
+        if !p.admin || body.get("owner").and_then(Value::as_str) != Some(p.owner.as_str()) {
+            return Err(denied());
+        }
+        return validate_references(pool, &p, &body).await;
+    }
+    if matches!(
+        path.as_str(),
+        "get-ldap" | "get-ldap-users" | "update-ldap" | "delete-ldap" | "ldap/users"
+    ) || (path.starts_with("ldap/")
+        && !matches!(path.as_str(), "ldap/sync-users" | "ldap/test-connection"))
+    {
+        if !p.admin {
+            return Err(denied());
+        }
+        let id = req
+            .query::<String>("id")
+            .or_else(|| body.get("id").and_then(Value::as_str).map(str::to_string))
+            .or_else(|| req.param::<String>("id"))
+            .ok_or_else(denied)?;
+        p.check_owner(&stored_object(pool, "providers", &id).await?, "providers")?;
+        if !body.is_null() {
+            validate_references(pool, &p, &body).await?;
+        }
+        return Ok(());
+    }
+    if matches!(
+        path.as_str(),
+        "pay-order" | "cancel-order" | "invoice-payment" | "payments/invoice"
+    ) {
+        if !p.admin {
+            return Err(denied());
+        }
+        let table = if path.contains("order") {
+            "orders"
+        } else {
+            "payments"
+        };
+        let id = req.query::<String>("id").ok_or_else(denied)?;
+        let object = stored_object(pool, table, &id).await?;
+        p.check_owner(&object, table)?;
+        if table == "orders" {
+            validate_order_targets(pool, &p, &object).await?;
+        }
+        if let Some(provider) = req.query::<String>("provider_name") {
+            check_named_reference(pool, &p, "providers", &provider).await?;
+        }
+        return Ok(());
+    }
+    let segments: Vec<_> = path.split('/').collect();
+    if let Some(table) = resource_table(segments[0]) {
+        // Administrative operations on collections and foreign-key relationships.
+        if matches!(
+            path.as_str(),
+            "roles/assign" | "permissions/assign" | "groups/add-user" | "groups/remove-user"
+        ) {
+            if !p.admin {
+                return Err(denied());
+            }
+            validate_references(pool, &p, &body).await?;
+            return Ok(());
+        }
+        if segments.len() == 3
+            && matches!(
+                (segments[0], segments[1]),
+                ("roles", "user") | ("permissions", "role")
+            )
+        {
+            let parent_table = if segments[0] == "roles" {
+                "users"
+            } else {
+                "roles"
+            };
+            let object = stored_object(pool, parent_table, segments[2]).await?;
+            p.check_owner(&object, parent_table)?;
+            if !p.admin && !(parent_table == "users" && p.owns_user(&object)) {
+                return Err(denied());
+            }
+            return Ok(());
+        }
+        if segments.len() == 1 {
+            if method == "GET" {
+                if !p.admin && !matches!(table, "users" | "organizations" | "sessions") {
+                    return Err(denied());
+                }
+                if req
+                    .query::<String>("owner")
+                    .is_some_and(|o| !o.is_empty() && o != p.owner)
+                {
+                    return Err(denied());
+                }
+                req.queries_mut().insert("owner".into(), p.owner.clone());
+                return Ok(());
+            }
+            if method == "POST" && p.admin && table != "organizations" {
+                if body.get("owner").and_then(Value::as_str) != Some(p.owner.as_str()) {
+                    return Err(denied());
+                }
+                validate_resource_references(pool, &p, &body, table).await?;
+                return Ok(());
+            }
+            return Err(denied());
+        }
+        if path == "records/filter" {
+            if !p.admin {
+                return Err(denied());
+            }
+            validate_references(pool, &p, &body).await?;
+            return Ok(()); // handler forces owner in its deserialized filter
+        }
+        if matches!(path.as_str(), "invitations/send" | "sessions/is-duplicated") {
+            if !p.admin {
+                return Err(denied());
+            }
+            validate_references(pool, &p, &body).await?;
+            return Ok(());
+        }
+        // Only recognized suffixes may inherit object authorization.
+        if segments.len() > 2
+            && !(segments.len() == 3
+                && matches!(
+                    (segments[0], segments[2]),
+                    ("groups", "users")
+                        | ("syncers", "run")
+                        | ("orders", "pay")
+                        | ("orders", "cancel")
+                ))
+        {
+            return Err(denied());
+        }
+        let object = stored_object(pool, table, segments[1]).await?;
+        p.check_owner(&object, table)?;
+        if !p.admin {
+            match (table, method.as_str()) {
+                ("users", "GET") if p.owns_user(&object) => {}
+                ("users", "PUT" | "PATCH") if p.owns_user(&object) => validate_profile(&body)?,
+                ("organizations", "GET") => {}
+                ("sessions", "GET" | "DELETE")
+                    if object.get("user_id").and_then(Value::as_str) == Some(p.id.as_str()) => {}
+                _ => return Err(denied()),
             }
         }
-
-        // For body-based extraction, we cannot consume the body in a hoop
-        // without breaking downstream handlers. Use query params as the primary source.
-        // The owner/name can also come from the URL path for RESTful routes.
-
-        // Try to extract from URL path for REST-style routes like /api/users/<id>
-        if let Some((owner, name)) = extract_from_rest_path(path) {
-            return (owner, name);
+        if table == "organizations" && method == "DELETE" {
+            return Err(denied());
         }
-
-        // Try "owner" and "name" from query params
-        let owner = req.query::<String>("owner").unwrap_or_default();
-        let name = req.query::<String>("name").unwrap_or_default();
-
-        (owner, name)
-    }
-}
-
-/// Parses an id string in the format "owner/name" into (owner, name).
-fn parse_owner_name_id(id: &str) -> Option<(String, String)> {
-    if let Some((owner, name)) = id.split_once('/') {
-        Some((owner.to_string(), name.to_string()))
-    } else {
-        None
-    }
-}
-
-/// Attempts to extract owner/name from a REST-style path.
-/// For example, `/api/users/built-in/admin` would yield ("built-in", "admin").
-fn extract_from_rest_path(path: &str) -> Option<(String, String)> {
-    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    // Pattern: api/<resource>/<owner>/<name>
-    if segments.len() >= 4 && segments[0] == "api" {
-        let owner = segments[2].to_string();
-        let name = segments[3].to_string();
-        if !owner.is_empty() {
-            return Some((owner, name));
+        if table == "orders" {
+            if segments.len() == 3 {
+                validate_order_targets(pool, &p, &object).await?;
+            }
+            if let Some(provider) = req.query::<String>("provider_name") {
+                check_named_reference(pool, &p, "providers", &provider).await?;
+            }
         }
+        if !body.is_null() {
+            let mut references = body.clone();
+            if table == "organizations" {
+                if let Some(map) = references.as_object_mut() {
+                    map.remove("owner");
+                }
+            }
+            validate_resource_references(pool, &p, &references, table).await?;
+        }
+        return Ok(());
     }
-    None
-}
-
-/// Normalizes URL paths for Casbin matching.
-///
-/// Collapses protocol-specific sub-paths to their base prefix, mirroring the Go
-/// `getUrlPath` function.
-fn normalize_url_path(path: &str) -> String {
-    // CAS protocol paths
-    if path.starts_with("/cas/")
-        && (path.ends_with("/serviceValidate")
-            || path.ends_with("/proxy")
-            || path.ends_with("/proxyValidate")
-            || path.ends_with("/validate")
-            || path.ends_with("/p3/serviceValidate")
-            || path.ends_with("/p3/proxyValidate")
-            || path.ends_with("/samlValidate"))
-    {
-        return "/cas".to_string();
-    }
-
-    // SCIM paths
-    if path.starts_with("/scim") {
-        return "/scim".to_string();
-    }
-
-    // OAuth login paths
-    if path.starts_with("/api/login/oauth") {
-        return "/api/login/oauth".to_string();
-    }
-
-    // WebAuthn paths
-    if path.starts_with("/api/webauthn") {
-        return "/api/webauthn".to_string();
-    }
-
-    // SAML redirect paths
-    if path.starts_with("/api/saml/redirect") {
-        return "/api/saml/redirect".to_string();
-    }
-
-    // Payment notification paths
-    if path.starts_with("/api/notify-payment") {
-        return "/api/notify-payment".to_string();
-    }
-
-    path.to_string()
-}
-
-/// Determines whether a request should be logged.
-///
-/// Mirrors Casdoor's `willLog` -- suppresses logs for anonymous GET requests to
-/// commonly-polled endpoints that would otherwise flood the log.
-fn will_log(
-    sub_owner: &str,
-    sub_name: &str,
-    method: &str,
-    url_path: &str,
-    obj_owner: &str,
-    obj_name: &str,
-) -> bool {
-    if sub_owner == "anonymous"
-        && sub_name == "anonymous"
-        && method == "GET"
-        && (url_path == "/api/get-account" || url_path == "/api/get-app-login")
-        && obj_owner.is_empty()
-        && obj_name.is_empty()
-    {
-        return false;
-    }
-    true
+    // Unclassified global collections, Casbin policy/engine operations, system metrics,
+    // bulk imports, network test operations and payment callbacks remain global-admin only.
+    Err(denied())
 }

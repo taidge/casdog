@@ -1,5 +1,3 @@
-use dioxus::prelude::*;
-use gloo_storage::Storage;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -88,6 +86,16 @@ pub fn t(key: &str, locale: Locale) -> &str {
 
 fn en(key: &str) -> &str {
     match key {
+        "nav.dashboard" => "Dashboard",
+        "page.login" => "Sign in",
+        "page.signup" => "Sign up",
+        "page.account" => "Account",
+        "page.forgot_password" => "Recover password",
+        "page.authorize" => "Authorize",
+        "page.consent" => "Consents",
+        "page.device_auth" => "Device authorization",
+        "page.result" => "Result",
+
         // Common
         "app.name" => "Casdog",
         "common.loading" => "Loading...",
@@ -277,6 +285,16 @@ fn en(key: &str) -> &str {
 
 fn zh(key: &str) -> Option<&'static str> {
     Some(match key {
+        "nav.dashboard" => "仪表盘",
+        "page.login" => "登录",
+        "page.signup" => "注册",
+        "page.account" => "账户",
+        "page.forgot_password" => "找回密码",
+        "page.authorize" => "授权",
+        "page.consent" => "应用许可",
+        "page.device_auth" => "设备授权",
+        "page.result" => "结果",
+
         // Common
         "app.name" => "Casdog",
         "common.loading" => "\u{52a0}\u{8f7d}\u{4e2d}...",
@@ -495,16 +513,5 @@ fn zh(key: &str) -> Option<&'static str> {
         "resource_form.toggle_view" => "\u{5207}\u{6362}\u{89c6}\u{56fe}",
 
         _ => return None,
-    })
-}
-
-/// Returns a reactive signal holding the current Locale.
-/// Call this once at the top level of your app and pass the signal down.
-pub fn use_locale() -> Signal<Locale> {
-    use_signal(|| {
-        gloo_storage::LocalStorage::get::<String>("casdog.locale")
-            .ok()
-            .and_then(|code| Locale::from_code(&code))
-            .unwrap_or(Locale::En)
     })
 }

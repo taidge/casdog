@@ -33,6 +33,17 @@ pub async fn list_organizations(
         .clone();
     let org_service = OrgService::new(pool);
 
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if !principal.global_admin() {
+        let organization = org_service.get_by_name(&principal.owner).await?;
+        return Ok(Json(OrganizationListResponse {
+            data: vec![organization],
+            total: 1,
+            page: 1,
+            page_size: 1,
+        }));
+    }
+
     let query = OrganizationQuery {
         owner: req.query("owner"),
         page: req.query("page"),

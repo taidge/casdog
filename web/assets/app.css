@@ -1,0 +1,18 @@
+/* Casdog application layout on Glory semantic widgets. */
+.shell { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: 100vh; }
+.sidebar { padding: 24px; gap: 9px; overflow-y: auto; max-height: 100vh; position: sticky; top: 0; }
+.main { padding: 32px; min-width: 0; }
+.main h2 { font-size: 26px; line-height: 1.25; margin: 0; }
+.sidebar .sapid-button { color: #e2e8f0 !important; text-align: left; justify-content: flex-start; }
+.sidebar .sapid-button:hover { background-color: #33485f !important; }
+.stack { gap: 14px; align-items: stretch; min-width: 0; }
+.login-box { gap: 14px; }
+.main > .stack, .login-box { padding: 24px; border-radius: 18px; background: var(--surface); }
+.notice { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-soft); }
+.notice:empty { display: none; }
+.hidden { display: none !important; }
+.qr-image { width: 220px; height: 220px; object-fit: contain; }
+.recovery-codes { white-space: pre-wrap; font-family: monospace; user-select: text; }
+.account-tabs { gap: 8px; flex-wrap: wrap; }
+.structured-editor > .stack { gap: 16px; }
+@media (max-width: 760px) { .shell { grid-template-columns: 1fr; } .sidebar { position: static; max-height: 38vh; } .main { padding: 16px; } }

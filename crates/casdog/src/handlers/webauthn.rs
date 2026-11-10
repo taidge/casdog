@@ -222,6 +222,12 @@ pub async fn signup_finish(
         .ok_or_else(|| AppError::Validation("requestId is required".to_string()))?;
     let credential_name = parse_query(req, "name").unwrap_or_else(|| "Passkey".to_string());
     let state = take_registration_state(&request_id)?;
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if state.user_id != principal.id {
+        return Err(AppError::Authorization(
+            "WebAuthn registration belongs to another user".into(),
+        ));
+    }
     let credential: RegisterPublicKeyCredential = serde_json::from_value(body.into_inner())
         .map_err(|e| AppError::Validation(format!("Invalid registration payload: {}", e)))?;
 

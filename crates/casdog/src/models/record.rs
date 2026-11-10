@@ -80,6 +80,7 @@ impl From<Record> for RecordResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RecordFilterRequest {
+    pub owner: Option<String>,
     pub organization: Option<String>,
     pub user: Option<String>,
     pub action: Option<String>,

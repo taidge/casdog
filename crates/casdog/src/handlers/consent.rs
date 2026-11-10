@@ -90,23 +90,27 @@ pub async fn grant_consent(
     }
 
     let application = resolve_application(&pool, &req).await?;
+    if depot.get::<String>("user_owner").ok().map(String::as_str)
+        != Some(application.organization.as_str())
+    {
+        return Err(AppError::Authorization(
+            "Application belongs to another organization".into(),
+        ));
+    }
     if let Some(redirect_uri) = req.redirect_uri.as_deref() {
-        if !application.redirect_uris.is_empty()
-            && !redirect_uri_allowed(&application.redirect_uris, redirect_uri)
-        {
+        if !redirect_uri_allowed(&application.redirect_uris, redirect_uri) {
             return Err(AppError::Authentication(
                 "Redirect URI mismatch".to_string(),
             ));
         }
     }
 
+    crate::services::CheckService::check_login_permission(&pg_pool, &user_id, &application.id)
+        .await?;
+
     ConsentService::grant(&pg_pool, &user_id, &application.id, &scopes).await?;
 
-    let scope_text = if let Some(scope) = req.scope.as_deref() {
-        scope.to_string()
-    } else {
-        scopes.join(" ")
-    };
+    let scope_text = scopes.join(" ");
 
     let code = match (
         req.client_id.as_deref(),
@@ -165,6 +169,13 @@ pub async fn revoke_consent(
     }
 
     let application = resolve_application(&pool, &req).await?;
+    if depot.get::<String>("user_owner").ok().map(String::as_str)
+        != Some(application.organization.as_str())
+    {
+        return Err(AppError::Authorization(
+            "Application belongs to another organization".into(),
+        ));
+    }
     let remaining = ConsentService::revoke(&pg_pool, &user_id, &application.id, &scopes).await?;
 
     Ok(Json(serde_json::json!({

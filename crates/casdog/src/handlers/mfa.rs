@@ -92,23 +92,12 @@ pub async fn verify_mfa_setup(
         .map_err(|_| AppError::Authentication("Not authenticated".to_string()))?;
 
     let mfa_type = req.mfa_type.as_deref().unwrap_or("totp");
-    let mfa = MfaService::get_user_mfa(&pool, &user_id, mfa_type)
-        .await?
-        .ok_or_else(|| {
-            AppError::NotFound("MFA setup not found. Initiate setup first.".to_string())
-        })?;
-
-    let secret = mfa
-        .secret
-        .ok_or_else(|| AppError::Internal("MFA secret not found".to_string()))?;
-
-    let valid = MfaService::verify_totp(&secret, &req.code)?;
-    if !valid {
+    let Some(mfa) = MfaService::confirm_setup(&pool, &user_id, mfa_type, &req.code).await? else {
         return Ok(Json(MfaVerifyResponse {
             success: false,
             recovery_codes: None,
         }));
-    }
+    };
 
     // Parse recovery codes to return them
     let recovery_codes = mfa
@@ -128,7 +117,7 @@ pub async fn verify_mfa_setup(
         (status_code = 200, description = "MFA enabled")
     )
 )]
-pub async fn enable_mfa(depot: &mut Depot) -> Result<&'static str, AppError> {
+pub async fn enable_mfa(depot: &mut Depot) -> Result<Json<serde_json::Value>, AppError> {
     let pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
@@ -139,9 +128,16 @@ pub async fn enable_mfa(depot: &mut Depot) -> Result<&'static str, AppError> {
         .cloned()
         .map_err(|_| AppError::Authentication("Not authenticated".to_string()))?;
 
-    MfaService::enable_mfa(&pool, &user_id, "totp").await?;
+    let verified = MfaService::get_user_mfa(&pool, &user_id, "totp")
+        .await?
+        .is_some_and(|mfa| mfa.is_enabled);
+    if !verified {
+        return Err(AppError::Validation(
+            "Verify the MFA setup code before enabling MFA".to_string(),
+        ));
+    }
 
-    Ok("MFA enabled successfully")
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
 /// Delete MFA
@@ -155,7 +151,7 @@ pub async fn enable_mfa(depot: &mut Depot) -> Result<&'static str, AppError> {
 pub async fn delete_mfa(
     depot: &mut Depot,
     req: JsonBody<MfaDeleteRequest>,
-) -> Result<&'static str, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
@@ -168,7 +164,7 @@ pub async fn delete_mfa(
 
     MfaService::delete_mfa(&pool, &user_id, &req.mfa_type).await?;
 
-    Ok("MFA deleted successfully")
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
 /// Set preferred MFA type

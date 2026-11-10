@@ -1,4 +1,6 @@
 [server]
+# Required external HTTPS origin for social OAuth in production.
+# public_url = "https://identity.example.com"
 host = "127.0.0.1"
 port = 8000
 

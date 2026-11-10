@@ -1,60 +1,13 @@
-use dioxus::prelude::*;
-use serde_json::{Map, Value, json};
-
-use crate::components::form_fields::*;
-use crate::resources::ResourceConfig;
-
-pub const RESOURCE_FORM_CSS: &str = r#"
-.resource-form-container {
-  display: grid;
-  gap: 8px;
-}
-
-.resource-form-tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.resource-form-tab {
-  padding: 8px 14px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: transparent;
-  color: var(--text-soft);
-  cursor: pointer;
-  font: inherit;
-  font-size: 13px;
-  transition: background 160ms ease, color 160ms ease;
-}
-
-.resource-form-tab:hover {
-  background: var(--surface-soft);
-}
-
-.resource-form-tab.active {
-  background: var(--surface-strong);
-  color: #fff;
-  border-color: var(--surface-strong);
-}
-
-.resource-form-section {
-  margin-bottom: 8px;
-}
-
-.resource-form-section-title {
-  font-size: 14px;
-  font-weight: 600;
-  margin: 16px 0 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--line);
-  color: var(--text);
-}
-"#;
-
-/// Field definition for the structured resource form.
+use crate::{resources::ResourceConfig, ui::*};
+use glory::prelude::*;
+use serde_json::{Value, json};
 #[derive(Clone)]
-struct FieldDef {
+struct SelectOption {
+    value: String,
+    label: String,
+}
+#[derive(Clone)]
+pub struct FieldDef {
     key: &'static str,
     label: &'static str,
     kind: FieldKind,
@@ -73,270 +26,157 @@ enum FieldKind {
     Tags,
 }
 
-/// ResourceForm replaces raw JSON editing with typed fields based on the resource type.
-///
-/// Props:
-/// * `config` - The resource configuration (determines which fields to show).
-/// * `value` - The current JSON string being edited.
-/// * `onchange` - Called with the updated JSON string whenever a field changes.
-#[component]
-pub fn ResourceForm(
-    config: ResourceConfig,
-    value: String,
-    onchange: EventHandler<String>,
-) -> Element {
-    let mut view_mode = use_signal(|| "structured".to_string());
-    let mut json_text = use_signal(|| value.clone());
-
-    // Parse the current value
-    let parsed: Value = serde_json::from_str(&value).unwrap_or(Value::Object(Map::new()));
-
-    let fields = fields_for_resource(config.slug);
-    let has_structured = !fields.is_empty();
-
-    // Sync json_text when value changes externally
-    if json_text() != value {
-        json_text.set(value.clone());
-    }
-
-    rsx! {
-        div { class: "resource-form-container",
-            // View mode tabs
-            if has_structured {
-                div { class: "resource-form-tabs",
-                    button {
-                        class: if view_mode() == "structured" { "resource-form-tab active" } else { "resource-form-tab" },
-                        onclick: move |_| {
-                            // Sync from json_text to structured view
-                            view_mode.set("structured".to_string());
-                        },
-                        "Structured"
-                    }
-                    button {
-                        class: if view_mode() == "json" { "resource-form-tab active" } else { "resource-form-tab" },
-                        onclick: move |_| {
-                            view_mode.set("json".to_string());
-                        },
-                        "JSON"
-                    }
-                }
-            }
-
-            if !has_structured || view_mode() == "json" {
-                // JSON editor mode
-                div { class: "editor",
-                    p { class: "section-title", "JSON editor" }
-                    p { "Edit the raw JSON representation of this resource." }
-                    textarea {
-                        value: "{json_text}",
-                        oninput: move |evt: Event<FormData>| {
-                            let new_val = evt.value();
-                            json_text.set(new_val.clone());
-                            onchange.call(new_val);
-                        },
-                    }
-                }
-            } else {
-                // Structured form mode
-                {render_structured_fields(fields, &parsed, onchange)}
-            }
+fn update(editor: Cage<String>, key: &str, value: Value, message: Cage<String>) {
+    match serde_json::from_str::<Value>(&editor.get()) {
+        Ok(Value::Object(mut data)) => {
+            data.insert(key.to_string(), value);
+            editor.set(crate::api::pretty_json(&Value::Object(data)));
+            message.set(String::new());
         }
+        _ => message.set("The resource must be a JSON object.".into()),
     }
 }
-
-fn render_structured_fields(
-    fields: Vec<FieldDef>,
-    parsed: &Value,
-    onchange: EventHandler<String>,
-) -> Element {
-    let parsed_clone = parsed.clone();
-
-    rsx! {
-        div { class: "resource-form-section",
-            {fields.into_iter().map(move |field| {
-                let obj = parsed_clone.as_object();
-                let current_value = obj
-                    .and_then(|m| m.get(field.key))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-
-                render_single_field(field, current_value, &parsed_clone, onchange)
-            })}
-        }
-    }
+fn read(editor: Cage<String>, key: &str) -> Value {
+    serde_json::from_str::<Value>(&editor.get()).unwrap_or(Value::Null)[key].clone()
 }
-
-fn render_single_field(
-    field: FieldDef,
-    current: Value,
-    full_obj: &Value,
-    onchange: EventHandler<String>,
-) -> Element {
-    let key = field.key;
-    let label = field.label.to_string();
-    let required = field.required;
-
-    match field.kind {
-        FieldKind::Text => {
-            let str_val = current.as_str().unwrap_or("").to_string();
-            let full = full_obj.clone();
-            rsx! {
-                TextField {
-                    label,
-                    value: str_val,
-                    required,
-                    oninput: move |new_val: String| {
-                        let updated = set_field(&full, key, Value::String(new_val));
-                        onchange.call(serde_json::to_string_pretty(&updated).unwrap_or_default());
-                    },
+pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>) -> Element {
+    boxed(widget(move |scope| {
+        let raw = scope.cage(false);
+        let mut widgets: Vec<Element> = Vec::new();
+        for field in fields_for_resource(config.slug) {
+            let key = field.key;
+            let name = field.label;
+            let control: Element = match field.kind {
+                FieldKind::Toggle => boxed(
+                    sapid::checkbox()
+                        .label(name)
+                        .checked(scope.bond(move || read(editor, key).as_bool().unwrap_or(false)))
+                        .on_checked_change(move |v| update(editor, key, json!(v), message)),
+                ),
+                FieldKind::Select(options) => {
+                    // Semantic option keys are ASCII tokens. API values can
+                    // contain spaces or other characters, so retain them separately.
+                    let values: Vec<String> = options.iter().map(|option| option.value.clone()).collect();
+                    let selected_values = values.clone();
+                    boxed(
+                        sapid::native_select(key)
+                            .name(name)
+                            .value(scope.bond(move || {
+                                let current = read(editor, key);
+                                selected_values
+                                    .iter()
+                                    .position(|value| current.as_str() == Some(value.as_str()))
+                                    .map(|index| index.to_string())
+                            }))
+                            .options(
+                                options
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, option)| sapid::select_option(index.to_string(), option.label)),
+                            )
+                            .on_value_change(move |selected| {
+                                let value = selected
+                                    .and_then(|key| key.parse::<usize>().ok())
+                                    .and_then(|index| values.get(index))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                update(editor, key, json!(value), message);
+                            }),
+                    )
                 }
-            }
-        }
-        FieldKind::TextArea => {
-            let str_val = current.as_str().unwrap_or("").to_string();
-            let full = full_obj.clone();
-            rsx! {
-                TextArea {
-                    label,
-                    value: str_val,
-                    required,
-                    rows: 4,
-                    oninput: move |new_val: String| {
-                        let updated = set_field(&full, key, Value::String(new_val));
-                        onchange.call(serde_json::to_string_pretty(&updated).unwrap_or_default());
-                    },
-                }
-            }
-        }
-        FieldKind::Password => {
-            let str_val = current.as_str().unwrap_or("").to_string();
-            let full = full_obj.clone();
-            rsx! {
-                PasswordField {
-                    label,
-                    value: str_val,
-                    required,
-                    oninput: move |new_val: String| {
-                        let updated = set_field(&full, key, Value::String(new_val));
-                        onchange.call(serde_json::to_string_pretty(&updated).unwrap_or_default());
-                    },
-                }
-            }
-        }
-        FieldKind::Number => {
-            let num_val = current.as_f64().unwrap_or(0.0);
-            let full = full_obj.clone();
-            rsx! {
-                NumberField {
-                    label,
-                    value: num_val,
-                    required,
-                    oninput: move |new_val: f64| {
-                        let json_num = if new_val == new_val.floor() {
-                            json!(new_val as i64)
+                kind => {
+                    let draft = scope.cage(String::new());
+                    let is_json = matches!(kind, FieldKind::Json);
+                    let is_number = matches!(kind, FieldKind::Number);
+                    let is_tags = matches!(kind, FieldKind::Tags);
+                    scope.effect(move || {
+                        let value = read(editor, key);
+                        draft.set(if is_json {
+                            crate::api::pretty_json(&value)
+                        } else if is_tags {
+                            value
+                                .as_array()
+                                .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
+                                .unwrap_or_default()
                         } else {
-                            json!(new_val)
+                            value.as_str().map(str::to_string).unwrap_or_else(|| {
+                                if value.is_null() {
+                                    String::new()
+                                } else {
+                                    value.to_string()
+                                }
+                            })
+                        });
+                    });
+                    let change = move |next: String| {
+                        draft.set(next.clone());
+                        let parsed = if is_json {
+                            serde_json::from_str(&next).map_err(|e| e.to_string())
+                        } else if is_number {
+                            next.parse::<serde_json::Number>()
+                                .map(Value::Number)
+                                .map_err(|_| "Enter a finite number".to_string())
+                        } else if is_tags {
+                            Ok(json!(next.split(',').map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>()))
+                        } else {
+                            Ok(json!(next))
                         };
-                        let updated = set_field(&full, key, json_num);
-                        onchange.call(serde_json::to_string_pretty(&updated).unwrap_or_default());
-                    },
+                        match parsed {
+                            Ok(value) => update(editor, key, value, message),
+                            Err(error) => message.set(format!("{name}: {error}")),
+                        }
+                    };
+                    if matches!(kind, FieldKind::Json | FieldKind::TextArea) {
+                        boxed(sapid::textarea().name(name).value(draft).on_value_change(change).rows(5))
+                    } else if matches!(kind, FieldKind::Password) {
+                        boxed(sapid::password_input().name(name).value(draft).on_value_change(change))
+                    } else {
+                        boxed(
+                            sapid::text_field()
+                                .name(name)
+                                .value(draft)
+                                .required(field.required)
+                                .on_value_change(change),
+                        )
+                    }
                 }
-            }
-        }
-        FieldKind::Toggle => {
-            let bool_val = current.as_bool().unwrap_or(false);
-            let full = full_obj.clone();
-            rsx! {
-                ToggleField {
-                    label,
-                    checked: bool_val,
-                    onchange: move |new_val: bool| {
-                        let updated = set_field(&full, key, Value::Bool(new_val));
-                        onchange.call(serde_json::to_string_pretty(&updated).unwrap_or_default());
-                    },
-                }
-            }
-        }
-        FieldKind::Json => {
-            let json_str = match &current {
-                Value::Null => String::new(),
-                Value::String(s) => s.clone(),
-                other => serde_json::to_string_pretty(other).unwrap_or_default(),
             };
-            let full = full_obj.clone();
-            rsx! {
-                JsonField {
-                    label,
-                    value: json_str,
-                    required,
-                    rows: 6,
-                    oninput: move |new_val: String| {
-                        let parsed_inner = serde_json::from_str::<Value>(&new_val)
-                            .unwrap_or(Value::String(new_val));
-                        let updated = set_field(&full, key, parsed_inner);
-                        onchange.call(serde_json::to_string_pretty(&updated).unwrap_or_default());
-                    },
-                }
-            }
+            widgets.push(boxed(stack((label(name), control))));
         }
-        FieldKind::Select(options) => {
-            let str_val = current.as_str().unwrap_or("").to_string();
-            let full = full_obj.clone();
-            rsx! {
-                SelectField {
-                    label,
-                    value: str_val,
-                    options,
-                    required,
-                    onchange: move |new_val: String| {
-                        let updated = set_field(&full, key, Value::String(new_val));
-                        onchange.call(serde_json::to_string_pretty(&updated).unwrap_or_default());
-                    },
-                }
-            }
-        }
-        FieldKind::Tags => {
-            let tags: Vec<String> = match &current {
-                Value::Array(arr) => arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect(),
-                Value::String(s) => s
-                    .split(',')
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !t.is_empty())
-                    .collect(),
-                _ => Vec::new(),
-            };
-            let full = full_obj.clone();
-            rsx! {
-                TagsField {
-                    label,
-                    tags,
-                    onchange: move |new_tags: Vec<String>| {
-                        let arr = Value::Array(new_tags.into_iter().map(Value::String).collect());
-                        let updated = set_field(&full, key, arr);
-                        onchange.call(serde_json::to_string_pretty(&updated).unwrap_or_default());
-                    },
-                }
-            }
-        }
-    }
+        let structured = stack(widgets);
+        stack((
+            sapid::button().label("Switch structured / JSON editor").on_press(move || raw.set(!raw.get())),
+            // Both editors keep their identities, including selection and draft state.
+            glory::ui::view()
+                .class_fn(move || {
+                    if raw.get() {
+                        "hidden"
+                    } else {
+                        "structured-editor"
+                    }
+                    .into()
+                })
+                .fill(structured),
+            glory::ui::view()
+                .class_fn(move || {
+                    if raw.get() {
+                        "json-editor"
+                    } else {
+                        "hidden"
+                    }
+                    .into()
+                })
+                .fill(
+                    sapid::textarea()
+                        .name("Resource JSON")
+                        .value(editor)
+                        .on_value_change(move |value| editor.set(value))
+                        .rows(18),
+                ),
+        ))
+        .build(scope)
+    }))
 }
-
-fn set_field(obj: &Value, key: &str, value: Value) -> Value {
-    let mut map = match obj {
-        Value::Object(m) => m.clone(),
-        _ => Map::new(),
-    };
-    map.insert(key.to_string(), value);
-    Value::Object(map)
-}
-
-// ---------------------------------------------------------------------------
-// Field definitions per resource type
-// ---------------------------------------------------------------------------
-
 fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
     match slug {
         "organizations" => vec![

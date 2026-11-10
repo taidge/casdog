@@ -1,12 +1,135 @@
 use jsonwebtoken::{DecodingKey, Validation, decode};
 use salvo::prelude::*;
+use sha2::{Digest, Sha256};
+use sqlx::PgPool;
 
 use crate::config::AppConfig;
-use crate::error::ErrorResponse;
+use crate::error::{AppError, AppResult, ErrorResponse};
 use crate::services::auth_service::Claims;
 
-pub struct JwtAuth;
+pub fn session_fingerprint(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
 
+/// Validate the signed session against current account and revocation state.
+/// A valid signature alone cannot keep a deleted, disabled or reset account signed in.
+pub async fn validate_session_claims(pool: &PgPool, token: &str) -> AppResult<Claims> {
+    let config = AppConfig::get();
+    let mut validation = Validation::default();
+    validation.set_issuer(&[config.jwt.issuer.as_str()]);
+    validation.leeway = 0;
+    let mut claims = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(config.jwt.secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|_| AppError::Authentication("Invalid or expired token".into()))?
+    .claims;
+    let user: Option<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT owner, name, is_admin, last_change_password_time FROM users WHERE id=$1 AND is_deleted=false AND is_forbidden=false")
+        .bind(&claims.sub).fetch_optional(pool).await?;
+    let (owner, name, admin, changed) =
+        user.ok_or_else(|| AppError::Authentication("Account unavailable".into()))?;
+    if owner != claims.owner {
+        return Err(AppError::Authentication(
+            "Account organization changed".into(),
+        ));
+    }
+    validate_credential_epoch(&claims, changed)?;
+    validate_logout_epoch(pool, &claims, &claims.sub).await?;
+    if let Some(id) = claims.impersonator_user_id.as_deref() {
+        let original: Option<(String, Option<String>)> = sqlx::query_as("SELECT owner,last_change_password_time FROM users WHERE id=$1 AND is_admin=true AND NOT is_deleted AND NOT is_forbidden")
+            .bind(id).fetch_optional(pool).await?;
+        let (original_owner, changed) = original
+            .ok_or_else(|| AppError::Authentication("Original administrator unavailable".into()))?;
+        if claims.impersonator_owner.as_deref() != Some(original_owner.as_str()) {
+            return Err(AppError::Authentication(
+                "Original administrator organization changed".into(),
+            ));
+        }
+        validate_credential_epoch(&claims, changed)?;
+        validate_logout_epoch(pool, &claims, id).await?;
+        let session = claims
+            .impersonation_session_id
+            .as_deref()
+            .ok_or_else(|| AppError::Authentication("Impersonation session missing".into()))?;
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id=$1 AND user_id=$2)",
+        )
+        .bind(session)
+        .bind(&claims.sub)
+        .fetch_one(pool)
+        .await?;
+        if !active {
+            return Err(AppError::Authentication(
+                "Impersonation session ended".into(),
+            ));
+        }
+    }
+    let revoked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM revoked_session_tokens WHERE token_hash=$1 AND expires_at > NOW())")
+        .bind(session_fingerprint(token)).fetch_one(pool).await?;
+    if revoked {
+        return Err(AppError::Authentication("Session revoked".into()));
+    }
+    claims.owner = owner;
+    claims.name = name;
+    claims.is_admin &= admin;
+    Ok(claims)
+}
+
+async fn validate_logout_epoch(pool: &PgPool, claims: &Claims, id: &str) -> AppResult<()> {
+    let cutoff: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT invalid_before FROM user_session_epochs WHERE user_id=$1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    validate_credential_epoch(claims, cutoff.map(|t| t.to_rfc3339()))
+}
+
+fn validate_credential_epoch(claims: &Claims, changed: Option<String>) -> AppResult<()> {
+    if let Some(changed) = changed.filter(|s| !s.is_empty()) {
+        let changed = chrono::DateTime::parse_from_rfc3339(&changed)
+            .map_err(|_| AppError::Authentication("Invalid account credential state".into()))?;
+        let stale = match claims.issued_at_ms {
+            Some(issued) => issued <= changed.timestamp_millis(),
+            None => claims.iat <= changed.timestamp(),
+        };
+        if stale {
+            return Err(AppError::Authentication(
+                "Credentials changed; sign in again".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn insert_claims(depot: &mut Depot, claims: Claims) {
+    depot.insert("user_id", claims.sub.clone());
+    depot.insert("user_owner", claims.owner.clone());
+    depot.insert("user_name", claims.name.clone());
+    depot.insert("is_admin", claims.is_admin);
+    if let Some(value) = &claims.impersonator_user_id {
+        depot.insert("impersonator_user_id", value.clone());
+        depot.insert("is_impersonating", true);
+    }
+    for (key, value) in [
+        ("impersonator_owner", &claims.impersonator_owner),
+        ("impersonator_name", &claims.impersonator_name),
+        ("impersonation_session_id", &claims.impersonation_session_id),
+        (
+            "impersonation_application",
+            &claims.impersonation_application,
+        ),
+    ] {
+        if let Some(value) = value {
+            depot.insert(key, value.clone());
+        }
+    }
+    depot.insert("claims", claims);
+}
+
+pub struct JwtAuth;
 #[async_trait]
 impl Handler for JwtAuth {
     async fn handle(
@@ -16,68 +139,32 @@ impl Handler for JwtAuth {
         res: &mut Response,
         ctrl: &mut FlowCtrl,
     ) {
-        let config = AppConfig::get();
-
         let token = req
-            .headers()
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-
-        match token {
-            Some(token) => {
-                match decode::<Claims>(
-                    token,
-                    &DecodingKey::from_secret(config.jwt.secret.as_bytes()),
-                    &Validation::default(),
-                ) {
-                    Ok(token_data) => {
-                        depot.insert("user_id", token_data.claims.sub.clone());
-                        depot.insert("user_owner", token_data.claims.owner.clone());
-                        depot.insert("user_name", token_data.claims.name.clone());
-                        depot.insert("is_admin", token_data.claims.is_admin);
-                        if let Some(impersonator_user_id) =
-                            token_data.claims.impersonator_user_id.clone()
-                        {
-                            depot.insert("impersonator_user_id", impersonator_user_id);
-                            depot.insert("is_impersonating", true);
-                        }
-                        if let Some(impersonator_owner) =
-                            token_data.claims.impersonator_owner.clone()
-                        {
-                            depot.insert("impersonator_owner", impersonator_owner);
-                        }
-                        if let Some(impersonator_name) = token_data.claims.impersonator_name.clone()
-                        {
-                            depot.insert("impersonator_name", impersonator_name);
-                        }
-                        if let Some(impersonation_session_id) =
-                            token_data.claims.impersonation_session_id.clone()
-                        {
-                            depot.insert("impersonation_session_id", impersonation_session_id);
-                        }
-                        if let Some(impersonation_application) =
-                            token_data.claims.impersonation_application.clone()
-                        {
-                            depot.insert("impersonation_application", impersonation_application);
-                        }
-                        depot.insert("claims", token_data.claims);
-                        ctrl.call_next(req, depot, res).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!("JWT validation failed: {:?}", e);
-                        res.status_code(StatusCode::UNAUTHORIZED);
-                        res.render(Json(ErrorResponse::new(401, "Invalid or expired token")));
-                        ctrl.skip_rest();
-                    }
-                }
+            .header::<String>("Authorization")
+            .and_then(|s| s.strip_prefix("Bearer ").map(str::to_owned));
+        let Some(token) = token else {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            res.render(Json(ErrorResponse::new(
+                401,
+                "Missing authorization header",
+            )));
+            ctrl.skip_rest();
+            return;
+        };
+        let result = match depot.obtain::<PgPool>() {
+            Ok(pool) => validate_session_claims(pool, &token).await,
+            Err(_) => Err(AppError::Authentication(
+                "Session validation unavailable".into(),
+            )),
+        };
+        match result {
+            Ok(claims) => {
+                insert_claims(depot, claims);
+                ctrl.call_next(req, depot, res).await;
             }
-            None => {
+            Err(_) => {
                 res.status_code(StatusCode::UNAUTHORIZED);
-                res.render(Json(ErrorResponse::new(
-                    401,
-                    "Missing authorization header",
-                )));
+                res.render(Json(ErrorResponse::new(401, "Invalid or expired session")));
                 ctrl.skip_rest();
             }
         }
@@ -85,7 +172,6 @@ impl Handler for JwtAuth {
 }
 
 pub struct OptionalJwtAuth;
-
 #[async_trait]
 impl Handler for OptionalJwtAuth {
     async fn handle(
@@ -95,48 +181,16 @@ impl Handler for OptionalJwtAuth {
         res: &mut Response,
         ctrl: &mut FlowCtrl,
     ) {
-        let config = AppConfig::get();
-
-        let token = req
-            .headers()
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-
-        if let Some(token) = token {
-            if let Ok(token_data) = decode::<Claims>(
-                token,
-                &DecodingKey::from_secret(config.jwt.secret.as_bytes()),
-                &Validation::default(),
-            ) {
-                depot.insert("user_id", token_data.claims.sub.clone());
-                depot.insert("user_owner", token_data.claims.owner.clone());
-                depot.insert("user_name", token_data.claims.name.clone());
-                depot.insert("is_admin", token_data.claims.is_admin);
-                if let Some(impersonator_user_id) = token_data.claims.impersonator_user_id.clone() {
-                    depot.insert("impersonator_user_id", impersonator_user_id);
-                    depot.insert("is_impersonating", true);
+        if let Some(token) = req
+            .header::<String>("Authorization")
+            .and_then(|s| s.strip_prefix("Bearer ").map(str::to_owned))
+        {
+            if let Ok(pool) = depot.obtain::<PgPool>() {
+                if let Ok(claims) = validate_session_claims(pool, &token).await {
+                    insert_claims(depot, claims);
                 }
-                if let Some(impersonator_owner) = token_data.claims.impersonator_owner.clone() {
-                    depot.insert("impersonator_owner", impersonator_owner);
-                }
-                if let Some(impersonator_name) = token_data.claims.impersonator_name.clone() {
-                    depot.insert("impersonator_name", impersonator_name);
-                }
-                if let Some(impersonation_session_id) =
-                    token_data.claims.impersonation_session_id.clone()
-                {
-                    depot.insert("impersonation_session_id", impersonation_session_id);
-                }
-                if let Some(impersonation_application) =
-                    token_data.claims.impersonation_application.clone()
-                {
-                    depot.insert("impersonation_application", impersonation_application);
-                }
-                depot.insert("claims", token_data.claims);
             }
         }
-
         ctrl.call_next(req, depot, res).await;
     }
 }

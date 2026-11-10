@@ -52,7 +52,7 @@ pub async fn get_permissions_by_role(
     let permissions = sqlx::query_as::<_, Permission>(
         r#"SELECT p.* FROM permissions p
            INNER JOIN role_permissions rp ON p.id = rp.permission_id
-           WHERE rp.role_id = $1 AND p.is_deleted = FALSE
+           WHERE rp.role_id = $1 AND p.is_deleted = FALSE AND p.owner = (SELECT owner FROM roles WHERE id=$1)
            ORDER BY p.created_at DESC"#,
     )
     .bind(&role_id_val)

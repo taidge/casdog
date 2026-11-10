@@ -1,9 +1,7 @@
 //! SPNEGO / Kerberos token parsing and validation.
 //!
-//! Implements real GSSAPI SPNEGO token decoding to extract the Kerberos principal
-//! from `Authorization: Negotiate <token>` headers. When a keytab path is
-//! configured the service can verify tickets; otherwise it falls back to
-//! extracting identity from the parsed token structure or trusted proxy headers.
+//! Decodes untrusted ticket metadata for diagnostics. Ticket parsing alone does
+//! not authenticate a client; no keytab/GSSAPI verifier is currently implemented.
 
 use base64::Engine;
 
@@ -202,17 +200,10 @@ impl SpnegoService {
             pos += consumed;
         }
 
-        // The client principal lives in the encrypted part of the ticket.
-        // Without the service key we cannot decrypt it, but we can use the
-        // realm and construct a reasonable identity. In environments with a
-        // reverse proxy that decrypts the ticket (e.g. mod_auth_kerb), the
-        // authenticated username is forwarded via headers. Here we provide
-        // whatever the token structure reveals.
+        // The client principal is encrypted. Never substitute the service name.
         Ok(SpnegoIdentity {
             realm: realm.clone(),
-            // Without decryption we put the service name as a placeholder.
-            // Real client identity comes from the authenticator or proxy header.
-            client_name: sname_parts.clone(),
+            client_name: Vec::new(),
             service_name: sname_parts,
             ap_req_bytes: data.to_vec(),
         })
@@ -294,50 +285,15 @@ impl SpnegoService {
         Ok((header_len + length, &data[header_len..header_len + length]))
     }
 
-    /// Attempt to extract a username from the Negotiate token, falling back to
-    /// trusted proxy headers and query parameters.
+    /// Authentication is unavailable until a cryptographic ticket verifier exists.
+    /// Neither request headers, query parameters, nor parsed ticket metadata prove identity.
     pub fn extract_identity(
-        negotiate_token: Option<&str>,
-        proxy_header: Option<&str>,
-        query_username: Option<&str>,
+        _negotiate_token: Option<&str>,
+        _proxy_header: Option<&str>,
+        _query_username: Option<&str>,
     ) -> AppResult<String> {
-        // 1. Try parsing the real SPNEGO token
-        if let Some(token) = negotiate_token {
-            match Self::parse_negotiate_token(token) {
-                Ok(identity) => {
-                    if let Some(username) = identity.username() {
-                        return Ok(username.to_string());
-                    }
-                    if !identity.realm.is_empty() {
-                        return Ok(identity.principal());
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!("SPNEGO token parse failed, trying fallbacks: {e}");
-                }
-            }
-        }
-
-        // 2. Trusted reverse-proxy header (X-Kerberos-User, REMOTE_USER)
-        if let Some(username) = proxy_header {
-            let username = username.trim();
-            if !username.is_empty() {
-                // Strip @REALM suffix if present for a short username
-                let short = username.split('@').next().unwrap_or(username);
-                return Ok(short.to_string());
-            }
-        }
-
-        // 3. Explicit query parameter
-        if let Some(username) = query_username {
-            let username = username.trim();
-            if !username.is_empty() {
-                return Ok(username.to_string());
-            }
-        }
-
         Err(AppError::Authentication(
-            "No valid Kerberos identity could be extracted from the request".to_string(),
+            "Kerberos ticket verification is not configured".to_string(),
         ))
     }
 }
@@ -356,21 +312,10 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_identity_proxy_header() {
-        let result =
-            SpnegoService::extract_identity(None, Some("alice@EXAMPLE.COM"), None).unwrap();
-        assert_eq!(result, "alice");
-    }
-
-    #[test]
-    fn test_extract_identity_query() {
-        let result = SpnegoService::extract_identity(None, None, Some("bob")).unwrap();
-        assert_eq!(result, "bob");
-    }
-
-    #[test]
-    fn test_extract_identity_none_fails() {
-        let result = SpnegoService::extract_identity(None, None, None);
-        assert!(result.is_err());
+    fn unverified_identity_is_rejected() {
+        assert!(
+            SpnegoService::extract_identity(None, Some("alice@EXAMPLE.COM"), Some("admin"))
+                .is_err()
+        );
     }
 }

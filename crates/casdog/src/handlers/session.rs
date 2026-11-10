@@ -25,6 +25,23 @@ pub async fn list_sessions(
     let page_size = page_size.into_inner().unwrap_or(10);
     let owner = owner.into_inner();
 
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if !principal.admin {
+        let limit = page_size.clamp(1, 100);
+        let offset = page.max(1).saturating_sub(1).saturating_mul(limit);
+        let sessions: Vec<crate::models::Session> = sqlx::query_as("SELECT * FROM sessions WHERE owner=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT $3 OFFSET $4")
+            .bind(&principal.owner).bind(&principal.id).bind(limit).bind(offset).fetch_all(&pool).await?;
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE owner=$1 AND user_id=$2")
+                .bind(&principal.owner)
+                .bind(&principal.id)
+                .fetch_one(&pool)
+                .await?;
+        return Ok(Json(
+            serde_json::json!({"data": sessions.into_iter().map(SessionResponse::from).collect::<Vec<_>>(), "total": total}),
+        ));
+    }
+
     let (sessions, total) = SessionService::list(&pool, owner.as_deref(), page, page_size).await?;
 
     Ok(Json(serde_json::json!({

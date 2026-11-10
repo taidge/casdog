@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres};
 
 use crate::error::AppError;
-use crate::services::UserService;
+use crate::hoops::authz::Principal;
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ScimListResponse<T: Serialize + ToSchema + Send> {
@@ -51,30 +51,33 @@ pub async fn list_scim_users(
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
-    let start = start_index.into_inner().unwrap_or(1);
-    let page_size = count.into_inner().unwrap_or(20);
+    let principal = Principal::from_depot(depot)?;
+    let start = start_index.into_inner().unwrap_or(1).max(1);
+    let page_size = count.into_inner().unwrap_or(20).clamp(1, 100);
     let offset = (start - 1).max(0);
 
     let users: Vec<(String, String, String, Option<String>, bool)> = sqlx::query_as(
-        "SELECT id, name, display_name, email, is_admin FROM users WHERE is_deleted = FALSE ORDER BY created_at LIMIT $1 OFFSET $2"
+        "SELECT id, name, display_name, email, is_forbidden FROM users WHERE is_deleted = FALSE AND ($3 OR owner=$4) AND ($5 OR id=$6) ORDER BY created_at LIMIT $1 OFFSET $2"
     )
     .bind(page_size)
     .bind(offset)
+    .bind(principal.global_admin()).bind(&principal.owner).bind(principal.admin).bind(&principal.id)
     .fetch_all(&pool)
     .await?;
 
-    let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_deleted = FALSE")
+    let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_deleted = FALSE AND ($1 OR owner=$2) AND ($3 OR id=$4)")
+        .bind(principal.global_admin()).bind(&principal.owner).bind(principal.admin).bind(&principal.id)
         .fetch_one(&pool)
         .await?;
 
     let resources: Vec<ScimUser> = users
         .into_iter()
-        .map(|(id, name, display_name, email, _)| ScimUser {
+        .map(|(id, name, display_name, email, forbidden)| ScimUser {
             schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
             id,
             user_name: name,
             display_name: Some(display_name),
-            active: true,
+            active: !forbidden,
             emails: email.map(|e| {
                 vec![ScimEmail {
                     value: e,
@@ -104,10 +107,12 @@ pub async fn get_scim_user(
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
-    let user: (String, String, String, Option<String>) = sqlx::query_as(
-        "SELECT id, name, display_name, email FROM users WHERE id = $1 AND is_deleted = FALSE",
+    let principal = Principal::from_depot(depot)?;
+    let user: (String, String, String, Option<String>, bool) = sqlx::query_as(
+        "SELECT id, name, display_name, email, is_forbidden FROM users WHERE id = $1 AND is_deleted = FALSE AND ($2 OR owner=$3) AND ($4 OR id=$5)",
     )
     .bind(id.as_str())
+    .bind(principal.global_admin()).bind(&principal.owner).bind(principal.admin).bind(&principal.id)
     .fetch_one(&pool)
     .await
     .map_err(|_| AppError::NotFound("User not found".to_string()))?;
@@ -117,7 +122,7 @@ pub async fn get_scim_user(
         id: user.0,
         user_name: user.1,
         display_name: Some(user.2),
-        active: true,
+        active: !user.4,
         emails: user.3.map(|e| {
             vec![ScimEmail {
                 value: e,

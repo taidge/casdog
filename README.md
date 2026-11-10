@@ -6,11 +6,20 @@
 
 Casdog is an Identity and Access Management (IAM) / Single Sign-On (SSO) server written in Rust, aiming for feature parity with [Casdoor](https://casdoor.org/).
 
+## Compatibility status
+
+Casdog is a partial rewrite, not a drop-in replacement for current Casdoor.
+The [2026-10-28 parity review](docs/parity-review.md) records implemented behavior,
+known gaps and verification. The [route inventory](docs/casdoor-route-inventory.json)
+is reproducible with `python scripts/check-casdoor-parity.py --reference <casdoor-checkout>`.
+Kerberos ticket authentication is currently unavailable: unverified identity claims are rejected.
+
 ## Tech Stack
 
 - **Web Framework**: [Salvo](https://salvo.rs/) — high-performance async web framework
-- **Database**: PostgreSQL (via SQLx)
+- **Database**: PostgreSQL (SQLx for async query paths, Diesel/diesel-async for the rewritten typed data layer)
 - **Authorization Engine**: [Casbin](https://casbin.org/) — RBAC / ABAC policy engine
+- **Frontend**: Glory 0.7.0 and Sapid 0.7.1, compiled to WebAssembly with Trunk
 - **Runtime**: Tokio async runtime
 - **Language**: Rust 2024 Edition (requires Rust 1.93+)
 
@@ -125,6 +134,50 @@ cargo run
 ```
 
 Visit the Swagger UI after startup to explore the full API documentation.
+
+## Frontend development
+
+The frontend uses the latest crates.io releases verified on 2026-11-11,
+[Glory 0.7.0](https://crates.io/crates/glory/0.7.0) and
+[Sapid 0.7.1](https://crates.io/crates/sapid/0.7.1). Building it requires Rust 1.95 or newer.
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
+cd web
+trunk serve
+```
+
+Trunk serves the application on port 8080 and proxies `/api/` to the backend on
+`http://127.0.0.1:8000`. Configure the backend `server.public_url` as
+`http://127.0.0.1:8080` during development so social-login redirects and MFA
+cookies use the frontend origin. Provider callback URLs must use the same origin.
+An optional `CASDOG_API_BASE` environment variable sets the frontend's initial
+API base at compile time.
+
+Build the assets before building the backend to embed the UI in the server.
+
+```bash
+cd web
+trunk build --release
+cd ..
+cargo build --release
+```
+
+Frontend verification runs from `web/`.
+
+```bash
+cargo test
+cargo check --target wasm32-unknown-unknown
+trunk build --release
+npm ci
+npm run check
+```
+
+The browser checks use installed Microsoft Edge by default, or another installed
+Playwright channel selected with `PLAYWRIGHT_CHANNEL`. They exercise the compiled
+WASM application with API fixtures and write screenshots and results beneath
+`web/target/browser-check/`. Backend/database regressions run separately.
 
 ## Project Structure
 

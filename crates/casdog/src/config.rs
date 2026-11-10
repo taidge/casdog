@@ -6,6 +6,8 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
+    #[serde(default)]
+    pub public_url: Option<String>,
     pub host: String,
     pub port: u16,
 }

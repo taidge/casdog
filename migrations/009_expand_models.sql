@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS orders (
     payment_id VARCHAR(100),
     payment_name VARCHAR(100),
     return_url TEXT,
-    user VARCHAR(100),
+    "user" VARCHAR(100),
     plan_name VARCHAR(100),
     pricing_name VARCHAR(100),
     error_text TEXT,

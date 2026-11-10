@@ -32,6 +32,17 @@ pub async fn list_users(
         .clone();
     let user_service = UserService::new(pool);
 
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if !principal.admin {
+        let user = user_service.get_by_id(&principal.id).await?;
+        return Ok(Json(UserListResponse {
+            data: vec![user],
+            total: 1,
+            page: 1,
+            page_size: 1,
+        }));
+    }
+
     let query = UserQuery {
         owner: req.query("owner"),
         page: req.query("page"),

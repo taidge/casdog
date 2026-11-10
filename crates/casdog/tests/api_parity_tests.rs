@@ -22,34 +22,16 @@ use salvo::test::{ResponseExt, TestClient};
 // ---------------------------------------------------------------------------
 
 fn test_service() -> Service {
-    // Initialise a minimal AppConfig so that handlers reading config don't
-    // panic.  The config module uses a global RwLock, so this is idempotent.
-    //
-    // SAFETY: `set_var` is unsafe in edition 2024 because concurrent access
-    // is undefined behaviour.  In tests, we only call this from single-threaded
-    // setup code before spawning any async work, so it is safe here.
-    unsafe {
-        std::env::set_var("CASDOG__SERVER__HOST", "127.0.0.1");
-        std::env::set_var("CASDOG__SERVER__PORT", "8000");
-        std::env::set_var("CASDOG__DATABASE__DRIVER", "postgres");
-        std::env::set_var("CASDOG__DATABASE__URL", "postgres://localhost/casdog_test");
-        std::env::set_var("CASDOG__DATABASE__MAX_CONNECTIONS", "1");
-        std::env::set_var(
-            "CASDOG__JWT__SECRET",
-            "test-secret-key-for-integration-tests",
-        );
-        std::env::set_var("CASDOG__JWT__EXPIRATION_HOURS", "24");
-        std::env::set_var("CASDOG__JWT__ISSUER", "casdog-test");
-        std::env::set_var("CASDOG__CASBIN__MODEL_PATH", "casbin/model.conf");
-        std::env::set_var("CASDOG__LOGGING__LEVEL", "error");
-    }
-    // AppConfig::load reads config files + env overrides.  It may fail if
-    // config/default.toml is missing, so we ignore the error here -- the
-    // global config will remain unset and handlers will fall back.
-    let _ = casdog::config::AppConfig::load();
-
+    initialize_config();
     let router = casdog::routes::create_router();
     Service::new(router)
+}
+
+fn initialize_config() {
+    static INITIALIZED: std::sync::Once = std::sync::Once::new();
+    INITIALIZED.call_once(|| {
+        casdog::config::AppConfig::load().expect("Tests must run from the casdog crate directory");
+    });
 }
 
 // ===================================================================
@@ -585,6 +567,39 @@ async fn cas_p3_service_validate_route_exists() {
     );
 }
 
+#[tokio::test]
+async fn cas_proxy_route_exists() {
+    let service = test_service();
+    let mut res = TestClient::get(
+        "http://127.0.0.1:8000/cas/test-org/test-app/proxy\
+         ?pgt=PGT-test&targetService=http://localhost",
+    )
+    .send(&service)
+    .await;
+
+    let status = res.status_code.unwrap();
+    assert_ne!(
+        status,
+        StatusCode::NOT_FOUND,
+        "GET /cas/:org/:app/proxy route must exist"
+    );
+}
+
+#[tokio::test]
+async fn cas_saml_validate_route_exists() {
+    let service = test_service();
+    let mut res = TestClient::post("http://127.0.0.1:8000/cas/test-org/test-app/samlValidate")
+        .send(&service)
+        .await;
+
+    let status = res.status_code.unwrap();
+    assert_ne!(
+        status,
+        StatusCode::NOT_FOUND,
+        "POST /cas/:org/:app/samlValidate route must exist"
+    );
+}
+
 // ===================================================================
 // 8.  WebAuthn begin endpoints
 // ===================================================================
@@ -882,190 +897,586 @@ async fn callback_post_route_exists() {
 }
 
 // ===================================================================
-// 16. Database-backed integration tests (require PostgreSQL)
+// 16. Casdoor flat compatibility routes
 // ===================================================================
 
 #[tokio::test]
-#[ignore = "Requires a running PostgreSQL instance with Casdog schema"]
+async fn casdoor_flat_resource_routes_require_auth() {
+    let service = test_service();
+    let cases = [
+        ("GET", "http://127.0.0.1:8000/api/get-users"),
+        (
+            "GET",
+            "http://127.0.0.1:8000/api/get-user?id=built-in/admin",
+        ),
+        ("POST", "http://127.0.0.1:8000/api/add-user"),
+        (
+            "POST",
+            "http://127.0.0.1:8000/api/update-user?id=built-in/admin",
+        ),
+        ("POST", "http://127.0.0.1:8000/api/delete-user"),
+        ("GET", "http://127.0.0.1:8000/api/get-applications"),
+        ("POST", "http://127.0.0.1:8000/api/add-application"),
+        ("GET", "http://127.0.0.1:8000/api/get-orders"),
+        ("GET", "http://127.0.0.1:8000/api/get-user-orders"),
+        ("POST", "http://127.0.0.1:8000/api/place-order"),
+        ("GET", "http://127.0.0.1:8000/api/get-user-payments"),
+        ("POST", "http://127.0.0.1:8000/api/add-ticket"),
+        (
+            "POST",
+            "http://127.0.0.1:8000/api/add-ticket-message?id=ticket-1",
+        ),
+        ("GET", "http://127.0.0.1:8000/api/get-forms"),
+        ("GET", "http://127.0.0.1:8000/api/get-records"),
+        ("POST", "http://127.0.0.1:8000/api/add-user-keys"),
+        ("POST", "http://127.0.0.1:8000/api/remove-user-from-group"),
+        (
+            "GET",
+            "http://127.0.0.1:8000/api/get-invitation-info?code=abc",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:8000/api/verify-invitation?code=abc",
+        ),
+        ("POST", "http://127.0.0.1:8000/api/send-invitation"),
+        ("GET", "http://127.0.0.1:8000/api/run-syncer?id=syncer-1"),
+        ("POST", "http://127.0.0.1:8000/api/test-syncer-db"),
+        ("POST", "http://127.0.0.1:8000/api/get-filtered-policies"),
+        ("POST", "http://127.0.0.1:8000/api/update-policy"),
+        ("POST", "http://127.0.0.1:8000/api/remove-policy"),
+    ];
+
+    for (method, url) in cases {
+        let res = match method {
+            "GET" => TestClient::get(url).send(&service).await,
+            "POST" => TestClient::post(url).send(&service).await,
+            _ => unreachable!(),
+        };
+        let status = res.status_code.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {url} should be protected by JwtAuth, got {status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn casdoor_public_alias_routes_exist() {
+    let service = test_service();
+
+    let user_res = TestClient::get("http://127.0.0.1:8000/api/user")
+        .send(&service)
+        .await;
+    assert_eq!(user_res.status_code.unwrap(), StatusCode::UNAUTHORIZED);
+
+    let captcha_res = TestClient::get("http://127.0.0.1:8000/api/get-captcha")
+        .send(&service)
+        .await;
+    assert_ne!(
+        captcha_res.status_code.unwrap(),
+        StatusCode::NOT_FOUND,
+        "GET /api/get-captcha must be routed"
+    );
+
+    let token_res = TestClient::post("http://127.0.0.1:8000/api/login/oauth/access_token")
+        .send(&service)
+        .await;
+    let token_status = token_res.status_code.unwrap();
+    assert_ne!(
+        token_status,
+        StatusCode::NOT_FOUND,
+        "POST /api/login/oauth/access_token must be routed"
+    );
+    assert_ne!(
+        token_status,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "POST must be accepted for /api/login/oauth/access_token"
+    );
+
+    let mcp_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    });
+    let mut mcp_res = TestClient::post("http://127.0.0.1:8000/api/mcp")
+        .json(&mcp_body)
+        .send(&service)
+        .await;
+    assert_eq!(mcp_res.status_code.unwrap(), StatusCode::OK);
+    let mcp_json: serde_json::Value = mcp_res.take_json().await.unwrap();
+    assert_eq!(mcp_json["jsonrpc"], "2.0");
+
+    let webhook_res = TestClient::get("http://127.0.0.1:8000/api/webhook?echostr=123")
+        .send(&service)
+        .await;
+    assert_ne!(
+        webhook_res.status_code.unwrap(),
+        StatusCode::NOT_FOUND,
+        "GET /api/webhook must be routed"
+    );
+}
+
+// ===================================================================
+// 17. Database-backed integration tests (require PostgreSQL)
+// ===================================================================
+
+struct DatabaseFixture {
+    service: Service,
+    pool: sqlx::PgPool,
+    owner: String,
+    admin_id: String,
+    application_id: String,
+    client_id: String,
+    secret: String,
+    auth: String,
+}
+
+async fn expect_json(mut response: Response) -> serde_json::Value {
+    let status = response.status_code.unwrap();
+    let body = response.take_string().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "Unexpected HTTP response: {body}");
+    serde_json::from_str(&body).expect("Expected JSON response")
+}
+
+impl DatabaseFixture {
+    async fn new() -> Self {
+        initialize_config();
+        let url = std::env::var("CASDOG_TEST_DATABASE_URL").expect(
+            "Set CASDOG_TEST_DATABASE_URL to a disposable database with migrations 001-018",
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .unwrap();
+        let diesel = casdog::diesel_pool::create_diesel_pool(&url).await.unwrap();
+        let service = Service::new(casdog::routes::create_router()).hoop(
+            salvo::affix_state::AffixList::new()
+                .inject(pool.clone())
+                .inject(diesel),
+        );
+        let owner = format!("parity-{}", uuid::Uuid::new_v4());
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let application_id = uuid::Uuid::new_v4().to_string();
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let secret = uuid::Uuid::new_v4().to_string();
+        let hash =
+            casdog::services::PasswordService::hash_password("Fixture42!", "argon2", None).unwrap();
+        sqlx::query("INSERT INTO organizations (id,owner,name,display_name,password_options) VALUES ($1,$2,$2,'Parity tenant',$3)")
+            .bind(uuid::Uuid::new_v4().to_string()).bind(&owner).bind(serde_json::json!(["AtLeast8","Aa","AtLeastOneDigit"])).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO users (id,owner,name,display_name,email,password_hash,password_type,is_admin) VALUES ($1,$2,'fixture-admin','Fixture Admin','admin@example.test',$3,'argon2',true)")
+            .bind(&admin_id).bind(&owner).bind(hash).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO applications (id,owner,name,display_name,organization,client_id,client_secret,redirect_uris,enable_password,enable_internal_signup) VALUES ($1,$2,'fixture-app','Fixture App',$2,$3,$4,'https://client.example.test/callback',true,true)")
+            .bind(&application_id).bind(&owner).bind(&client_id).bind(&secret).execute(&pool).await.unwrap();
+        let login = expect_json(TestClient::post("http://127.0.0.1:8000/api/login")
+            .json(&serde_json::json!({"organization":owner,"username":"fixture-admin","password":"Fixture42!","application":"fixture-app","type":"login"}))
+            .send(&service).await).await;
+        assert_eq!(login["user"]["id"], admin_id);
+        let auth = format!("Bearer {}", login["token"].as_str().unwrap());
+        Self {
+            service,
+            pool,
+            owner,
+            admin_id,
+            application_id,
+            client_id,
+            secret,
+            auth,
+        }
+    }
+
+    async fn cleanup(self) {
+        // Every row belongs to a UUID tenant; no seed records are read or modified.
+        for table in [
+            "forms",
+            "tokens",
+            "sessions",
+            "applications",
+            "users",
+            "organizations",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE owner=$1"))
+                .bind(&self.owner)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+        drop(self.service);
+        self.pool.close().await;
+    }
+
+    async fn grant_code(&self, challenge: &str) -> String {
+        let body = expect_json(TestClient::post("http://127.0.0.1:8000/api/grant-consent")
+            .add_header("Authorization", &self.auth, true)
+            .json(&serde_json::json!({
+                "application":format!("{}/fixture-app", self.owner),
+                "grantedScopes":["openid","profile","email"], "clientId":self.client_id,
+                "responseType":"code", "redirectUri":"https://client.example.test/callback",
+                "state":"test-state", "nonce":"test-nonce", "challenge":challenge,"codeChallengeMethod":"S256"
+            })).send(&self.service).await).await;
+        assert_eq!(body["application"], self.application_id);
+        assert_eq!(body["state"], "test-state");
+        assert_eq!(body["redirect_uri"], "https://client.example.test/callback");
+        body["code"]
+            .as_str()
+            .expect("Consent must issue a real authorization code")
+            .to_string()
+    }
+
+    async fn exchange(&self, code: &str, verifier: &str, secret: &str, redirect: &str) -> Response {
+        use base64::Engine;
+        let basic = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:{secret}", self.client_id));
+        let body = format!(
+            "grant_type=authorization_code&code={}&redirect_uri={}&code_verifier={}",
+            urlencoding::encode(code),
+            urlencoding::encode(redirect),
+            urlencoding::encode(verifier)
+        );
+        TestClient::post("http://127.0.0.1:8000/api/login/oauth/access_token")
+            .add_header("Authorization", format!("Basic {basic}"), true)
+            .add_header("Content-Type", "application/x-www-form-urlencoded", true)
+            .body(body)
+            .send(&self.service)
+            .await
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires CASDOG_TEST_DATABASE_URL and migrations 001-018"]
+async fn casdoor_flat_form_endpoints_db_parity() {
+    let f = DatabaseFixture::new().await;
+    let form = serde_json::json!({"owner":f.owner,"name":"test-form","displayName":"Flat Form"});
+    let created = expect_json(
+        TestClient::post("http://127.0.0.1:8000/api/add-form")
+            .add_header("Authorization", &f.auth, true)
+            .json(&form)
+            .send(&f.service)
+            .await,
+    )
+    .await;
+    assert_eq!(created["status"], "ok");
+    assert_eq!(created["data"], true);
+    assert_eq!(created["object"]["displayName"], "Flat Form");
+    let read = expect_json(
+        TestClient::get(format!(
+            "http://127.0.0.1:8000/api/get-form?id={}/test-form",
+            f.owner
+        ))
+        .add_header("Authorization", &f.auth, true)
+        .send(&f.service)
+        .await,
+    )
+    .await;
+    assert_eq!(read["data"]["displayName"], "Flat Form");
+    let list = expect_json(
+        TestClient::get(format!(
+            "http://127.0.0.1:8000/api/get-forms?owner={}&pageSize=10&page=1",
+            f.owner
+        ))
+        .add_header("Authorization", &f.auth, true)
+        .send(&f.service)
+        .await,
+    )
+    .await;
+    assert_eq!(list["data2"], 1);
+    assert_eq!(list["data"][0]["name"], "test-form");
+    let updated = expect_json(TestClient::post("http://127.0.0.1:8000/api/update-form")
+        .add_header("Authorization", &f.auth, true)
+        .json(&serde_json::json!({"owner":f.owner,"name":"test-form","displayName":"Updated Form"})).send(&f.service).await).await;
+    assert_eq!(updated["data"], true);
+    assert_eq!(updated["object"]["displayName"], "Updated Form");
+    let stored: String =
+        sqlx::query_scalar("SELECT display_name FROM forms WHERE owner=$1 AND name='test-form'")
+            .bind(&f.owner)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, "Updated Form");
+    let deleted = expect_json(
+        TestClient::post("http://127.0.0.1:8000/api/delete-form")
+            .add_header("Authorization", &f.auth, true)
+            .json(&form)
+            .send(&f.service)
+            .await,
+    )
+    .await;
+    assert_eq!(deleted["data"], true);
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM forms WHERE owner=$1 AND is_deleted=false")
+            .bind(&f.owner)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    let removed = expect_json(
+        TestClient::get(format!(
+            "http://127.0.0.1:8000/api/get-form?id={}/test-form",
+            f.owner
+        ))
+        .add_header("Authorization", &f.auth, true)
+        .send(&f.service)
+        .await,
+    )
+    .await;
+    assert!(removed["data"].is_null());
+    let remaining = expect_json(
+        TestClient::get(format!(
+            "http://127.0.0.1:8000/api/get-forms?owner={}",
+            f.owner
+        ))
+        .add_header("Authorization", &f.auth, true)
+        .send(&f.service)
+        .await,
+    )
+    .await;
+    assert_eq!(remaining["data"], serde_json::json!([]));
+    assert_eq!(remaining["data2"], 0);
+
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires CASDOG_TEST_DATABASE_URL and migrations 001-018"]
 async fn full_login_flow() {
-    // This test exercises the full signup -> login -> get-account -> logout
-    // flow against a real database.
-    //
-    // Prerequisites:
-    //   - CASDOG__DATABASE__URL env var pointing to a test database
-    //   - Database migrations applied
-    //   - Seed data loaded (InitService::init_db)
-    let service = test_service();
-
-    // Step 1: Signup
-    let signup_body = serde_json::json!({
-        "application": "admin/app-built-in",
-        "organization": "built-in",
-        "username": "integration-test-user",
-        "password": "Test1234!",
-        "name": "Integration Test",
-        "email": "integration@test.local"
-    });
-    let mut res = TestClient::post("http://127.0.0.1:8000/api/signup")
-        .json(&signup_body)
-        .send(&service)
+    let f = DatabaseFixture::new().await;
+    let signup = expect_json(TestClient::post("http://127.0.0.1:8000/api/signup")
+        .json(&serde_json::json!({"organization":f.owner,"username":"new-user","name":"New Display Name","password":"Signup42!","email":"new@example.test","application":"fixture-app"}))
+        .send(&f.service).await).await;
+    let id = signup["user"]["id"].as_str().unwrap();
+    assert_eq!(signup["user"]["name"], "new-user");
+    assert_eq!(signup["user"]["display_name"], "New Display Name");
+    let login = expect_json(TestClient::post("http://127.0.0.1:8000/api/login")
+        .json(&serde_json::json!({"organization":f.owner,"username":"new-user","password":"Signup42!","application":"fixture-app","type":"login"}))
+        .send(&f.service).await).await;
+    assert_eq!(login["user"]["id"], id);
+    let auth = format!("Bearer {}", login["token"].as_str().unwrap());
+    let account = expect_json(
+        TestClient::get("http://127.0.0.1:8000/api/get-account")
+            .add_header("Authorization", &auth, true)
+            .send(&f.service)
+            .await,
+    )
+    .await;
+    assert_eq!(account["id"], id);
+    assert_eq!(account["owner"], f.owner);
+    let logout = TestClient::get("http://127.0.0.1:8000/api/logout")
+        .add_header("Authorization", &auth, true)
+        .send(&f.service)
         .await;
-    let status = res.status_code.unwrap();
-    assert!(
-        status == StatusCode::OK || status == StatusCode::CONFLICT,
-        "Signup should succeed or conflict if user exists, got {status}"
-    );
-
-    // Step 2: Login
-    let login_body = serde_json::json!({
-        "application": "admin/app-built-in",
-        "organization": "built-in",
-        "username": "integration-test-user",
-        "password": "Test1234!",
-        "type": "login"
-    });
-    let mut res = TestClient::post("http://127.0.0.1:8000/api/login")
-        .json(&login_body)
-        .send(&service)
-        .await;
-    assert_eq!(res.status_code.unwrap(), StatusCode::OK);
-    let body: serde_json::Value = res.take_json::<serde_json::Value>().await.unwrap();
-    let token = body["token"].as_str().expect("login must return a token");
-    assert!(!token.is_empty());
-
-    // Step 3: Get account with the token
-    let mut res = TestClient::get("http://127.0.0.1:8000/api/get-account")
-        .add_header("Authorization", format!("Bearer {}", token), true)
-        .send(&service)
-        .await;
-    assert_eq!(res.status_code.unwrap(), StatusCode::OK);
-
-    // Step 4: Logout
-    let mut res = TestClient::get("http://127.0.0.1:8000/api/logout")
-        .add_header("Authorization", format!("Bearer {}", token), true)
-        .send(&service)
-        .await;
-    assert_eq!(res.status_code.unwrap(), StatusCode::OK);
+    assert_eq!(logout.status_code, Some(StatusCode::OK));
+    for old in [
+        auth,
+        format!("Bearer {}", signup["token"].as_str().unwrap()),
+    ] {
+        let rejected = TestClient::get("http://127.0.0.1:8000/api/get-account")
+            .add_header("Authorization", old, true)
+            .send(&f.service)
+            .await;
+        assert_eq!(rejected.status_code, Some(StatusCode::UNAUTHORIZED));
+    }
+    f.cleanup().await;
 }
 
 #[tokio::test]
-#[ignore = "Requires a running PostgreSQL instance with Casdog schema"]
+#[ignore = "requires CASDOG_TEST_DATABASE_URL and migrations 001-018"]
 async fn crud_users_full_cycle() {
-    let service = test_service();
-
-    // Obtain an admin token first (assumes seed data has been loaded).
-    let login_body = serde_json::json!({
-        "application": "admin/app-built-in",
-        "organization": "built-in",
-        "username": "admin",
-        "password": "123",
-        "type": "login"
-    });
-    let mut res = TestClient::post("http://127.0.0.1:8000/api/login")
-        .json(&login_body)
-        .send(&service)
-        .await;
-    let body: serde_json::Value = res.take_json::<serde_json::Value>().await.unwrap();
-    let token = body["token"]
-        .as_str()
-        .expect("admin login must return a token");
-
-    let auth_header = format!("Bearer {}", token);
-
-    // CREATE
-    let create_body = serde_json::json!({
-        "owner": "built-in",
-        "name": "crud-test-user",
-        "display_name": "CRUD Test User",
-        "password": "Test1234!",
-        "email": "crud-test@test.local"
-    });
-    let mut res = TestClient::post("http://127.0.0.1:8000/api/users")
-        .add_header("Authorization", &auth_header, true)
-        .json(&create_body)
-        .send(&service)
-        .await;
-    let status = res.status_code.unwrap();
+    let f = DatabaseFixture::new().await;
+    let created = expect_json(TestClient::post("http://127.0.0.1:8000/api/users")
+        .add_header("Authorization", &f.auth, true)
+        .json(&serde_json::json!({"owner":f.owner,"name":"crud-user","display_name":"CRUD User","password":"Created42!","email":"crud@example.test"}))
+        .send(&f.service).await).await;
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(created["name"], "crud-user");
+    assert_eq!(created["owner"], f.owner);
+    assert!(created.get("password_hash").is_none());
+    let route = format!("http://127.0.0.1:8000/api/users/{id}");
+    let read = expect_json(
+        TestClient::get(&route)
+            .add_header("Authorization", &f.auth, true)
+            .send(&f.service)
+            .await,
+    )
+    .await;
+    assert_eq!(read["email"], "crud@example.test");
+    let list = expect_json(
+        TestClient::get(format!("http://127.0.0.1:8000/api/users?owner={}", f.owner))
+            .add_header("Authorization", &f.auth, true)
+            .send(&f.service)
+            .await,
+    )
+    .await;
+    assert_eq!(list["total"], 2);
     assert!(
-        status == StatusCode::OK || status == StatusCode::CREATED,
-        "CREATE user should succeed, got {status}"
+        list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["id"] == id)
     );
-    let body: serde_json::Value = res.take_json::<serde_json::Value>().await.unwrap();
-    let user_id = body["id"].as_str().unwrap_or("crud-test-user");
-
-    // READ
-    let mut res = TestClient::get(format!("http://127.0.0.1:8000/api/users/{}", user_id))
-        .add_header("Authorization", &auth_header, true)
-        .send(&service)
+    let updated = expect_json(
+        TestClient::put(&route)
+            .add_header("Authorization", &f.auth, true)
+            .json(&serde_json::json!({"display_name":"Updated CRUD User"}))
+            .send(&f.service)
+            .await,
+    )
+    .await;
+    assert_eq!(updated["display_name"], "Updated CRUD User");
+    let stored: String = sqlx::query_scalar("SELECT display_name FROM users WHERE id=$1")
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, "Updated CRUD User");
+    let deleted = TestClient::delete(&route)
+        .add_header("Authorization", &f.auth, true)
+        .send(&f.service)
         .await;
-    assert_eq!(res.status_code.unwrap(), StatusCode::OK);
-
-    // LIST
-    let mut res = TestClient::get("http://127.0.0.1:8000/api/users")
-        .add_header("Authorization", &auth_header, true)
-        .send(&service)
+    assert_eq!(deleted.status_code, Some(StatusCode::OK));
+    let missing = TestClient::get(&route)
+        .add_header("Authorization", &f.auth, true)
+        .send(&f.service)
         .await;
-    assert_eq!(res.status_code.unwrap(), StatusCode::OK);
-    let body: serde_json::Value = res.take_json::<serde_json::Value>().await.unwrap();
-    assert!(body.is_array() || body.is_object());
-
-    // UPDATE
-    let update_body = serde_json::json!({
-        "display_name": "Updated CRUD Test User"
-    });
-    let mut res = TestClient::put(format!("http://127.0.0.1:8000/api/users/{}", user_id))
-        .add_header("Authorization", &auth_header, true)
-        .json(&update_body)
-        .send(&service)
-        .await;
-    assert_eq!(res.status_code.unwrap(), StatusCode::OK);
-
-    // DELETE
-    let mut res = TestClient::delete(format!("http://127.0.0.1:8000/api/users/{}", user_id))
-        .add_header("Authorization", &auth_header, true)
-        .send(&service)
-        .await;
-    assert_eq!(res.status_code.unwrap(), StatusCode::OK);
+    assert_eq!(missing.status_code, Some(StatusCode::NOT_FOUND));
+    let removed: bool = sqlx::query_scalar("SELECT is_deleted FROM users WHERE id=$1")
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert!(removed);
+    f.cleanup().await;
 }
 
 #[tokio::test]
-#[ignore = "Requires a running PostgreSQL instance with Casdog schema"]
+#[ignore = "requires CASDOG_TEST_DATABASE_URL and migrations 001-018"]
 async fn oauth2_authorization_code_flow() {
-    let service = test_service();
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let f = DatabaseFixture::new().await;
+    let verifier = "test-pkce-verifier-with-at-least-forty-three-characters";
+    let challenge =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier));
+    let code = f.grant_code(&challenge).await;
+    let redirect = "https://client.example.test/callback";
+    for (candidate, secret, target) in [
+        (verifier, "wrong-secret", redirect),
+        ("wrong-verifier", f.secret.as_str(), redirect),
+        (
+            verifier,
+            f.secret.as_str(),
+            "https://evil.example.test/callback",
+        ),
+    ] {
+        let denied = f.exchange(&code, candidate, secret, target).await;
+        assert!(
+            denied.status_code.unwrap().is_client_error(),
+            "Invalid OAuth proof must fail"
+        );
+    }
+    let issued = expect_json(f.exchange(&code, verifier, &f.secret, redirect).await).await;
+    let access = issued["access_token"].as_str().unwrap();
+    let refresh = issued["refresh_token"].as_str().unwrap();
+    assert!(!access.is_empty());
+    assert!(!refresh.is_empty());
+    let config = casdog::config::AppConfig::get();
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_audience(&[f.client_id.as_str()]);
+    validation.set_issuer(&[config
+        .server
+        .public_url
+        .unwrap_or_else(|| format!("http://{}:{}", config.server.host, config.server.port))]);
+    let id_claims = jsonwebtoken::decode::<serde_json::Value>(
+        issued["id_token"].as_str().unwrap(),
+        &jsonwebtoken::DecodingKey::from_secret(config.jwt.secret.as_bytes()),
+        &validation,
+    )
+    .unwrap()
+    .claims;
+    assert_eq!(id_claims["sub"], f.admin_id);
+    assert_eq!(id_claims["nonce"], "test-nonce");
+    assert_eq!(id_claims["email_verified"], false);
 
-    // Login to get a session token.
-    let login_body = serde_json::json!({
-        "application": "admin/app-built-in",
-        "organization": "built-in",
-        "username": "admin",
-        "password": "123",
-        "type": "login"
-    });
-    let mut res = TestClient::post("http://127.0.0.1:8000/api/login")
-        .json(&login_body)
-        .send(&service)
+    let replay = f.exchange(&code, verifier, &f.secret, redirect).await;
+    assert!(replay.status_code.unwrap().is_client_error());
+    let userinfo = expect_json(
+        TestClient::get("http://127.0.0.1:8000/api/userinfo")
+            .add_header("Authorization", format!("Bearer {access}"), true)
+            .send(&f.service)
+            .await,
+    )
+    .await;
+    assert_eq!(userinfo["sub"], f.admin_id);
+    assert_eq!(userinfo["email"], "admin@example.test");
+    let refresh_body = serde_json::json!({"grant_type":"refresh_token","client_id":f.client_id,"client_secret":f.secret,"refresh_token":refresh});
+    let rotated = expect_json(
+        TestClient::post("http://127.0.0.1:8000/api/login/oauth/access_token")
+            .json(&refresh_body)
+            .send(&f.service)
+            .await,
+    )
+    .await;
+    let next_access = rotated["access_token"].as_str().unwrap();
+    assert_ne!(next_access, access);
+    assert_ne!(rotated["refresh_token"], refresh);
+    let old_refresh = TestClient::post("http://127.0.0.1:8000/api/login/oauth/access_token")
+        .json(&refresh_body)
+        .send(&f.service)
         .await;
-    let body: serde_json::Value = res.take_json::<serde_json::Value>().await.unwrap();
-    let token = body["token"].as_str().expect("login must return a token");
-    let auth_header = format!("Bearer {}", token);
-
-    // Grant consent to produce an authorization code.
-    let consent_body = serde_json::json!({
-        "application": "admin/app-built-in",
-        "granted_scopes": ["openid", "profile"],
-        "client_id": body["user"]["id"],
-        "response_type": "code",
-        "redirect_uri": "http://localhost/callback",
-        "scope": "openid profile"
-    });
-    let mut res = TestClient::post("http://127.0.0.1:8000/api/grant-consent")
-        .add_header("Authorization", &auth_header, true)
-        .json(&consent_body)
-        .send(&service)
+    assert!(old_refresh.status_code.unwrap().is_client_error());
+    let old_access = TestClient::get("http://127.0.0.1:8000/api/userinfo")
+        .add_header("Authorization", format!("Bearer {access}"), true)
+        .send(&f.service)
         .await;
-    let status = res.status_code.unwrap();
+    assert_eq!(old_access.status_code, Some(StatusCode::UNAUTHORIZED));
+    let refreshed_info = expect_json(
+        TestClient::get("http://127.0.0.1:8000/api/userinfo")
+            .add_header("Authorization", format!("Bearer {next_access}"), true)
+            .send(&f.service)
+            .await,
+    )
+    .await;
+    assert_eq!(refreshed_info["sub"], f.admin_id);
+    let consent: serde_json::Value = sqlx::query_scalar(
+        "SELECT granted_scopes FROM consent_records WHERE user_id=$1 AND application_id=$2",
+    )
+    .bind(&f.admin_id)
+    .bind(&f.application_id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
     assert!(
-        status == StatusCode::OK || status == StatusCode::BAD_REQUEST,
-        "Grant consent: expected 200 or 400, got {status}"
+        consent
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("email"))
     );
+    // Selective SSO logout must never revoke another user's tokens for this app.
+    let other = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash) VALUES($1,$2,'other-user','Other','unused')")
+        .bind(&other).bind(&f.owner).execute(&f.pool).await.unwrap();
+    sqlx::query("INSERT INTO tokens(id,owner,name,application,organization,user_id,access_token) VALUES($1,$2,'other-token','fixture-app',$2,$3,$1)")
+        .bind(uuid::Uuid::new_v4().to_string()).bind(&f.owner).bind(&other).execute(&f.pool).await.unwrap();
+    let logout = TestClient::post(
+        "http://127.0.0.1:8000/api/sso-logout?logout_all=false&application=fixture-app",
+    )
+    .add_header("Authorization", &f.auth, true)
+    .send(&f.service)
+    .await;
+    assert_eq!(logout.status_code, Some(StatusCode::OK));
+    let other_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tokens WHERE user_id=$1")
+        .bind(&other)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(other_count, 1);
+    let own_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tokens WHERE user_id=$1")
+        .bind(&f.admin_id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(own_count, 0);
+    f.cleanup().await;
 }

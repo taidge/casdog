@@ -1,0 +1,198 @@
+# Casdoor 改写复核（2026-10-29）
+
+## 基线与结论
+
+参考仓库：`E:/Repos/casdoor`，远端 `https://github.com/casdoor/casdoor.git`。
+按用户要求 fetch 后 reset 到 `origin/master` 并 clean 本地文件；参考提交：
+`47da539f886d5b09d2c35cf6ae78d8b6b5f30a43`（2026-10-27）。
+Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Stripe 修改，本轮保留并继续完善。
+
+**结论：已有较广的 IAM 骨架和不少真实实现，但不能称为完整 Casdoor 替代品。**
+路由存在、编译通过、返回 401/500 均不证明功能等价。旧 `_todos.md` 把上一轮的局部修复扩大为整体完成，本次纠正。
+
+## 可重复的覆盖指标
+
+运行 `python scripts/check-casdoor-parity.py --reference E:/Repos/casdoor --output docs/casdoor-route-inventory.json`。
+
+| 指标 | 复核前 | 当前（第四阶段） | 边界 |
+| --- | ---: | ---: | --- |
+| 上游显式路由唯一路径 | 336 | 336 | 含协议和非 API 路径 |
+| 可比较的扁平 API 路径＋HTTP 方法 | 299 | 299 | 排除嵌套协议和通配方法 |
+| 匹配声明 | 227 | 290 | 75.92% → 96.99%，不是功能完成度 |
+| 缺失声明 | 72 | 9 | 完整列表见 JSON；逐项处理见 phase4-gap-assessment.json |
+| 上游页面组件 | 105 | 105 | `.tsx` 位于 `web/src/pages`，文件数不是流程数 |
+| Casdog 前端结构 | 8 独立页面＋29 通用资源配置 | 同左 | 通用 CRUD 不能等同专用业务页面 |
+| 上游密码格式实现 | 仅 plain 直接匹配，其他有缺失或格式差异 | 8 类实现 | 已有旧 Casdog 格式读取兼容 |
+
+此处不提供虚假的整体完成百分比：尚无逐场景 Casdoor/Casdog 差分测试，所有支付、目录、身份提供商也未用真实服务验证。
+
+第二阶段时静态清单为 235/299，缺少 64 个声明；第四阶段新增 55 项实现后为 290/299，仍缺 9 项。新增认证流程并不等于新增上游扁平路由，不能将该比例当作整体功能完成度。
+
+## 第一阶段改进
+
+- 密码：实现 plain、salt、sha512-salt、md5-salt、bcrypt、pbkdf2-salt、argon2id、pbkdf2-django；消除 bcrypt/MD5 的 SHA-256 写入替代；导入密码可以校验和修改，修改后算法标记、盐、修改时间同步更新。
+- MFA：登录时真实验证已启用的 TOTP、恢复码及绑定账户的邮件/手机验证码；错误二次验证计入锁定；恢复码与验证码原子消费；不能用空值或任意 passcode 换取会话。
+- MFA 设置：验证正确 TOTP 后才启用，禁止直接调用 enable 跳过验证或覆盖已启用密钥。前端补完整设置、验证、恢复码显示和删除请求契约；二维码在本地生成。
+- 登录前端：统一入口；MFA challenge 不再保存空 token；提交二次验证码；识别 HTTP 200 中的业务错误；密码过期引导账户安全页；退出调用服务器。
+- 兼容 API：支持 field/value、sortField/sortOrder、分页边界；保留自定义 JSON 属性键；屏蔽用户密码和 MFA 秘密；补 POST userinfo/run-syncer、验证/MFA/策略兼容路由。
+- Kerberos：关闭将服务主体、请求头、query username 当作已认证用户的路径。保留 Negotiate challenge；在接入真正 GSSAPI/keytab 校验前明确拒绝登录。这是安全修复，不算 Kerberos 功能完成。
+- 存储：修复全新迁移的 Casbin 空字段和 orders 保留字错误；补迁移按数据库会话时区将旧 naive 时间转换为模型要求的 TIMESTAMPTZ，并修复历史 Casbin NULL 字段。
+
+## 第二阶段实现（历史记录，社交登录限制已由第三阶段更新）
+
+- 授权：挂载统一资源授权过滤器；凭证缺失、身份验证失败、策略或资源解析失败时拒绝请求。租户管理员只能管理本租户，普通用户仅可操作自身允许的资料字段；列表、实际存储行、关联外键及特殊操作分别检查租户边界。全局管理操作保留给内置组织的管理员，不能只凭请求中的 owner 或凭证外形取得权限。
+- MCP、SCIM 与消息发送：MCP 应用读写按实际应用和调用者租户定位，并屏蔽客户端秘密；SCIM 列表及单项查询限制在管理员租户或普通用户自身。邮件、短信和通知验证真实身份或客户端凭证，并校验所用提供商归属，禁止借其他租户的提供商发送消息。
+- 社交登录：公开的是应用已配置提供商的安全展示信息；服务器生成随机 state，绑定浏览器、应用、组织和提供商配置。回调先单次消费 state，再向提供商兑换授权码和读取稳定 subject；按组织和具体提供商配置绑定账户，不因邮件地址相同自动合并。回调使用短期 HttpOnly 完成凭证，经同源会话接口换取登录结果，JWT 不放入跳转 URL；前端完成接收和跳转。
+- 社交登录部署边界：生产环境需设置 `server.public_url` 为实际 HTTPS origin，并在提供商登记一致回调地址；仅本地 loopback 允许 HTTP。第二阶段曾使用进程内 state/完成凭证，并拒绝 MFA 账户从社交入口登录；第三阶段已替换为 PostgreSQL 共享状态和社交 MFA 补验，详见下节。
+- 找回密码：新增公开请求和重置接口，前端契约同步。请求绑定组织、规范化邮件和可选应用；无账户、禁用账户与可恢复账户使用同类通用答复。256 位随机证明仅保存 SHA-256 摘要，15 分钟过期；数据库锁保护每来源和每收件人的频率限制，错误证明最多尝试 5 次。通过已配置且租户匹配的邮件提供商后台投递，不在响应或日志中返回证明。
+- 密码与会话：重置时再次检查账户及当前组织密码策略，原子更新密码哈希、算法、盐和修改时间，同时消费账户的重置证明并删除既有会话及访问/刷新令牌。JWT 校验结合密码修改时间拒绝旧会话；退出以摘要记录当前 JWT 撤销状态。此机制也应用于已登录的密码修改入口。
+- OAuth 令牌接口：补表单和 HTTP Basic 客户端认证契约，授权码与应用、回调及 PKCE 绑定；覆盖授权码单次兑换、刷新轮换和真实访问令牌的 userinfo 查询。
+
+本阶段结果以末尾验证记录为准。社交提供商的令牌与资料端点、恢复邮件投递采用本机模拟服务；没有向真实第三方账号或邮箱发送请求。
+
+### 四个原有数据库场景的重写范围
+
+全部通过 `CASDOG_TEST_DATABASE_URL` 使用已迁移的专用数据库，创建独立 UUID 租户、管理员和应用，向完整路由注入 SQLx 与 Diesel 连接池。移除默认管理员密码依赖以及测试运行中的全局环境变量修改。
+
+1. 扁平表单接口：真实新增、读取、列表、更新、删除，检查兼容响应字段及数据库保存结果。
+2. 注册登录：验证 username 与显示名契约，注册、登录、读取自身账户、退出，再以旧 JWT 请求账户并断言拒绝。
+3. REST 用户 CRUD：检查返回的用户 ID、租户、资料和列表内容，验证修改落库及软删除后的不可读取状态。
+4. OAuth 授权码：通过 camelCase consent 请求取得真实授权码，以表单和 Basic 认证兑换；拒绝错误客户端密码、回调地址、PKCE 及授权码重放；验证刷新令牌轮换、旧令牌拒绝和 userinfo。
+
+## 第二阶段补充修复
+
+- 应用登录权限原实现查询不存在的 `permissions.resource_id/users/roles`；现改用实际资源、动作和角色关联表，隔离租户，检查规则启用状态，拒绝规则优先，并在密码登录、社交登录和授权同意中共用。
+- 普通密码修改与找回密码均原子更新凭据、撤销旧令牌/会话；JWT 同时检查活跃用户、密码修改时间、撤销摘要和用户退出时间。模拟登录还检查原管理员及模拟会话，避免恢复已失效的管理员权限。
+- 选择性 SSO 退出限定当前用户、租户和实际应用，避免同名应用下其他用户的令牌被删除。ID Token 与 userinfo 使用真实邮箱验证状态，userinfo 按授权 scope 返回资料。
+- 通用验证码按当前用户、租户、用途、类型和有效期原子消费；注册证明另有浏览器 Cookie 绑定，联系人修改与证明消费在同一事务中完成。
+
+## 第三阶段：社交登录 MFA、共享状态与账号绑定
+
+- 共享状态：新增迁移 `019_social_auth_state.sql`，OAuth state、浏览器证明和会话完成证明均存储 SHA-256 摘要，应用、租户、提供商、用途及上下文持久化到 PostgreSQL。state 和完成证明均有效 5 分钟；数据库原子消费防重放，MFA 错误次数跨实例累计，过期清理与总量/租户容量限制控制积压。共享同一数据库的实例可继续处理登录，服务重启不再丢失这些证明，不再依赖粘滞路由。
+- 社交 MFA：回调后的完成证明仅是短期登录证明，启用 MFA 时不会直接签发 JWT。支持 TOTP、恢复码及绑定联系人的邮件/短信验证码，前端可选择方式、发送代码、提交和取消。恢复码/验证码消费、完成证明消费与登录更新在同一事务中提交；错误预算与账户锁定写入数据库。账户、组织、应用、提供商、权限、身份绑定及凭据/退出时间均在完成时重新检查；损坏的 MFA 配置不会降级成免验证登录。
+- 账号绑定：账户页增加应用选择、提供商绑定/列表/解绑。绑定需要最近 5 分钟内的有效登录及同源请求，OAuth flow 明确区分登录与绑定，回调再次验证原会话仍有效。按租户、提供商配置和稳定 subject 加数据库互斥锁；不能抢占另一账户的身份，不能用邮件地址自动合并，导入产生的重复身份会拒绝登录而不是任意挑选账户。
+- 解绑：只允许操作自己且应用明确允许解绑的提供商；保留另一已启用的社交登录方式，或者验证当前密码且应用允许密码登录后才能解绑最后一个社交账号。绑定和解绑均拒绝模拟登录会话、跨租户目标、过期/已撤销会话及错误 Origin。
+- 集成：静态绑定列表路由优先于公开的动态提供商路由，保留身份验证和授权过滤器；事务内策略查询共用当前连接，避免小连接池下重复申请连接造成阻塞。所有 Cookie 完成/发送/取消请求要求正确 Origin，JWT 不出现在回调 URL。
+- 并发边界：绑定在取得用户锁后重新检查 OAuth 与会话的有效期；全局退出、当前会话撤销、令牌/会话删除和退出时间更新在同一用户锁事务中提交，退出时间采用拿锁后的数据库时间。MFA 设置确认统一采用用户行→MFA 行的锁顺序，避免与社交补验互相等待。
+
+以上实现的验证结果见末尾第三阶段记录；真实外部提供商和完整浏览器流程仍是验收缺口。 升级时先应用迁移 019，再部署新版本；多实例需共享 PostgreSQL、JWT 配置和统一的 HTTPS `server.public_url`。正在使用旧内存证明的登录需重新发起，新版本创建的证明由数据库保存。
+
+## 剩余缺口与优先级
+
+| 优先级 | 范围 | 已确认的缺口 |
+| --- | --- | --- |
+| P0 | 授权与租户隔离 | 第二阶段已实现统一拒绝策略及 REST、SCIM、MCP、消息提供商租户检查，新增正反向数据库回归已通过。后续新增接口仍需显式授权规则；尚未穷举所有资源、业务角色与策略组合。 |
+| P0 | 认证协议 | Kerberos 没有真实票据验证；SAML 签名/验证及全部协议仍需标准一致性和部署测试。OAuth state、回调、令牌撤销/退出已有第二阶段实现和回归用例，不能据此宣称所有协议完成。 |
+| P1 | 社交登录 | 第三阶段已实现 PostgreSQL 共享 state/完成凭证、MFA 补验、已有账户显式绑定及安全解绑。真实 GitHub/Google 等提供商、真实浏览器和生产集群验收仍未完成；本机独立连接池回归不能代替生产部署验收。 |
+| P1 | 找回密码 | 前后端闭环已实现；模拟邮件、租户/应用绑定、错误/过期/重放、并发消费与会话撤销的数据库回归已通过。真实 SMTP/云邮件环境和完整浏览器流程尚未验收。 |
+| P1 | MFA | 社交登录已增加短信/邮件验证码发送与补验 UI；普通密码登录发送挑战 UI 已在第四阶段补齐；WebAuthn/FaceID 全流程及 TOTP 跨挑战重放保护仍需完善；未覆盖其他登录方式的统一 MFA 强制策略。 |
+| P1 | 兼容业务语义 | 通用 CRUD 绕过部分资源 service 校验和副作用；导入时上游 password 是哈希，而普通更新是明文，仍需专用导入契约；分页过滤只有已实现子集。 |
+| P1 | 上游新模块 | 第四阶段已补 Agent/Server/Entry/Key 管理、Integration/Marketplace 子集和 OpenClaw 基础图；代理执行、Key 凭证认证、完整集成/会话存储、OTLP 及专用管理页面仍有缺口。 |
+| P1 | 商业流程 | 第四阶段已补优惠券、普通商品购买和续费标志；定价计划/充值、异步库存预留、自动续费调度、购物车及专用页面仍缺。支付工厂仍仅 Stripe、PayPal、Balance、Dummy。 |
+| P2 | 运维功能 | 第四阶段已补首次管理员密码、设置保存、Dashboard 热图/MFA/提供商与 Webhook 历史/重放；设置运行时应用、系统升级、设备授权完整流程仍缺。 |
+| P2 | 提供商 | 当前存储工厂仅 Local/S3，上游列出 11 类；同步器仅 Database(PostgreSQL)/LDAP/Keycloak；上游大量云目录、支付和消息提供商未覆盖。 |
+| P2 | 前端 | 105 个上游页面组件无法由 29 个通用 JSON 资源编辑器替代；复杂字段、验证、批量操作、关系选择、主题/i18n、组织应用定制需要逐场景验收。 |
+
+## 验证
+
+构建产物、Cargo 缓存、临时文件和测试 PostgreSQL 均位于 D 盘；未使用 Docker。
+测试数据库是专用本地集群，未使用用户已有数据库服务。迁移 015 按会话时区解释历史时间；部署时应使用历史数据实际采用的时区。001/009 修复了无法从零运行的历史 SQL，已部署且使用迁移校验和的数据库需审核这两处历史修正及新迁移后升级。
+
+第一阶段已通过（保留历史基线，不代表第二阶段合并后已重新通过）：
+
+- 全新 PostgreSQL 数据库顺序执行 001–015 迁移（遇错立即停止）。
+- 6 个真实数据库认证安全测试：密码迁移、TOTP 登录、错误二次验证锁定、HTTP MFA 设置/删除、恢复码并发消费、邮件码账户绑定/过期/单次消费。
+- 现有 API 回归：175 通过，4 个旧数据库场景默认忽略。
+- 前端：5 个单元测试、native `cargo check`、`wasm32-unknown-unknown` 检查通过。
+- `cargo fmt --all -- --check` 与 `git diff --check` 通过。
+
+- 合并后 `cargo test --workspace --jobs 2 -- --test-threads=1` 全部通过；默认忽略的 6 个认证数据库测试和 1 个 CRUD 数据库测试另行显式执行，全部通过。
+- CRUD 数据库测试验证真实列表排序/过滤/分页、密码和 MFA 秘密屏蔽、普通用户仅可读写自身资料、禁止自提权、禁止跨租户修改/删除。
+- 第一阶段时，旧 API 测试中的 4 个端到端数据库场景以及 1 个文档示例默认忽略，未计为通过；第二阶段已重写上述 4 个场景，已在第二阶段显式执行并全部通过。
+真实第三方提供商/域环境和浏览器端到端测试不在已通过范围。
+
+第二阶段当前验证状态：
+
+- 已通过：在全新的 `casdog_phase2_verify` 数据库顺序执行 001–018 全部迁移；仍使用 D 盘专用 PostgreSQL 集群。
+- 已通过：完整前端 6 个单元测试及 `wasm32-unknown-unknown` 编译检查，Cargo metadata 确认 target 为 `D:/BuildCache/casdog-web/target`。
+- 已通过：`cargo test --workspace --tests --no-fail-fast --jobs 2 -- --include-ignored --test-threads=1`，11 个测试程序共 322 次测试执行，0 失败、0 忽略。其中 lib/main 分别重复运行相同的 38 项单元测试；该总数不是独立业务场景数。
+- 已通过：22 个真实 PostgreSQL 场景（4 API＋6 认证安全＋5 授权＋1 兼容 CRUD＋4 找回密码＋1 社交登录＋1 验证码），均由上述命令显式执行。
+- 已通过：原先剩余的 4 个场景：表单完整 CRUD、注册/登录/账户/退出及所有旧 JWT 失效、用户 CRUD、授权同意/真实 code 兑换/PKCE/客户端认证/ID Token 签名与 nonce/刷新轮换/userinfo/选择性退出隔离。
+- 最终后端日志：`D:/BuildCache/casdog/phase2-passed-tests.log`；前端日志：`D:/BuildCache/casdog/phase2-web-tests.log`、`phase2-web-wasm.log`。文档中的示例测试未包含在 `--tests` 中。
+- 已通过：最终 Rust 格式与 Git 差异空白检查。数据库场景在以下命令中通过 `--include-ignored` 显式执行。
+
+数据库回归可通过显式设置 `CASDOG_TEST_DATABASE_URL`，执行：
+
+```powershell
+$env:CARGO_HOME = 'D:/BuildCache/cargo'
+$env:CARGO_TARGET_DIR = 'D:/BuildCache/casdog/target'
+$env:CARGO_INCREMENTAL = '0'
+$env:TEMP = 'D:/BuildCache/casdog/tmp'
+$env:TMP = $env:TEMP
+cargo metadata --no-deps --format-version 1
+# CASDOG_TEST_DATABASE_URL 必须指向专用、已迁移的测试数据库
+cargo test -p casdog --test auth_security_tests -- --ignored --test-threads=1
+cargo test -p casdog --test legacy_crud_tests -- --ignored --test-threads=1
+cargo test -p casdog --test authorization_tests -- --ignored --test-threads=1
+cargo test -p casdog --test social_login_tests -- --ignored --test-threads=1
+cargo test -p casdog --test social_state_tests --test social_mfa_tests --test social_link_tests -- --include-ignored --test-threads=1
+cargo test -p casdog --test password_reset_tests -- --ignored --test-threads=1
+cargo test -p casdog --test api_parity_tests -- --ignored --test-threads=1
+```
+
+Windows 本次构建使用已安装 PostgreSQL 18 附带的 OpenSSL 3 头文件/库（`OPENSSL_INCLUDE_DIR`、`OPENSSL_LIB_DIR`），并将 PostgreSQL `bin` 加入 PATH。默认 OpenSSL 自动探测失败后，通过明确指定已有 OpenSSL 3 头文件和库完成构建；未升级或替换系统库。
+
+## 第三阶段验证记录
+
+- 已通过：新建 `casdog_phase3_verify` 数据库，顺序执行 001–019 全部迁移；数据目录仍为 `D:/BuildCache/casdog/postgres`，未使用 Docker。
+- 已通过：前端 6 个原生单元测试及 WASM 编译检查；日志为 `D:/BuildCache/casdog-web/logs/phase3-native-tests.log`、`phase3-wasm-check.log`。`phase3-metadata.json` 核实 target 在 D 盘。
+- 已通过：`cargo test --workspace --tests --no-fail-fast --jobs 2 -- --include-ignored --test-threads=1`，14 个测试程序共 343 次执行，0 失败、0 忽略；lib/main 各重复执行相同 37 项单元测试，总数不是独立业务场景数。最终日志：`D:/BuildCache/casdog/phase3-passed-tests.log`。
+- 已通过：44 个真实 PostgreSQL 场景，包含原有 22 个及本轮新增的 22 个。新增分组为共享状态/原子退出 6 个、社交 MFA 10 个、账号绑定 6 个；原有社交 OAuth HTTP 场景扩展为跨实例发起/回调/完成。原先剩余 4 个 API 数据库场景再次全部通过。
+- 已通过：锁等待跨过 OAuth/JWT 有效期时拒绝绑定，退出等待用户锁后原子提交撤销和时间边界，MFA 设置与登录采用一致锁顺序；容量清理、并发单次消费和跨实例尝试预算亦通过。
+- 已通过：最终 `cargo fmt --all -- --check` 与 `git diff --check`。Cargo metadata 再次核实 backend target 为 `D:/BuildCache/casdog/target`。
+- 验证过程中 D 盘曾耗尽，导致一次 PostgreSQL 容量场景写入失败；使用 Cargo 包级清理释放可重建产物后，以 `CARGO_INCREMENTAL=0` 重新执行上述完整回归并全部通过。构建、缓存、临时文件与测试数据始终位于 D 盘。
+
+共享状态测试使用独立 PostgreSQL 连接池模拟多服务实例及连接池重启；HTTP OAuth 流程在实例 A 发起、实例 B 回调、实例 A 完成，另一个实例拒绝重放。提供商令牌/资料和邮件投递采用本机 HTTP 模拟服务；短信验证测试使用精确绑定到完成证明的数据库记录，没有向真实运营商发送短信。实际 GitHub/Google、SMTP/云消息及完整浏览器验收仍未计为通过。
+
+## 第四阶段：64 个接口与普通密码登录 MFA
+
+本轮在第三阶段固定的 Casdoor 参考提交上继续开发。新增 55 个扁平方法/路径声明，静态匹配从 235/299 增至 290/299，尚缺 9 项；新增声明有具体处理逻辑，但下列高级行为仍不完整，不能将 96.99% 的静态覆盖率作为整体功能完成度。
+
+- 资源与集成：Agent、Entry、Key、Server 的真实持久化 CRUD、租户权限、引用校验、分页/过滤/排序和密钥遮蔽；新增 Integration 目录/详情及应用/提供商模板的安装、卸载事务；Marketplace 目录与 bundle 校验；OpenClaw 基础会话关系图；应用绑定的短期 MCP read token。独立 JSONB 资源表保存经校验的上游字段。
+- 商务与运维：优惠券管理、有效期/用户/商品/限额校验、支付订单的优惠预留与核销；普通商品购买与现有 PaymentFlow 对接；订阅续费标志；真实数据库仪表盘聚合、全局设置保存、联系人权限、批量权限更新、域名到期查询，以及 Webhook 事件历史、真实投递和重放状态。
+- 系统与首次初始化：全局表单、本人会话重复检测、仅允许已配置 issuer 的 IdP discovery；首次管理员密码仅在 built-in/admin 密码为空、从未登录时开放，要求同源请求，数据库行锁确保只接受第一次设置，已有密码不能通过该接口覆盖。
+- 普通密码 MFA：正确密码之后签发 5 分钟浏览器绑定挑战，数据库只保存证明和验证码摘要；邮件/短信只能发到当前已绑定联系人，包含持久化错误预算和发送限速。补验时重新检查账户、组织、应用权限、凭据及退出状态；验证码/恢复码与挑战在同一事务中消费。前端清除已提交密码，支持选择方式、发送、验证和取消。旧的通用邮件/短信验证码不能直接换取密码登录会话。 HTTP 客户端对已启用 MFA 的账户需采用两步契约：`POST /api/login` 获取 Cookie 挑战，再调用 `POST /api/auth/password/session` 提交因子；发码和取消分别使用其 `/send-code`、`/cancel` 子路径。初始登录请求中自带 passcode 不会直接完成登录，前端已同步迁移。
+
+第四阶段仍有的语义边界：Key 管理尚未接入 API credential 身份验证；Agent/MCP 配置管理不包含代理执行、远端 tools 同步和内网扫描；MCP read token不等同于管理员 session JWT。Marketplace 不支持 theme 模板、缓存及备用目录源。OpenClaw 图缺复杂控制流推断和原始 transcript 存储。设置已持久化，但连接池/保留策略仍需运行时配置集成。购买只支持普通商品，未覆盖定价计划、自定义充值；外部异步 checkout 的库存预留仍需完善，autoRenew 标志不代表自动续费调度器已完成。域名 RDAP 和真实第三方目录、支付、邮件/短信环境仍需部署验收。
+
+### 第四阶段剩余的 9 个接口
+
+- `GET /api/get-openclaw-session-transcript`：缺原始 transcript 对象存储与查询。
+- `GET /api/get-upgrade-info`、`POST /api/upgrade-system`：缺发布包信任、升级及重启机制。
+- `GET /api/scan`、`POST /api/sync-intranet-servers`：缺扫描器与内网发现实现。
+- `POST /api/sync-mcp-tool`：缺远端 MCP 协议工具同步。
+- `POST /api/cancel-device-auth`、`POST /api/device-auth-complete`：需替换现有不完整的设备授权缓存，完成持久化状态及令牌授予流程。
+- `POST /api/verify-identification`：缺真实身份核验提供商。
+
+### 第四阶段验证记录
+
+- 已通过：`cargo test --workspace --tests --no-fail-fast --jobs 2 -- --include-ignored --test-threads=1`，18 个测试程序共 **366 次执行，0 失败、0 忽略**。lib/main 各重复执行相同的 37 项单元测试，执行总数不是独立业务场景数；本命令不含文档示例测试。
+- 已通过：**62 个真实 PostgreSQL 场景**。其中本轮新增 18 个：普通密码 MFA 7、资源/Marketplace/MCP 4、商务运维/Webhook 3、系统/首次密码 4；原有 44 个场景和原先剩余的 4 个 API 数据库场景均再次通过。
+- 已通过：密码证明后发码、跨实例单次消费、OTP 摘要、发送限速、联系人/应用/权限/密码与退出状态复核；真实本机邮件 HTTP 投递；普通密码 TOTP/恢复码的两步接口契约；MFA 后授权码、回调、grant 和公开客户端 PKCE 校验。
+- 已通过：资源持久化、密钥遮蔽/更新保留、跨租户拒绝、Marketplace 安装回滚/卸载及同名重装；MCP 真实 JWT 授权与持行锁后退出时间复核；余额支付/优惠核销/失败释放/末件商品并发，UUID 同名攻击拒绝、分以下金额拒绝；真实本机 Webhook HTTP 500→200 重放与状态记录。
+- 已通过：首次密码并发只能一个成功、已有密码不能再次覆盖；本人会话检测、全局表单权限、配置绑定的 IdP discovery 本机 HTTP 查询。首次密码测试仅在专用数据库临时保存并恢复预置管理员记录，不依赖默认管理员密码。
+- 已通过：前端 6 个原生测试及 `wasm32-unknown-unknown` 编译检查。日志：`D:/BuildCache/casdog-web/logs/password-mfa-native-tests.log`、`password-mfa-wasm-check.log`，metadata 核实前端 target 在 D 盘。
+- 已通过：新建 `casdog_phase4_verify`，执行迁移 001–022；022 的预留/核销历史外键修正已在测试前应用。部署前需应用 020–022。所有构建、临时文件和数据库存储均在 D 盘，未使用 Docker；后端 metadata 核实 target 为 `D:/BuildCache/casdog/target`，最终构建关闭增量缓存。
+- 已通过：最终 Rust 格式、Git 差异空白检查和静态清单脚本。后端最终日志：`D:/BuildCache/casdog/phase4-passed-tests.log`；逐接口处理清单：`docs/phase4-gap-assessment.json`。
+
+以上数据库与本机 HTTP 测试没有验证真实 SMTP/短信运营商、支付网关、Marketplace 线上目录、RDAP 公网查询或完整浏览器流程，相关部署验收仍保留。
+
+
+## Glory / Sapid 前端迁移（2026-11-11）
+
+- 前端使用当日核验的 crates.io 最新稳定版本 Glory 0.7.0 和 Sapid 0.7.1，最低 Rust 1.95。依赖、组件、启动入口和构建配置已迁移，移除 Dioxus 依赖与配置。
+- 使用 Trunk 生成 `web/dist`，后端构建脚本从此目录嵌入静态资源。开发服务器代理 `/api/` 至端口 8000，开发及验证命令见 README。
+- 迁移覆盖登录、注册、找回密码、账户、OAuth 授权、同意管理、设备授权和结果页，以及原有 29 项通用资源配置。表单使用 Sapid 控件，二维码本地生成，资源结构化表单保留自定义 JSON 字段。
+- 已验证 6 项原生单元测试、WASM 编译检查、Trunk release 构建及后端资源目录选择。浏览器回归运行编译后的 WASM，覆盖密码登录 MFA 的错误与成功路径、社交登录 MFA、绑定与解绑、注册、资源增删改与自定义字段保留、整数端口和含空格枚举值、联系信息验证码、TOTP 设置、同意授予与撤销、设备批准、找回密码和退出。
+- 浏览器回归采用 API 夹具，检查运行时错误和 1440px / 390px 布局。产物位于当前工作区正常目录 `web/target/browser-check/`，日志位于 `web/target/`。数据库和真实外部身份提供商联调需按原有回归流程单独验收。
+- WebAuthn 页面提供凭据列表、删除与注册初始化，浏览器凭据创建及提交注册完成步骤仍待实现。通用资源编辑器与上游专用业务页面之间的流程差距继续按 P2 前端项验收。

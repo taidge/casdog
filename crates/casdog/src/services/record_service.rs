@@ -84,6 +84,11 @@ impl RecordService {
         let mut count_query = String::from("SELECT COUNT(*) FROM records WHERE 1=1");
         let mut param_idx = 1;
 
+        if filter.owner.is_some() {
+            query.push_str(&format!(" AND owner = ${}", param_idx));
+            count_query.push_str(&format!(" AND owner = ${}", param_idx));
+            param_idx += 1;
+        }
         if filter.organization.is_some() {
             query.push_str(&format!(" AND organization = ${}", param_idx));
             count_query.push_str(&format!(" AND organization = ${}", param_idx));
@@ -123,6 +128,9 @@ impl RecordService {
         // Execute with dynamic binding
         let mut sql_query = sqlx::query_as::<_, Record>(&query);
 
+        if let Some(ref owner) = filter.owner {
+            sql_query = sql_query.bind(owner);
+        }
         if let Some(ref org) = filter.organization {
             sql_query = sql_query.bind(org);
         }
@@ -146,6 +154,9 @@ impl RecordService {
         // Count query
         let mut count_sql = sqlx::query_scalar::<_, i64>(&count_query);
 
+        if let Some(ref owner) = filter.owner {
+            count_sql = count_sql.bind(owner);
+        }
         if let Some(ref org) = filter.organization {
             count_sql = count_sql.bind(org);
         }

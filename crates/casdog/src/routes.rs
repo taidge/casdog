@@ -4,14 +4,14 @@ use salvo::prelude::*;
 use salvo::serve_static::static_embed;
 
 use crate::handlers::{
-    adapter, app_extra, application, auth, cas, casbin_cli, cert, cert_extra, consent, dashboard,
-    enforcer, form, group, health, impersonation, invitation, ldap, login_compat, messaging, mfa,
-    model, oidc, order, org_extra, organization, payment, permission, permission_extra, plan,
-    policy, pricing, product, provider, provider_extra, record, resource, role, rule, saml, scim,
-    session, site, social_login, subscription, syncer, system, ticket, token, transaction, upload,
-    user, user_extra, verification, webauthn, webhook,
+    adapter, app_extra, application, auth, cas, casbin_cli, casdoor_compat, cert, cert_extra,
+    consent, dashboard, enforcer, form, group, health, impersonation, invitation, ldap,
+    login_compat, mcp, messaging, mfa, model, oidc, order, org_extra, organization, payment,
+    permission, permission_extra, plan, policy, pricing, product, provider, provider_extra, record,
+    resource, role, rule, saml, scim, session, site, social_login, subscription, syncer, system,
+    ticket, token, transaction, upload, user, user_extra, verification, webauthn, webhook,
 };
-use crate::hoops::{AutoSigninFilter, JwtAuth, OptionalJwtAuth};
+use crate::hoops::{AuthzFilter, AutoSigninFilter, JwtAuth, OptionalJwtAuth};
 
 #[derive(Embed)]
 #[folder = "$CASDOG_WEB_DIST"]
@@ -102,17 +102,29 @@ fn public_routes() -> Router {
     Router::new()
         .push(Router::with_path("health").get(health::health_check))
         .push(Router::with_path("signup").post(auth::signup))
-        .push(Router::with_path("login").post(auth::login))
+        .push(Router::with_path("request-password-reset").post(crate::handlers::password_reset::request_password_reset))
+        .push(Router::with_path("reset-password").post(crate::handlers::password_reset::reset_password))
+        .push(Router::with_path("login").post(crate::handlers::password_mfa::login))
         .push(Router::with_path("get-app-login").get(auth::get_app_login))
-        .push(Router::with_path("userinfo").get(oidc::userinfo))
+        .push(Router::with_path("user").get(oidc::userinfo))
+        .push(Router::with_path("userinfo").get(oidc::userinfo).post(oidc::userinfo))
         .push(Router::with_path("captcha").get(verification::get_captcha))
+        .push(Router::with_path("get-captcha").get(verification::get_captcha))
         .push(Router::with_path("get-captcha-status").get(auth::get_captcha_status))
         .push(Router::with_path("verify-captcha").post(verification::verify_captcha))
         .push(Router::with_path("get-email-and-phone").post(verification::get_email_and_phone))
         .push(Router::with_path("callback").get(auth::callback).post(auth::callback))
+        .push(
+            Router::with_path("webhook")
+                .get(auth::official_account_webhook_echo)
+                .post(auth::handle_official_account_event),
+        )
+        .push(Router::with_path("mcp").post(mcp::handle_mcp))
         .push(Router::with_path("device-auth").post(auth::device_auth))
         .push(Router::with_path("kerberos-login").get(login_compat::kerberos_login))
-        .push(Router::with_path("oauth/register").post(auth::oauth_register))
+        .push(Router::with_path("login/oauth/access_token").post(auth::oauth_access_token))
+        .push(Router::with_path("login/oauth/refresh_token").post(auth::oauth_refresh_token))
+        .push(Router::with_path("login/oauth/introspect").post(auth::oauth_introspect))
         .push(Router::with_path("get-qrcode").get(auth::get_qrcode))
         .push(Router::with_path("get-webhook-event").get(auth::get_webhook_event))
         .push(Router::with_path("faceid-signin-begin").get(login_compat::faceid_signin_begin))
@@ -120,6 +132,8 @@ fn public_routes() -> Router {
         .push(
             Router::new()
                 .hoop(OptionalJwtAuth)
+                .push(Router::with_path("send-verification-code").post(verification::send_verification_code))
+                .push(Router::with_path("verify-code").post(verification::verify_code))
                 .push(Router::with_path("send-email").post(messaging::send_email))
                 .push(Router::with_path("send-sms").post(messaging::send_sms))
                 .push(Router::with_path("send-notification").post(messaging::send_notification)),
@@ -133,7 +147,18 @@ fn public_routes() -> Router {
                 .hoop(AutoSigninFilter)
                 .get(saml::saml_redirect),
         )
+        .push(Router::with_path("auth/password/session").post(crate::handlers::password_mfa::consume_password_session))
+        .push(Router::with_path("auth/password/session/send-code").post(crate::handlers::password_mfa::send_password_mfa_code))
+        .push(Router::with_path("auth/password/session/cancel").post(crate::handlers::password_mfa::cancel_password_session))
+        .push(Router::with_path("get-init-admin-status").get(crate::handlers::parity_system::init_admin_status))
+        .push(Router::with_path("init-admin-password").post(crate::handlers::parity_system::init_admin_password))
         // Social login (OAuth provider callbacks)
+        .push(Router::with_path("auth/providers").get(social_login::list_social_providers))
+        .push(Router::with_path("auth/session").post(social_login::consume_social_session))
+        .push(Router::with_path("auth/session/send-code").post(crate::handlers::social_session::send_social_mfa_code))
+        .push(Router::with_path("auth/session/cancel").post(crate::handlers::social_session::cancel_social_session))
+        // Static authenticated route must precede the public provider-name route.
+        .push(Router::with_path("auth/links").hoop(JwtAuth).hoop(AuthzFilter).get(crate::handlers::social_link::list_links))
         .push(Router::with_path("auth/{provider}").get(social_login::get_provider_auth_url))
         .push(Router::with_path("auth/{provider}/callback").get(social_login::provider_callback))
 }
@@ -141,6 +166,8 @@ fn public_routes() -> Router {
 fn protected_routes() -> Router {
     Router::new()
         .hoop(JwtAuth)
+        .hoop(AuthzFilter)
+        .push(Router::with_path("oauth/register").post(auth::oauth_register))
         .push(Router::with_path("logout").get(auth::logout).post(auth::logout))
         .push(Router::with_path("get-account").get(auth::get_account))
         .push(Router::with_path("set-password").post(auth::set_password))
@@ -151,9 +178,12 @@ fn protected_routes() -> Router {
         .push(Router::with_path("sso-logout").get(auth::sso_logout).post(auth::sso_logout))
         .push(Router::with_path("unlink").post(social_login::unlink_provider_compat))
         .push(protected_webauthn_routes())
+        .push(Router::with_path("auth/{provider}/link").post(crate::handlers::social_link::begin_link))
         // Social login provider unlink
         .push(Router::with_path("auth/{provider}/unlink").post(social_login::unlink_provider))
         .push(mfa_routes())
+        .push(Router::with_path("delete-mfa").post(mfa::delete_mfa))
+        .push(Router::with_path("set-preferred-mfa").post(mfa::set_preferred_mfa))
         .push(user_routes())
         .push(organization_routes())
         .push(application_routes())
@@ -171,6 +201,10 @@ fn protected_routes() -> Router {
         .push(syncer_routes())
         .push(invitation_routes())
         .push(record_routes())
+        .push(casdoor_compat::routes())
+        .push(crate::handlers::parity_system::routes())
+        .push(crate::handlers::parity_resources::routes())
+        .push(crate::handlers::parity_operations::routes())
         .push(cas_routes())
         .push(scim_routes())
         .push(ldap_routes())
@@ -451,6 +485,9 @@ fn invitation_routes() -> Router {
 
 fn mfa_routes() -> Router {
     Router::with_path("mfa")
+        .push(Router::with_path("setup").post(mfa::initiate_mfa_setup))
+        .push(Router::with_path("verify").post(mfa::verify_mfa_setup))
+        .push(Router::with_path("enable").post(mfa::enable_mfa))
         .push(Router::with_path("setup/initiate").post(mfa::initiate_mfa_setup))
         .push(Router::with_path("setup/verify").post(mfa::verify_mfa_setup))
         .push(Router::with_path("setup/enable").post(mfa::enable_mfa))
@@ -694,6 +731,8 @@ fn api_router_for_openapi() -> Router {
         Router::new()
             .push(Router::with_path("health").get(health::health_check))
             .push(Router::with_path("signup").post(auth::signup))
+        .push(Router::with_path("request-password-reset").post(crate::handlers::password_reset::request_password_reset))
+        .push(Router::with_path("reset-password").post(crate::handlers::password_reset::reset_password))
             .push(Router::with_path("login").post(auth::login))
             .push(Router::with_path("get-app-login").get(auth::get_app_login))
             .push(Router::with_path("logout").get(auth::logout).post(auth::logout))
@@ -721,8 +760,7 @@ fn api_router_for_openapi() -> Router {
             .push(Router::with_path("callback").get(auth::callback).post(auth::callback))
             .push(Router::with_path("device-auth").post(auth::device_auth))
             .push(Router::with_path("kerberos-login").get(login_compat::kerberos_login))
-            .push(Router::with_path("oauth/register").post(auth::oauth_register))
-            .push(Router::with_path("get-qrcode").get(auth::get_qrcode))
+                .push(Router::with_path("get-qrcode").get(auth::get_qrcode))
             .push(Router::with_path("get-webhook-event").get(auth::get_webhook_event))
             .push(Router::with_path("faceid-signin-begin").get(login_compat::faceid_signin_begin))
             .push(Router::with_path("faceid-signin-finish").post(login_compat::faceid_signin_finish))

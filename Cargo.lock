@@ -331,6 +331,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bcrypt"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abaf6da45c74385272ddf00e1ac074c7d8a6c1a1dda376902bd6a427522a8b2c"
+dependencies = [
+ "base64 0.22.1",
+ "blowfish",
+ "getrandom 0.3.4",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -367,6 +380,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "blowfish"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e412e2cd0f2b2d93e02543ceae7917b3c70331573df19ee046bcbc35e45e87d7"
+dependencies = [
+ "byteorder",
+ "cipher",
 ]
 
 [[package]]
@@ -494,6 +517,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "base64 0.22.1",
+ "bcrypt",
  "casbin",
  "chrono",
  "config",
@@ -504,8 +528,10 @@ dependencies = [
  "jsonwebtoken 9.3.1",
  "ldap3",
  "lettre",
+ "md-5",
  "once_cell",
  "p256",
+ "pbkdf2",
  "rand 0.8.5",
  "regex",
  "reqwest 0.12.28",
@@ -514,9 +540,11 @@ dependencies = [
  "salvo",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "sqlx",
  "sqlx-adapter",
+ "subtle",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
@@ -2850,6 +2878,16 @@ name = "pathdiff"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
+]
 
 [[package]]
 name = "pem"

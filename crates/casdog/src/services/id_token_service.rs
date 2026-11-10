@@ -51,7 +51,11 @@ impl IdTokenService {
         cert_name: Option<&str>,
     ) -> AppResult<String> {
         let config = AppConfig::get();
-        let issuer = format!("http://{}:{}", config.server.host, config.server.port);
+        let issuer = config
+            .server
+            .public_url
+            .clone()
+            .unwrap_or_else(|| format!("http://{}:{}", config.server.host, config.server.port));
 
         let mut conn = pool
             .get()
@@ -65,6 +69,7 @@ impl IdTokenService {
             Option<String>,
             Option<String>,
             Option<String>,
+            bool,
         )> = users::table
             .filter(users::id.eq(user_id))
             .filter(users::is_deleted.eq(false))
@@ -74,14 +79,23 @@ impl IdTokenService {
                 users::email,
                 users::phone,
                 users::avatar,
+                users::email_verified,
             ))
             .first(&mut conn)
             .await
             .optional()
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let (uid, uname, email, phone, avatar) =
-            user.unwrap_or_else(|| (user_id.to_string(), user_name.to_string(), None, None, None));
+        let (uid, uname, email, phone, avatar, verified) = user.unwrap_or_else(|| {
+            (
+                user_id.to_string(),
+                user_name.to_string(),
+                None,
+                None,
+                None,
+                false,
+            )
+        });
 
         let now = Utc::now();
         let exp = now + Duration::hours(config.jwt.expiration_hours);
@@ -105,7 +119,7 @@ impl IdTokenService {
             name: Some(uname.clone()),
             preferred_username: Some(uname),
             email: email.clone(),
-            email_verified: email.as_ref().map(|_| true),
+            email_verified: email.as_ref().map(|_| verified),
             phone_number: phone.clone(),
             phone_number_verified: phone.as_ref().map(|_| false),
             picture: avatar,

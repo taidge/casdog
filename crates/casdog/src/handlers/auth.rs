@@ -6,6 +6,7 @@ use salvo::oapi::endpoint;
 use salvo::oapi::extract::*;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use sqlx::{PgPool, Pool, Postgres};
 
 use crate::diesel_pool::DieselPool;
@@ -20,7 +21,6 @@ use crate::services::auth_service::{
     CheckPasswordRequest, CheckPasswordResponse, Claims, LoginRequest, LoginResponse,
     SetPasswordRequest, SignupRequest,
 };
-use crate::services::session_service::SessionService;
 use crate::services::token_service::TokenService;
 use crate::services::{AppService, AuthService, OrgService, ProviderService, UserService};
 
@@ -59,6 +59,18 @@ pub struct QrCodeResponse {
 pub struct WebhookEventResponse {
     pub event: String,
     pub ticket: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OfficialAccountEvent {
+    #[serde(rename = "Event")]
+    event: Option<String>,
+    #[serde(rename = "EventKey")]
+    event_key: Option<String>,
+    #[serde(rename = "FromUserName")]
+    from_user_name: Option<String>,
+    #[serde(rename = "Ticket")]
+    ticket: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -379,9 +391,16 @@ pub async fn oauth_register(
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if !principal.admin {
+        return Err(AppError::Authorization("Administrator required".into()));
+    }
     let organization = req
         .query::<String>("organization")
-        .unwrap_or_else(|| "built-in".to_string());
+        .unwrap_or_else(|| principal.owner.clone());
+    if !principal.global_admin() && organization != principal.owner {
+        return Err(AppError::Authorization("Tenant mismatch".into()));
+    }
     let org_service = OrgService::new(pool.clone());
     let _ = org_service.get_by_name(&organization).await?;
 
@@ -408,7 +427,7 @@ pub async fn oauth_register(
     });
 
     let create_request = CreateApplicationRequest {
-        owner: "admin".to_string(),
+        owner: principal.owner.clone(),
         name: format!("dcr_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
         display_name: client_name.clone(),
         logo: request.logo_uri.clone(),
@@ -500,6 +519,121 @@ pub async fn get_webhook_event(req: &mut Request) -> AppResult<Json<WebhookEvent
     Ok(Json(WebhookEventResponse { event, ticket }))
 }
 
+#[endpoint(tags("Authentication"), summary = "Official account webhook echo")]
+pub async fn official_account_webhook_echo(req: &mut Request) -> AppResult<String> {
+    Ok(req
+        .query::<String>("echostr")
+        .or_else(|| req.query::<String>("echoStr"))
+        .unwrap_or_default())
+}
+
+#[endpoint(
+    tags("Authentication"),
+    summary = "Handle official account webhook event"
+)]
+pub async fn handle_official_account_event(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> AppResult<String> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
+        .clone();
+    let body = req
+        .payload()
+        .await
+        .map_err(|e| AppError::Validation(format!("Failed to read webhook body: {}", e)))?;
+    let body = String::from_utf8_lossy(body);
+    let event = parse_official_account_event(&body)?;
+    let event_name = event.event.unwrap_or_default().to_ascii_uppercase();
+    if event_name != "SCAN" && event_name != "SUBSCRIBE" {
+        return Ok(String::new());
+    }
+
+    let ticket = event
+        .ticket
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Validation("empty ticket".to_string()))?;
+    let provider_id = normalize_wechat_event_key(event.event_key.unwrap_or_default());
+    if provider_id.is_empty() {
+        return Err(AppError::Validation("empty provider id".to_string()));
+    }
+
+    let token: String = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(content, client_secret, '')
+        FROM providers
+        WHERE id = $1 OR name = $1 OR owner || '/' || name = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(&provider_id)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("Provider '{}' not found", provider_id)))?;
+
+    let signature = req.query::<String>("signature").unwrap_or_default();
+    let timestamp = req.query::<String>("timestamp").unwrap_or_default();
+    let nonce = req.query::<String>("nonce").unwrap_or_default();
+    if !verify_wechat_signature(&token, &nonce, &timestamp, &signature) {
+        return Err(AppError::Authentication(
+            "invalid official account signature".to_string(),
+        ));
+    }
+
+    let value = if let Some(open_id) = event.from_user_name.filter(|value| !value.is_empty()) {
+        format!("{}:{}", event_name, open_id)
+    } else {
+        event_name
+    };
+    QR_TICKETS
+        .lock()
+        .map_err(|_| AppError::Internal("QR ticket cache unavailable".to_string()))?
+        .insert(ticket, value);
+
+    Ok(String::new())
+}
+
+fn parse_official_account_event(body: &str) -> AppResult<OfficialAccountEvent> {
+    Ok(OfficialAccountEvent {
+        event: xml_tag(body, "Event"),
+        event_key: xml_tag(body, "EventKey"),
+        from_user_name: xml_tag(body, "FromUserName"),
+        ticket: xml_tag(body, "Ticket"),
+    })
+}
+
+fn xml_tag(body: &str, tag: &str) -> Option<String> {
+    let re = regex::Regex::new(&format!(
+        r"(?s)<{tag}>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</{tag}>"
+    ))
+    .ok()?;
+    re.captures(body)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_wechat_event_key(value: String) -> String {
+    value
+        .strip_prefix("qrscene_")
+        .unwrap_or(&value)
+        .trim()
+        .to_string()
+}
+
+fn verify_wechat_signature(token: &str, nonce: &str, timestamp: &str, signature: &str) -> bool {
+    if token.is_empty() || nonce.is_empty() || timestamp.is_empty() || signature.is_empty() {
+        return false;
+    }
+    let mut parts = [token, timestamp, nonce];
+    parts.sort_unstable();
+    let mut hasher = Sha1::new();
+    hasher.update(parts.concat().as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    digest.eq_ignore_ascii_case(signature)
+}
+
 /// User logout - supports OIDC RP-initiated logout
 ///
 /// Accepts optional query parameters per the OIDC RP-Initiated Logout spec:
@@ -523,32 +657,40 @@ pub async fn logout(
     req: &mut Request,
     res: &mut Response,
 ) -> Result<(), AppError> {
-    let pool = depot
-        .obtain::<DieselPool>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
     let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
-    let id_token_hint = req.query::<String>("id_token_hint");
     let post_logout_redirect_uri = req.query::<String>("post_logout_redirect_uri");
     let state = req.query::<String>("state");
 
-    // Get user from depot (JWT) or from id_token_hint
-    let user_id = if let Ok(uid) = depot.get::<String>("user_id").cloned() {
-        Some(uid)
-    } else if let Some(ref token_hint) = id_token_hint {
-        // Decode the id_token_hint to get user_id (don't validate expiry)
-        extract_user_from_token_hint(token_hint)
-    } else {
-        None
-    };
+    let user_id = depot.get::<String>("user_id").ok().cloned();
+    // Protected logout revokes only the authenticated caller, never a token-hint subject.
+    let revocation = req
+        .header::<String>("Authorization")
+        .and_then(|s| s.strip_prefix("Bearer ").map(str::to_owned))
+        .zip(depot.get::<Claims>("claims").ok())
+        .map(|(token, claims)| (crate::hoops::auth::session_fingerprint(&token), claims.exp));
+    // Only application-registered redirect destinations are permitted.
+    if let Some(uri) = post_logout_redirect_uri.as_deref() {
+        let allowed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM applications WHERE is_deleted=false AND organization=$1 AND $2 = ANY(regexp_split_to_array(COALESCE(logout_redirect_uris, ''), '[,[:space:]]+')))")
+            .bind(depot.get::<String>("user_owner").cloned().unwrap_or_default())
+            .bind(uri).fetch_one(&pg_pool).await?;
+        if !allowed {
+            return Err(AppError::Validation("Unregistered logout redirect".into()));
+        }
+    }
 
     if let Some(ref uid) = user_id {
         // Delete tokens and sessions
-        AuthService::sso_logout(&pool, uid).await?;
+        AuthService::logout_session(
+            &pg_pool,
+            uid,
+            revocation.as_ref().map(|(hash, exp)| (hash.as_str(), *exp)),
+        )
+        .await?;
 
         // Send SSO logout notifications asynchronously
         let pg_pool_clone = pg_pool.clone();
@@ -611,6 +753,98 @@ pub async fn get_account(depot: &mut Depot) -> Result<Json<UserResponse>, AppErr
     Ok(Json(user))
 }
 
+async fn oauth_request<T: serde::de::DeserializeOwned>(req: &mut Request) -> AppResult<T> {
+    let json = req
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if json {
+        req.parse_json::<T>().await
+    } else {
+        req.parse_form::<T>().await
+    }
+    .map_err(|_| AppError::Validation("Invalid OAuth request body".into()))
+}
+
+fn oauth_client_credentials(
+    req: &Request,
+    client_id: &mut Option<String>,
+    client_secret: &mut Option<String>,
+) -> AppResult<()> {
+    use base64::Engine;
+    if let Some(header) = req.headers().get("authorization") {
+        let value = header
+            .to_str()
+            .ok()
+            .and_then(|v| v.strip_prefix("Basic "))
+            .ok_or_else(|| {
+                AppError::Authentication("HTTP Basic client authentication required".into())
+            })?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .ok_or_else(|| AppError::Authentication("Invalid client credentials".into()))?;
+        let (id, secret) = decoded
+            .split_once(':')
+            .ok_or_else(|| AppError::Authentication("Invalid client credentials".into()))?;
+        let decode = |s: &str| {
+            urlencoding::decode(&s.replace('+', " "))
+                .map(|v| v.into_owned())
+                .unwrap_or_default()
+        };
+        let (id, secret) = (decode(id), decode(secret));
+        if client_id.as_ref().is_some_and(|v| v != &id)
+            || client_secret.as_ref().is_some_and(|v| v != &secret)
+        {
+            return Err(AppError::Authentication(
+                "Conflicting client credentials".into(),
+            ));
+        }
+        *client_id = Some(id);
+        *client_secret = Some(secret);
+    }
+    Ok(())
+}
+
+async fn authenticate_oauth_client(
+    pool: &DieselPool,
+    client_id: Option<&str>,
+    secret: Option<&str>,
+    confidential: bool,
+) -> AppResult<crate::models::Application> {
+    let id = client_id
+        .ok_or_else(|| AppError::Authentication("Client authentication required".into()))?;
+    let app = AppService::new(pool.clone())
+        .get_by_client_id(id)
+        .await
+        .map_err(|_| AppError::Authentication("Invalid client credentials".into()))?;
+    if app.is_deleted
+        || (confidential && app.client_secret.is_empty())
+        || (!app.client_secret.is_empty() && secret != Some(app.client_secret.as_str()))
+    {
+        return Err(AppError::Authentication(
+            "Invalid client credentials".into(),
+        ));
+    }
+    Ok(app)
+}
+
+async fn token_belongs_to_client(
+    pool: &DieselPool,
+    value: &str,
+    app: &crate::models::Application,
+) -> AppResult<bool> {
+    let token = match TokenService::get_by_access_token(pool, value).await {
+        Ok(t) => Some(t),
+        Err(_) => TokenService::get_by_refresh_token(pool, value).await.ok(),
+    };
+    Ok(token.is_some_and(|t| {
+        t.owner == app.owner && t.application == app.name && t.organization == app.organization
+    }))
+}
+
 /// OAuth 2.0 Token endpoint - handles all grant types
 #[endpoint(
     tags("OAuth"),
@@ -623,14 +857,15 @@ pub async fn get_account(depot: &mut Depot) -> Result<Json<UserResponse>, AppErr
 )]
 pub async fn oauth_access_token(
     depot: &mut Depot,
-    req: JsonBody<OAuthTokenRequest>,
+    request: &mut Request,
 ) -> Result<Json<OAuthTokenResponse>, AppError> {
     let pool = depot
         .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
-    let req = req.into_inner();
+    let mut req: OAuthTokenRequest = oauth_request(request).await?;
+    oauth_client_credentials(request, &mut req.client_id, &mut req.client_secret)?;
 
     // Authenticate the client
     let client_id = req
@@ -638,23 +873,25 @@ pub async fn oauth_access_token(
         .as_deref()
         .ok_or_else(|| AppError::Validation("client_id is required".to_string()))?;
 
-    let app_service = AppService::new(pool.clone());
-    let application = app_service
-        .get_by_client_id(client_id)
-        .await
-        .map_err(|_| AppError::Authentication("Invalid client_id".to_string()))?;
-
-    // Verify client_secret for confidential clients
-    if req.grant_type != "authorization_code" || req.code_verifier.is_none() {
-        if let Some(ref secret) = req.client_secret {
-            if secret != &application.client_secret {
-                return Err(AppError::Authentication(
-                    "Invalid client_secret".to_string(),
-                ));
-            }
-        }
+    let application =
+        authenticate_oauth_client(&pool, Some(client_id), req.client_secret.as_deref(), false)
+            .await?;
+    if application.client_secret.is_empty() && req.grant_type == "client_credentials" {
+        return Err(AppError::Authentication(
+            "Confidential client required".into(),
+        ));
     }
 
+    if let Some(grants) = application.grant_types.as_ref().and_then(|v| v.as_array()) {
+        if !grants
+            .iter()
+            .any(|v| v.as_str() == Some(req.grant_type.as_str()))
+        {
+            return Err(AppError::Authorization(
+                "Grant type is not enabled for this application".into(),
+            ));
+        }
+    }
     let response = match req.grant_type.as_str() {
         "authorization_code" => {
             let code = req
@@ -690,6 +927,24 @@ pub async fn oauth_access_token(
                 .password
                 .as_deref()
                 .ok_or_else(|| AppError::Validation("password is required".to_string()))?;
+            let pg_pool = depot
+                .obtain::<PgPool>()
+                .map_err(|_| AppError::Internal("Authentication database unavailable".into()))?
+                .clone();
+            let login_request: LoginRequest = serde_json::from_value(serde_json::json!({
+                "owner":application.organization,"username":username,"password":password,"clientId":application.client_id
+            })).map_err(|e| AppError::Validation(e.to_string()))?;
+            let login_result = AuthService::new(UserService::new(pool.clone()))
+                .with_pg_pool(pg_pool)
+                .login(&pool, login_request)
+                .await?;
+            if login_result.mfa_required == Some(true)
+                || login_result.password_expired == Some(true)
+            {
+                return Err(AppError::Authentication(
+                    "Interactive sign-in required".into(),
+                ));
+            }
             TokenService::exchange_password(
                 &pool,
                 &application,
@@ -721,14 +976,15 @@ pub async fn oauth_access_token(
 )]
 pub async fn oauth_refresh_token(
     depot: &mut Depot,
-    req: JsonBody<OAuthTokenRequest>,
+    request: &mut Request,
 ) -> Result<Json<OAuthTokenResponse>, AppError> {
     let pool = depot
         .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
-    let req = req.into_inner();
+    let mut req: OAuthTokenRequest = oauth_request(request).await?;
+    oauth_client_credentials(request, &mut req.client_id, &mut req.client_secret)?;
     let client_id = req
         .client_id
         .as_deref()
@@ -738,12 +994,25 @@ pub async fn oauth_refresh_token(
         .as_deref()
         .ok_or_else(|| AppError::Validation("refresh_token is required".to_string()))?;
 
-    let app_service = AppService::new(pool.clone());
-    let application = app_service
-        .get_by_client_id(client_id)
-        .await
-        .map_err(|_| AppError::Authentication("Invalid client_id".to_string()))?;
+    let application =
+        authenticate_oauth_client(&pool, Some(client_id), req.client_secret.as_deref(), false)
+            .await?;
+    if application.client_secret.is_empty() && req.grant_type == "client_credentials" {
+        return Err(AppError::Authentication(
+            "Confidential client required".into(),
+        ));
+    }
 
+    if application
+        .grant_types
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .is_some_and(|g| !g.iter().any(|v| v.as_str() == Some("refresh_token")))
+    {
+        return Err(AppError::Authorization(
+            "Refresh grant is not enabled".into(),
+        ));
+    }
     let response = TokenService::refresh_access_token(&pool, &application, refresh_token).await?;
     Ok(Json(response))
 }
@@ -758,17 +1027,36 @@ pub async fn oauth_refresh_token(
 )]
 pub async fn oauth_introspect(
     depot: &mut Depot,
-    req: JsonBody<IntrospectRequest>,
+    request: &mut Request,
 ) -> Result<Json<IntrospectResponse>, AppError> {
     let pool = depot
         .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
-    let req = req.into_inner();
-    let response =
+    let mut req: IntrospectRequest = oauth_request(request).await?;
+    oauth_client_credentials(request, &mut req.client_id, &mut req.client_secret)?;
+    let app = authenticate_oauth_client(
+        &pool,
+        req.client_id.as_deref(),
+        req.client_secret.as_deref(),
+        true,
+    )
+    .await?;
+    if !token_belongs_to_client(&pool, &req.token, &app).await? {
+        return Ok(Json(
+            serde_json::from_value(serde_json::json!({"active":false}))
+                .map_err(|e| AppError::Internal(e.to_string()))?,
+        ));
+    }
+
+    let mut response =
         TokenService::introspect_token(&pool, &req.token, req.token_type_hint.as_deref()).await?;
 
+    if response.active {
+        response.client_id = Some(app.client_id.clone());
+        response.aud = Some(app.client_id);
+    }
     Ok(Json(response))
 }
 
@@ -782,14 +1070,26 @@ pub async fn oauth_introspect(
 )]
 pub async fn oauth_revoke(
     depot: &mut Depot,
-    req: JsonBody<RevokeRequest>,
+    request: &mut Request,
 ) -> Result<&'static str, AppError> {
     let pool = depot
         .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
-    let req = req.into_inner();
+    let mut req: RevokeRequest = oauth_request(request).await?;
+    oauth_client_credentials(request, &mut req.client_id, &mut req.client_secret)?;
+    let app = authenticate_oauth_client(
+        &pool,
+        req.client_id.as_deref(),
+        req.client_secret.as_deref(),
+        true,
+    )
+    .await?;
+    if !token_belongs_to_client(&pool, &req.token, &app).await? {
+        return Ok("Token revoked");
+    }
+
     TokenService::revoke_token(&pool, &req.token, req.token_type_hint.as_deref()).await?;
 
     Ok("Token revoked")
@@ -885,10 +1185,6 @@ pub async fn check_user_password(
     )
 )]
 pub async fn sso_logout(depot: &mut Depot, req: &mut Request) -> Result<&'static str, AppError> {
-    let pool = depot
-        .obtain::<DieselPool>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
     let pg_pool = depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
@@ -903,14 +1199,36 @@ pub async fn sso_logout(depot: &mut Depot, req: &mut Request) -> Result<&'static
     let logout_all = req.query::<bool>("logout_all").unwrap_or(true);
 
     if logout_all {
-        AuthService::sso_logout(&pool, &user_id).await?;
+        AuthService::sso_logout(&pg_pool, &user_id).await?;
     } else if let Some(app) = application {
-        // Only logout from the specified application
-        TokenService::expire_tokens_by_application(&pool, &app).await?;
-        SessionService::delete_by_application(&pg_pool, &app).await?;
+        let owner = depot
+            .get::<String>("user_owner")
+            .map_err(|_| AppError::Authentication("Missing tenant".into()))?;
+        let apps: Vec<(String,String)> = sqlx::query_as("SELECT owner,name FROM applications WHERE organization=$1 AND NOT is_deleted AND (id=$2 OR name=$2 OR owner || '/' || name=$2) LIMIT 2")
+            .bind(owner).bind(&app).fetch_all(&pg_pool).await?;
+        if apps.len() != 1 {
+            return Err(AppError::Authorization(
+                "Application is unavailable in this tenant".into(),
+            ));
+        }
+        let (app_owner, app_name) = &apps[0];
+        let mut tx = pg_pool.begin().await?;
+        sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+            .bind(&user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM tokens WHERE user_id=$1 AND owner=$2 AND organization=$3 AND application=$4")
+            .bind(&user_id).bind(app_owner).bind(owner).bind(app_name).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM sessions WHERE user_id=$1 AND owner=$2 AND application=$3")
+            .bind(&user_id)
+            .bind(owner)
+            .bind(app_name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
     } else {
         // No specific app and logout_all is false -- fall back to full logout
-        AuthService::sso_logout(&pool, &user_id).await?;
+        AuthService::sso_logout(&pg_pool, &user_id).await?;
     }
 
     // Send SSO logout notifications asynchronously

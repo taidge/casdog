@@ -120,7 +120,136 @@ pub async fn request_json(
     if text.trim().is_empty() {
         Ok(serde_json::json!({ "status": "ok" }))
     } else {
-        serde_json::from_str(&text).map_err(|err| format!("Invalid JSON response: {err}"))
+        let value =
+            serde_json::from_str(&text).map_err(|err| format!("Invalid JSON response: {err}"))?;
+        validate_response(value)
+    }
+}
+
+// Casdoor compatibility endpoints can report failures inside an HTTP 200 envelope.
+fn validate_response(value: Value) -> Result<Value, String> {
+    if value.get("status").and_then(Value::as_str) == Some("error") {
+        return Err(value
+            .get("msg")
+            .and_then(Value::as_str)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or("The server rejected this request.")
+            .to_string());
+    }
+    Ok(value)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum LoginOutcome {
+    Challenge(Vec<String>),
+    Authenticated {
+        token: String,
+        user: Value,
+        password_expired: bool,
+    },
+}
+
+pub fn parse_login_response(value: Value) -> Result<LoginOutcome, String> {
+    let value = validate_response(value)?;
+    // A challenge must never create a browser session, even if a token is present.
+    if value.get("mfa_required").and_then(Value::as_bool) == Some(true) {
+        let methods = value
+            .get("mfa_types")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|method| matches!(*method, "app" | "totp" | "sms" | "email" | "recovery"))
+            .map(str::to_string)
+            .collect();
+        return Ok(LoginOutcome::Challenge(methods));
+    }
+    let token = value
+        .get("token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .ok_or("Login failed: no token returned.")?
+        .to_string();
+    let user = value
+        .get("user")
+        .filter(|user| user.is_object())
+        .ok_or("Login failed: no account returned.")?
+        .clone();
+    Ok(LoginOutcome::Authenticated {
+        token,
+        user,
+        password_expired: value
+            .get("password_expired")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+pub fn parse_mfa_verification(value: Value) -> Result<Vec<String>, String> {
+    let value = validate_response(value)?;
+    if value.get("success").and_then(Value::as_bool) != Some(true) {
+        return Err("The verification code is invalid or expired. Try the current code from your authenticator.".into());
+    }
+    Ok(value
+        .get("recovery_codes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn failed_mfa_verification_never_enables_the_ui() {
+        assert!(parse_mfa_verification(json!({"success": false, "recovery_codes": null})).is_err());
+        assert!(parse_mfa_verification(json!({"status": "ok"})).is_err());
+        assert_eq!(
+            parse_mfa_verification(json!({"success": true, "recovery_codes": ["one-use-code"]}))
+                .unwrap(),
+            vec!["one-use-code"]
+        );
+    }
+
+    #[test]
+    fn challenge_never_authenticates_an_empty_or_present_token() {
+        for token in ["", "unexpected-token"] {
+            assert_eq!(
+                parse_login_response(json!({"token": token, "mfa_required": true,
+                "mfa_types": ["app", "unknown"]}))
+                .unwrap(),
+                LoginOutcome::Challenge(vec!["app".into()])
+            );
+        }
+    }
+
+    #[test]
+    fn login_requires_a_nonempty_token_and_account() {
+        assert!(parse_login_response(json!({"token": " ", "user": {}})).is_err());
+        assert!(parse_login_response(json!({"token": "jwt"})).is_err());
+        assert!(matches!(
+            parse_login_response(json!({"token": "jwt", "user": {"name":"alice"},
+            "password_expired": true}))
+            .unwrap(),
+            LoginOutcome::Authenticated {
+                password_expired: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn casdoor_errors_are_not_successful_mutations() {
+        assert_eq!(
+            validate_response(json!({"status":"error", "msg":"Access denied"})),
+            Err("Access denied".into())
+        );
+        assert!(validate_response(json!({"status":"ok", "data":[]})).is_ok());
     }
 }
 
