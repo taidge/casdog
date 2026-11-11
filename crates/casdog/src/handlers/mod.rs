@@ -69,3 +69,5 @@ pub mod parity_resources;
 pub mod password_mfa;
 
 pub mod parity_operations;
+pub mod system_gaps;
+pub mod protocol_gaps;

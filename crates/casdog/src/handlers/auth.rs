@@ -24,14 +24,6 @@ use crate::services::auth_service::{
 use crate::services::token_service::TokenService;
 use crate::services::{AppService, AuthService, OrgService, ProviderService, UserService};
 
-#[derive(Debug, Clone)]
-struct DeviceAuthCache {
-    application_id: String,
-    scope: String,
-}
-
-static DEVICE_AUTH_CODES: LazyLock<Mutex<HashMap<String, DeviceAuthCache>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 static QR_TICKETS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -122,10 +114,7 @@ fn mask_application(mut response: ApplicationResponse) -> ApplicationResponse {
     response
 }
 
-fn generate_user_code() -> String {
-    let raw = uuid::Uuid::new_v4().simple().to_string().to_uppercase();
-    format!("{}-{}", &raw[..4], &raw[4..8])
-}
+
 
 fn captcha_enabled_for_application(application: &crate::models::Application) -> bool {
     application
@@ -245,15 +234,10 @@ pub async fn get_app_login(
                 AppError::Validation("userCode is required for device login".to_string())
             })?;
 
-            let cache = DEVICE_AUTH_CODES
-                .lock()
-                .map_err(|_| AppError::Internal("Device auth cache unavailable".to_string()))?
-                .get(&user_code)
-                .cloned()
-                .ok_or_else(|| AppError::Authentication("Invalid device user code".to_string()))?;
-
-            let _ = cache.scope;
-            app_service.get_by_id(&cache.application_id).await?
+            let pg_pool = depot.obtain::<PgPool>()
+                .map_err(|_| AppError::Internal("Database unavailable".into()))?;
+            let application_id = crate::services::protocol_gap_service::application_for_user_code(pg_pool, &user_code).await?;
+            app_service.get_by_id(&application_id).await?
         }
         _ => {
             let client_id = req.query::<String>("clientId").ok_or_else(|| {
@@ -330,53 +314,28 @@ pub async fn callback(req: &mut Request, res: &mut Response) -> AppResult<()> {
 pub async fn device_auth(
     depot: &mut Depot,
     req: &mut Request,
-) -> AppResult<Json<DeviceAuthResponse>> {
-    let pool = depot
-        .obtain::<DieselPool>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
-
-    let client_id = req
-        .query::<String>("client_id")
-        .ok_or_else(|| AppError::Validation("client_id is required".to_string()))?;
-    let scope = req
-        .query::<String>("scope")
-        .unwrap_or_else(|| "openid".to_string());
-
-    let app_service = AppService::new(pool);
-    let application = app_service.get_by_client_id(&client_id).await?;
-    let device_code = uuid::Uuid::new_v4().to_string();
-    let user_code = generate_user_code();
-
-    let mut cache = DEVICE_AUTH_CODES
-        .lock()
-        .map_err(|_| AppError::Internal("Device auth cache unavailable".to_string()))?;
-    cache.insert(
-        device_code.clone(),
-        DeviceAuthCache {
-            application_id: application.id.clone(),
-            scope: scope.clone(),
-        },
-    );
-    cache.insert(
-        user_code.clone(),
-        DeviceAuthCache {
-            application_id: application.id,
-            scope,
-        },
-    );
-    drop(cache);
-
-    let config = AppConfig::get();
-    let base_url = format!("http://{}:{}", config.server.host, config.server.port);
-
-    Ok(Json(DeviceAuthResponse {
-        device_code,
-        user_code: user_code.clone(),
-        verification_uri: format!("{}/login/oauth/device/{}", base_url, user_code),
-        expires_in: 120,
-        interval: 5,
-    }))
+) -> AppResult<Json<serde_json::Value>> {
+    let diesel = depot.obtain::<DieselPool>().cloned()
+        .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
+    let pg_pool = depot.obtain::<PgPool>().cloned()
+        .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
+    let mut value = if req.header::<String>("content-type").is_some_and(|header| header.starts_with("application/json")) {
+        req.parse_json::<serde_json::Value>().await.map_err(|_| AppError::Validation("Invalid JSON".into()))?
+    } else {
+        serde_json::to_value(req.parse_form::<std::collections::HashMap<String,String>>().await.unwrap_or_default())
+            .map_err(|e| AppError::Validation(e.to_string()))?
+    };
+    if !value.is_object() { return Err(AppError::Validation("Object body required".into())); }
+    for key in ["client_id", "client_secret", "scope"] {
+        if let Some(query) = req.query::<String>(key) { value[key] = serde_json::json!(query); }
+    }
+    let mut client_id = value["client_id"].as_str().map(str::to_owned);
+    let mut client_secret = value["client_secret"].as_str().map(str::to_owned);
+    oauth_client_credentials(req, &mut client_id, &mut client_secret)?;
+    let app = authenticate_oauth_client(&diesel, client_id.as_deref(), client_secret.as_deref(), false).await?;
+    let origin = crate::config::AppConfig::get().server.public_url.clone()
+        .unwrap_or_else(|| { let c = crate::config::AppConfig::get(); format!("http://{}:{}",c.server.host,c.server.port) });
+    Ok(Json(crate::services::protocol_gap_service::begin_device(&pg_pool, &app, value["scope"].as_str().unwrap_or("openid profile"), &origin).await?))
 }
 
 /// OAuth dynamic client registration endpoint (RFC 7591 compatible shape).
@@ -858,7 +817,8 @@ async fn token_belongs_to_client(
 pub async fn oauth_access_token(
     depot: &mut Depot,
     request: &mut Request,
-) -> Result<Json<OAuthTokenResponse>, AppError> {
+    res: &mut Response,
+) -> Result<Json<serde_json::Value>, AppError> {
     let pool = depot
         .obtain::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
@@ -891,6 +851,16 @@ pub async fn oauth_access_token(
                 "Grant type is not enabled for this application".into(),
             ));
         }
+    }
+    if req.grant_type == crate::services::protocol_gap_service::DEVICE_GRANT {
+        let pg_pool = depot.obtain::<PgPool>().cloned()
+            .map_err(|_|AppError::Internal("Database unavailable".into()))?;
+        let code = req.device_code.as_deref().ok_or_else(||AppError::Validation("device_code is required".into()))?;
+        let value = crate::services::protocol_gap_service::poll_device(&pg_pool,&pool,&application,code).await?;
+        res.add_header("Cache-Control", "no-store", true).ok();
+        res.add_header("Pragma", "no-cache", true).ok();
+        if value.get("error").is_some() { res.status_code(StatusCode::BAD_REQUEST); }
+        return Ok(Json(value));
     }
     let response = match req.grant_type.as_str() {
         "authorization_code" => {
@@ -962,7 +932,7 @@ pub async fn oauth_access_token(
         }
     };
 
-    Ok(Json(response))
+    Ok(Json(serde_json::to_value(response).map_err(|e|AppError::Internal(e.to_string()))?))
 }
 
 /// Refresh token endpoint

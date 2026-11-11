@@ -77,10 +77,10 @@ impl ProviderService {
                 id, owner, name, created_at, updated_at, display_name, category, type,
                 sub_type, method, client_id, client_secret, host, port, disable_ssl,
                 endpoint, bucket, domain, region_id, sign_name, template_code, app_id,
-                metadata, issuer_url, provider_url, enable_sign_authn_request
+                metadata, issuer_url, provider_url, enable_sign_authn_request, content, scopes
             ) VALUES (
                 $1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, false
+                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, false, $25, $26
             ) RETURNING *"#,
         )
         .bind(&id)
@@ -107,6 +107,8 @@ impl ProviderService {
         .bind(&req.metadata)
         .bind(&req.issuer_url)
         .bind(&req.provider_url)
+        .bind(&req.content)
+        .bind(&req.scopes)
         .fetch_one(pool)
         .await?;
 
@@ -142,7 +144,9 @@ impl ProviderService {
                 app_id = COALESCE($19, app_id),
                 metadata = COALESCE($20, metadata),
                 issuer_url = COALESCE($21, issuer_url),
-                provider_url = COALESCE($22, provider_url)
+                provider_url = COALESCE($22, provider_url),
+                content = COALESCE($23, content),
+                scopes = COALESCE($24, scopes)
             WHERE id = $1 RETURNING *"#,
         )
         .bind(id)
@@ -167,6 +171,8 @@ impl ProviderService {
         .bind(&req.metadata)
         .bind(&req.issuer_url)
         .bind(&req.provider_url)
+        .bind(&req.content)
+        .bind(&req.scopes)
         .fetch_one(pool)
         .await?;
 

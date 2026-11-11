@@ -1,0 +1,228 @@
+{
+  "date": "2026-11-11",
+  "reference_revision": "47da539f886d5b09d2c35cf6ae78d8b6b5f30a43",
+  "baseline_missing": 9,
+  "newly_declared": 9,
+  "remaining_undeclared": 0,
+  "scope": "Explicit flat route declarations and the implemented behaviors below. Full Casdoor behavioral equivalence requires additional scenario and deployment acceptance.",
+  "items": [
+    {
+      "route": "GET /api/get-openclaw-session-transcript",
+      "status": "implemented_with_documented_scope",
+      "scope": "Existing multipart upload accepts entryId and an explicitly tenant-bound Local provider, persists the object/resource relationship, and previews at most 2 MiB. Local roots are operator-bounded. S3 transcript previews remain outside this implementation."
+    },
+    {
+      "route": "GET /api/get-upgrade-info",
+      "status": "implemented_with_documented_scope",
+      "scope": "Reports the running version, operator-pinned release manifest and durable upgrade state. Unconfigured deployments report disabled capabilities."
+    },
+    {
+      "route": "POST /api/upgrade-system",
+      "status": "implemented_with_documented_scope",
+      "scope": "Validates pinned manifest and package SHA-256/size/platform, records a durable file journal, compensates failures and confirms installed only from a matching running image at startup. Requires operator-supplied installation and restart configuration."
+    },
+    {
+      "route": "GET /api/scan",
+      "status": "implemented_with_documented_scope",
+      "scope": "Performs bounded HTTP fingerprint scans, persists results and reports complex CVE rules as unassessed."
+    },
+    {
+      "route": "POST /api/sync-intranet-servers",
+      "status": "implemented_with_documented_scope",
+      "scope": "Global-admin-only bounded private IPv4 MCP discovery and transactional idempotent Server synchronization."
+    },
+    {
+      "route": "POST /api/sync-mcp-tool",
+      "status": "implemented_with_documented_scope",
+      "scope": "Uses saved tenant-authorized Server configuration, negotiates Streamable HTTP sessions, JSON/SSE responses and pagination, and preserves existing tool permissions on refresh or failure."
+    },
+    {
+      "route": "POST /api/cancel-device-auth",
+      "status": "implemented_with_documented_scope",
+      "scope": "Consumes a separate high-entropy cancellation proof against persistent device state."
+    },
+    {
+      "route": "POST /api/device-auth-complete",
+      "status": "implemented_with_documented_scope",
+      "scope": "Completes an issued device grant once after checking the application, account and approving session."
+    },
+    {
+      "route": "POST /api/verify-identification",
+      "status": "implemented_with_documented_scope",
+      "scope": "Uses an application-permitted HTTP/Generic ID verification provider, stores a successful verification audit digest, and revokes verification when identity fields change. Vendor-specific signing adapters remain unimplemented."
+    }
+  ],
+  "additional_security": [
+    "WebAuthn registration/sign-in use PostgreSQL single-use challenges and native browser credentials, with configured RP/Origin and enforced additional MFA.",
+    "Local file operations use an operator-controlled root and exact-owner SHA-256 namespace for tenant callers.",
+    "MCP and file S3 requests use checked/pinned DNS addresses, reject private destinations for tenant callers, and disable redirects and environment proxies."
+  ],
+  "validation": {
+    "status": "passed",
+    "command": "cargo test --workspace --tests --no-fail-fast --jobs 2 -- --include-ignored --test-threads=1",
+    "test_programs": 21,
+    "test_executions_passed": 387,
+    "failed": 0,
+    "ignored": 0,
+    "postgresql_scenarios_passed": 81,
+    "new_postgresql_scenarios": 19,
+    "frontend_tests_passed": 6,
+    "wasm_check": "passed",
+    "trunk_release_build": "passed",
+    "frontend_api_fixture_browser_check": "passed",
+    "real_backend_browser_e2e": {
+      "passed": true,
+      "checks": [
+        "Browser signup and password login persisted a real user/session",
+        "Profile changes persisted through the authenticated API",
+        "Cancelling a native WebAuthn request leaves no enrolled credential and permits retry",
+        "Native navigator.credentials.create attestation verified and persisted by PostgreSQL",
+        "Native navigator.credentials.get assertion completed a real passkey login",
+        "Device browser approval, real OAuth token issuance, single-use completion and cancellation persisted",
+        "Passkey sign-in through the UI enforces enrolled MFA before issuing a browser session",
+        "Credential deletion persisted and refreshed the browser list",
+        "TOTP enrollment, failed proof rejection and password MFA login completed in the browser",
+        "Password recovery delivered through a local HTTP email provider and new password login succeeded"
+      ],
+      "api_interception": false,
+      "authenticator": "Chromium CDP virtual authenticator"
+    },
+    "migrations": "001-026",
+    "log": "target/phase5/backend-tests-final.log",
+    "browser_e2e_log": "target/phase5/browser-e2e-final.log",
+    "normal_backend_target": "D:/Works/taidge/casdog/target",
+    "normal_frontend_target": "D:/Works/taidge/casdog/web/target",
+    "program_results": [
+      {
+        "program": "unittests src\\lib.rs",
+        "passed": 37,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "unittests src\\main.rs",
+        "passed": 37,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\api_parity_tests.rs",
+        "passed": 179,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\auth_security_tests.rs",
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\authorization_tests.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\legacy_crud_tests.rs",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\parity_operations_tests.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\parity_resources_tests.rs",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\parity_system_tests.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\password_mfa_tests.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\password_reset_tests.rs",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\protocol_gaps_tests.rs",
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\saml_signing_tests.rs",
+        "passed": 23,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\social_link_tests.rs",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\social_login_tests.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\social_mfa_tests.rs",
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\social_state_tests.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\spnego_tests.rs",
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\system_gaps_tests.rs",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\verification_security_tests.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\webauthn_tests.rs",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "counting_note": "lib and main each execute the same 37 unit tests. Executions are not distinct business scenarios. The 81 PostgreSQL scenarios are explicitly enabled ignored tests.",
+    "test_postgresql_cluster": "Dedicated project-local cluster stopped after successful verification; database files retained under target/phase5/postgres.",
+    "final_cargo_check": "cargo check --offline -p casdog --tests --jobs 2 passed",
+    "final_cargo_check_log": "target/phase5/final-check.log"
+  }
+}

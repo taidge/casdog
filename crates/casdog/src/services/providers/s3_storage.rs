@@ -38,6 +38,12 @@ impl S3StorageProvider {
         }
     }
 
+    /// Use a client with the caller's DNS, timeout and redirect policy.
+    pub fn with_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
+    }
+
     /// Get the base URL for the bucket
     fn get_base_url(&self) -> String {
         if self.endpoint.is_empty() {

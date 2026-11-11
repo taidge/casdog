@@ -5,6 +5,7 @@ mod pages;
 mod resources;
 mod style;
 mod ui;
+mod webauthn;
 
 use gloo_storage::{LocalStorage, Storage};
 use glory::prelude::*;
@@ -78,6 +79,7 @@ fn application() -> impl Widget {
                 match social.as_str() {
                     "complete" => "login-page",
                     "linked" => "account-page",
+                    _ if !query("user_code").is_empty() => "device-auth-page",
                     _ => "dashboard",
                 }
                 .to_string(),

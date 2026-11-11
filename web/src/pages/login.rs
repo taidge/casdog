@@ -46,6 +46,7 @@ fn session_path(mode: &str) -> &'static str {
 }
 pub fn page(app: AppState) -> Element {
     boxed(widget(move |scope| {
+        let _ = scope.retain(crate::webauthn::CancelOnDrop);
         let organization = scope.cage("built-in".to_string());
         let username = scope.cage(String::new());
         let password_value = scope.cage(String::new());
@@ -199,6 +200,37 @@ pub fn page(app: AppState) -> Element {
                 passcode.set(String::new());
                 accept(app, value, mode, methods, method, password_value)
             }),
+            when(scope.bond(move || mode.get().is_empty()), move || {
+                widget(move |scope| {
+                    action(scope, "Sign in with passkey", busy, message, move || async move {
+                        if username.get().trim().is_empty() {
+                            return Err("Enter your username before using a passkey.".into());
+                        }
+                        let mut path = format!(
+                            "/api/webauthn/signin/begin?owner={}&name={}",
+                            query_component(&organization.get()),
+                            query_component(username.get().trim())
+                        );
+                        if !application.get().trim().is_empty() {
+                            path.push_str(&format!("&application={}", query_component(application.get().trim())));
+                        }
+                        let begin = app.request("GET", &path, None).await?;
+                        let request_id = begin["requestId"].as_str().ok_or("Sign-in request ID missing")?;
+                        let options = begin.get("options").cloned().ok_or("Sign-in options missing")?;
+                        let credential = crate::webauthn::authenticate(options).await?;
+                        let value = app
+                            .request(
+                                "POST",
+                                &format!("/api/webauthn/signin/finish?requestId={}", query_component(request_id)),
+                                Some(credential),
+                            )
+                            .await?;
+                        accept(app, value, mode, methods, method, password_value)
+                    })
+                    .build(scope)
+                })
+            }),
+            sapid::button().label("Cancel passkey request").enabled(busy).on_press(crate::webauthn::cancel),
             social_buttons,
             sapid::button().label("Create account").on_press(move || app.navigate("signup-page")),
             sapid::button().label("Forgot password").on_press(move || app.navigate("forgot-password-page")),

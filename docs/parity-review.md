@@ -1,4 +1,4 @@
-# Casdoor 改写复核（2026-10-29）
+# Casdoor 改写复核（更新至 2026-11-11）
 
 ## 基线与结论
 
@@ -14,19 +14,19 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 
 运行 `python scripts/check-casdoor-parity.py --reference E:/Repos/casdoor --output docs/casdoor-route-inventory.json`。
 
-| 指标 | 复核前 | 当前（第四阶段） | 边界 |
+| 指标 | 复核前 | 当前（第五阶段） | 边界 |
 | --- | ---: | ---: | --- |
 | 上游显式路由唯一路径 | 336 | 336 | 含协议和非 API 路径 |
 | 可比较的扁平 API 路径＋HTTP 方法 | 299 | 299 | 排除嵌套协议和通配方法 |
-| 匹配声明 | 227 | 290 | 75.92% → 96.99%，不是功能完成度 |
-| 缺失声明 | 72 | 9 | 完整列表见 JSON；逐项处理见 phase4-gap-assessment.json |
+| 匹配声明 | 227 | 299 | 75.92% → 100%，静态声明覆盖 |
+| 缺失声明 | 72 | 0 | 当前范围与边界见 phase5-gap-assessment.json |
 | 上游页面组件 | 105 | 105 | `.tsx` 位于 `web/src/pages`，文件数不是流程数 |
 | Casdog 前端结构 | 8 独立页面＋29 通用资源配置 | 同左 | 通用 CRUD 不能等同专用业务页面 |
 | 上游密码格式实现 | 仅 plain 直接匹配，其他有缺失或格式差异 | 8 类实现 | 已有旧 Casdog 格式读取兼容 |
 
 此处不提供虚假的整体完成百分比：尚无逐场景 Casdoor/Casdog 差分测试，所有支付、目录、身份提供商也未用真实服务验证。
 
-第二阶段时静态清单为 235/299，缺少 64 个声明；第四阶段新增 55 项实现后为 290/299，仍缺 9 项。新增认证流程并不等于新增上游扁平路由，不能将该比例当作整体功能完成度。
+第二阶段时静态清单为 235/299，缺少 64 个声明；第四阶段新增 55 项实现后为 290/299，第五阶段补齐剩余 9 项后为 299/299。新增认证流程并不等于新增上游扁平路由，不能将该比例当作整体功能完成度。
 
 ## 第一阶段改进
 
@@ -85,17 +85,17 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 | P0 | 认证协议 | Kerberos 没有真实票据验证；SAML 签名/验证及全部协议仍需标准一致性和部署测试。OAuth state、回调、令牌撤销/退出已有第二阶段实现和回归用例，不能据此宣称所有协议完成。 |
 | P1 | 社交登录 | 第三阶段已实现 PostgreSQL 共享 state/完成凭证、MFA 补验、已有账户显式绑定及安全解绑。真实 GitHub/Google 等提供商、真实浏览器和生产集群验收仍未完成；本机独立连接池回归不能代替生产部署验收。 |
 | P1 | 找回密码 | 前后端闭环已实现；模拟邮件、租户/应用绑定、错误/过期/重放、并发消费与会话撤销的数据库回归已通过。真实 SMTP/云邮件环境和完整浏览器流程尚未验收。 |
-| P1 | MFA | 社交登录已增加短信/邮件验证码发送与补验 UI；普通密码登录发送挑战 UI 已在第四阶段补齐；WebAuthn/FaceID 全流程及 TOTP 跨挑战重放保护仍需完善；未覆盖其他登录方式的统一 MFA 强制策略。 |
+| P1 | MFA | 社交登录已增加短信/邮件验证码发送与补验 UI；普通密码登录发送挑战 UI 已在第四阶段补齐；第五阶段已补 WebAuthn 浏览器注册、登录与额外 MFA；FaceID 独立集成及 TOTP 跨挑战重放保护仍需完善；未覆盖其他登录方式的统一 MFA 强制策略。 |
 | P1 | 兼容业务语义 | 通用 CRUD 绕过部分资源 service 校验和副作用；导入时上游 password 是哈希，而普通更新是明文，仍需专用导入契约；分页过滤只有已实现子集。 |
 | P1 | 上游新模块 | 第四阶段已补 Agent/Server/Entry/Key 管理、Integration/Marketplace 子集和 OpenClaw 基础图；代理执行、Key 凭证认证、完整集成/会话存储、OTLP 及专用管理页面仍有缺口。 |
 | P1 | 商业流程 | 第四阶段已补优惠券、普通商品购买和续费标志；定价计划/充值、异步库存预留、自动续费调度、购物车及专用页面仍缺。支付工厂仍仅 Stripe、PayPal、Balance、Dummy。 |
-| P2 | 运维功能 | 第四阶段已补首次管理员密码、设置保存、Dashboard 热图/MFA/提供商与 Webhook 历史/重放；设置运行时应用、系统升级、设备授权完整流程仍缺。 |
+| P2 | 运维功能 | 第四阶段已补首次管理员密码、设置保存、Dashboard 热图/MFA/提供商与 Webhook 历史/重放；设置运行时应用仍缺；第五阶段已补配置化系统升级与持久化设备授权流程，部署验收边界见末尾。 |
 | P2 | 提供商 | 当前存储工厂仅 Local/S3，上游列出 11 类；同步器仅 Database(PostgreSQL)/LDAP/Keycloak；上游大量云目录、支付和消息提供商未覆盖。 |
 | P2 | 前端 | 105 个上游页面组件无法由 29 个通用 JSON 资源编辑器替代；复杂字段、验证、批量操作、关系选择、主题/i18n、组织应用定制需要逐场景验收。 |
 
 ## 验证
 
-构建产物、Cargo 缓存、临时文件和测试 PostgreSQL 均位于 D 盘；未使用 Docker。
+第一至第四阶段的历史构建环境使用当时的 D 盘目录。第五阶段遵循当前调用者环境与项目配置，产物和日志位置见末尾；本轮使用专用 PostgreSQL。
 测试数据库是专用本地集群，未使用用户已有数据库服务。迁移 015 按会话时区解释历史时间；部署时应使用历史数据实际采用的时区。001/009 修复了无法从零运行的历史 SQL，已部署且使用迁移校验和的数据库需审核这两处历史修正及新迁移后升级。
 
 第一阶段已通过（保留历史基线，不代表第二阶段合并后已重新通过）：
@@ -124,11 +124,7 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 数据库回归可通过显式设置 `CASDOG_TEST_DATABASE_URL`，执行：
 
 ```powershell
-$env:CARGO_HOME = 'D:/BuildCache/cargo'
-$env:CARGO_TARGET_DIR = 'D:/BuildCache/casdog/target'
-$env:CARGO_INCREMENTAL = '0'
-$env:TEMP = 'D:/BuildCache/casdog/tmp'
-$env:TMP = $env:TEMP
+# 在仓库工作区使用调用者环境及项目正常构建配置
 cargo metadata --no-deps --format-version 1
 # CASDOG_TEST_DATABASE_URL 必须指向专用、已迁移的测试数据库
 cargo test -p casdog --test auth_security_tests -- --ignored --test-threads=1
@@ -195,4 +191,34 @@ Windows 本次构建使用已安装 PostgreSQL 18 附带的 OpenSSL 3 头文件/
 - 迁移覆盖登录、注册、找回密码、账户、OAuth 授权、同意管理、设备授权和结果页，以及原有 29 项通用资源配置。表单使用 Sapid 控件，二维码本地生成，资源结构化表单保留自定义 JSON 字段。
 - 已验证 6 项原生单元测试、WASM 编译检查、Trunk release 构建及后端资源目录选择。浏览器回归运行编译后的 WASM，覆盖密码登录 MFA 的错误与成功路径、社交登录 MFA、绑定与解绑、注册、资源增删改与自定义字段保留、整数端口和含空格枚举值、联系信息验证码、TOTP 设置、同意授予与撤销、设备批准、找回密码和退出。
 - 浏览器回归采用 API 夹具，检查运行时错误和 1440px / 390px 布局。产物位于当前工作区正常目录 `web/target/browser-check/`，日志位于 `web/target/`。数据库和真实外部身份提供商联调需按原有回归流程单独验收。
-- WebAuthn 页面提供凭据列表、删除与注册初始化，浏览器凭据创建及提交注册完成步骤仍待实现。通用资源编辑器与上游专用业务页面之间的流程差距继续按 P2 前端项验收。
+- 此次框架迁移验收时 WebAuthn 页面只提供凭据列表、删除与注册初始化；浏览器凭据创建及提交注册完成步骤已在第五阶段补齐。通用资源编辑器与上游专用业务页面之间的流程差距继续按 P2 前端项验收。
+
+
+## 第五阶段 WebAuthn 与剩余接口（2026-11-11）
+
+- WebAuthn 使用真实 `navigator.credentials.create/get`，完成注册、列表刷新、删除、登录、取消及页面离开时中止。注册与登录挑战保存到 PostgreSQL，绑定用户、租户、Origin、会话或浏览器 Cookie，5 分钟过期、单次消费并限制待处理数量。RP 与 Origin 使用配置的 `server.public_url`，开发使用 `localhost`；注册复核近期会话、撤销和密码变更。已启用额外 MFA 的 Passkey 登录继续走原有补验接口，补验前返回空 token。
+- 剩余 9 项声明已补齐。设备授权增加数据库状态、浏览器审批、RFC 8628 轮询与 `slow_down`、机密客户端验证、JWT/刷新令牌签发、单次完成和取消证明；审批及兑换复核应用、租户和审批会话的撤销状态。`verification_uri_complete` 可直接打开设备页。
+- 原始会话记录通过现有 Provider/Entry API 和 `upload-resource` 的 `entryId`、`tag=openclawTranscript`、Local provider 上传，自动关联真实对象与资源记录，再按 Entry 查询最多 2 MiB 预览，原文上传限制为 32 MiB。MCP 同步执行真实 HTTP 协议初始化、会话头、JSON/SSE 响应及工具分页，失败保留既有工具及权限。
+- 升级要求运维固定 manifest 摘要、同源包摘要/大小/平台、安装路径和重启程序；文件替换前持久化 journal，失败补偿，启动时确认新镜像或恢复旧包。hook 接受重启请求后记录 `restart_requested`，`installed` 由新进程镜像哈希与编译版本确认。
+- 扫描执行实际 HTTP 指纹探测并保存结果，内网发现限全局管理员和有界私有 IPv4 范围，MCP 发现结果事务性同步 Server。身份核验通过应用明确允许的 HTTP/Generic 提供商执行，成功保存状态和身份摘要审计；身份字段改变由数据库触发器撤销验证。Provider REST 与前端表单可保存 `content`、`scopes` 等配置。
+- 补齐存储 SQL 的 `user_id` 映射，并统一上传、下载、删除及会话预览的 Local 根边界。租户可配置的目录限定于运维 `CASDOG_LOCAL_STORAGE_ROOT` 下以精确 owner 的 SHA-256 命名的目录，默认运维根为服务工作目录 `./uploads`。原有目录在新边界外时需要运维迁移。MCP 和文件 S3 请求固定已检查的 DNS 地址，租户请求拒绝私网目标并禁用代理及重定向。
+
+### 第五阶段验证
+
+- 已通过全新专用 PostgreSQL 数据库按顺序执行迁移 001–026。026 将 Local bucket 路径与资源对象键扩为 TEXT，并保留业务长度校验，覆盖较长工作目录及 SHA-256 租户目录。
+- 已通过 `cargo test --workspace --tests --no-fail-fast --jobs 2 -- --include-ignored --test-threads=1`。21 个测试程序共 **387 次执行，0 失败、0 忽略**；lib/main 各运行相同 37 项单元测试，执行总数包含这部分重复。
+- 已通过 **81 个真实 PostgreSQL 场景**，包含原有 62 个和本轮 19 个，原先 4 个数据库端到端场景再次通过。新增分组为 WebAuthn 5、设备/MCP/文件与会话记录 9、系统运维 5。另有目录大小写隔离与 HTTP 权限测试。
+- 已验证跨实例挑战与并发单次消费、过期/撤销/跨账户拒绝、密码与 Passkey 的额外 MFA；设备审批及兑换复核；真实 multipart 上传→原文预览、普通文件上传→下载→删除；任意 Local 根拒绝、Org/org 命名空间隔离、租户私网 MCP 拒绝；MCP HTTP/SSE 分页及权限保留；升级摘要、并发、持久化阶段故障、补偿、旧镜像恢复和真实子进程新镜像确认；IDV 提供商与主体绑定和身份改变撤销。
+- 已通过前端 6 项原生单元测试、WASM 检查、Trunk release 构建及 API 夹具浏览器回归。Provider 前端新增配置字段的真实表单输入与序列化也已覆盖。
+- 已通过 **10 项真实后端浏览器检查**，执行编译后的 Glory/Sapid WASM、实际服务器及专用 PostgreSQL，未拦截 API。覆盖注册/密码登录、资料持久化、原生 Passkey 注册取消与重试、密码学注册/登录验证、Passkey 登录强制额外 MFA、凭据删除、设备浏览器批准与真实 grant/完成/取消、TOTP 错误与成功路径、本机 HTTP 邮件找回密码。使用虚拟认证器及本机邮件提供商，截图已检查。
+- 本轮所有构建使用调用者环境和项目正常配置，Cargo metadata 确认 backend target 为 `D:/Works/taidge/casdog/target`，frontend target 为 `D:/Works/taidge/casdog/web/target`。专用 PostgreSQL 数据保存在前者的 `phase5/postgres`，未使用 Docker。Windows 链接复用现有 PostgreSQL 18 OpenSSL 头文件和库。
+- 后端最终日志为 `target/phase5/backend-tests-final.log`，浏览器日志与结果为 `target/phase5/browser-e2e-final.log`、`target/phase5/browser-e2e/results.json`。前端日志为 `web/target/phase5-native-tests.log`、`phase5-wasm-check.log`、`phase5-trunk-build.log`、`phase5-browser-fixtures.log`。逐接口范围和逐测试程序结果见 `phase5-gap-assessment.json`。验证完成后已停止本轮专用 PostgreSQL，数据与日志保留。
+- 总回归中发现的旧 Webhook fixture 分包问题已修复，测试服务读取完整 Content-Length 请求体后再返回真实 HTTP 500→200，保留原业务断言。最终 `cargo check --offline -p casdog --tests --jobs 2`、Git 差异及新增文件空白检查通过。
+
+### 第五阶段部署契约与剩余边界
+
+先应用迁移 023–026。配置环境键采用双下划线，例如 `CASDOG__SERVER__PUBLIC_URL`、`CASDOG__DATABASE__URL`。WebAuthn 使用 HTTPS 域名，开发可使用同源 `http://localhost:<port>`。真实浏览器回归由 Playwright 驱动已安装 Edge，并通过 CDP 虚拟认证器生成真实凭据和断言，再由服务端密码学验证。[Playwright CDPSession](https://playwright.dev/docs/api/class-cdpsession)、[CDP WebAuthn](https://chromedevtools.github.io/devtools-protocol/tot/WebAuthn/)
+
+升级 manifest 为 `{version,url,sha256,size,target}`，`target` 如 `windows-x86_64`。运维通过 `CASDOG_UPGRADE_MANIFEST_URL`、`CASDOG_UPGRADE_MANIFEST_SHA256`、`CASDOG_UPGRADE_INSTALL_PATH`、`CASDOG_UPGRADE_RESTART_PROGRAM` 和可选 JSON 数组 `CASDOG_UPGRADE_RESTART_ARGS` 配置部署；多主机可设置 `CASDOG_UPGRADE_INSTANCE_ID` 区分机器。旧 journal 的安装路径变更需要运维恢复对应配置后处理。回归仅操作专用测试文件及本机子进程。
+
+身份核验 HTTP 适配器向提供商 POST `{idCardType,idCard,realName}`，可使用提供商 secret 作 Bearer 凭据，要求成功响应 `verified=true`；提供商必须在用户注册应用允许的名单中。各云厂商专属签名协议仍需适配。会话原文上传与预览当前支持 Local，S3 预览及真实云存储验收保留。MCP 同步支持 Streamable HTTP；stdio 和旧版 HTTP+SSE 传输仍待实现。指纹扫描会明确列出未评估的复杂 CVE 版本规则。真实硬件、其他浏览器、真实 GitHub/Google、云邮件短信、生产升级与集群切换仍需部署验收；前述协议、提供商、商业流程和专用页面差距继续保留。当前 299/299 只表示本次静态比较范围的路由声明覆盖。

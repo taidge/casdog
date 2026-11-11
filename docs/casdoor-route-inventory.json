@@ -3,20 +3,10 @@
   "scope": "Explicit single-segment /api routes with concrete HTTP methods; static declarations only, not behavior or authorization parity.",
   "upstream_all_explicit_unique_paths": 336,
   "upstream_flat_method_pairs": 299,
-  "matched_flat_method_pairs": 290,
-  "missing_flat_method_pairs": 9,
-  "coverage_percent": 96.99,
-  "missing": [
-    "GET /api/get-openclaw-session-transcript",
-    "GET /api/get-upgrade-info",
-    "GET /api/scan",
-    "POST /api/cancel-device-auth",
-    "POST /api/device-auth-complete",
-    "POST /api/sync-intranet-servers",
-    "POST /api/sync-mcp-tool",
-    "POST /api/upgrade-system",
-    "POST /api/verify-identification"
-  ],
+  "matched_flat_method_pairs": 299,
+  "missing_flat_method_pairs": 0,
+  "coverage_percent": 100.0,
+  "missing": [],
   "wildcard_flat_routes_excluded": [
     "/api/webhook"
   ],

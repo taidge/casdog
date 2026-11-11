@@ -90,6 +90,7 @@ impl From<Token> for TokenResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct OAuthTokenRequest {
     pub grant_type: String,
+    pub device_code: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub code: Option<String>,

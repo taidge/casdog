@@ -51,6 +51,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Diesel database connection pool created");
 
+    services::system_gap_service::reconcile_upgrades(
+        &pool,
+        &services::system_gap_service::SystemGapConfig::from_env(),
+    )
+    .await?;
+
     // Initialize database with built-in seed data (idempotent, skips if already done)
     InitService::init_db(&pool).await?;
 

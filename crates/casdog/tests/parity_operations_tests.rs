@@ -381,10 +381,30 @@ async fn webhook_replay_records_real_http_failure_success_and_tenant_scope() {
     let server = tokio::spawn(async move {
         for status in ["500 Internal Server Error", "200 OK"] {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut bytes = vec![0u8; 8192];
-            let n = stream.read(&mut bytes).await.unwrap();
-            let request = String::from_utf8_lossy(&bytes[..n]);
-            assert!(request.contains("POST /hook"));
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let body_start = loop {
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0, "Webhook request ended before its body");
+                bytes.extend_from_slice(&chunk[..count]);
+                assert!(bytes.len() <= 16_384, "Unexpected webhook request size");
+                let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                }).expect("Webhook request must declare its body length");
+                if bytes.len() >= header_end + 4 + length {
+                    break header_end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&bytes[..body_start]);
+            assert!(headers.starts_with("POST /hook HTTP/1.1\r\n"));
+            let payload: Value = serde_json::from_slice(&bytes[body_start..]).unwrap();
+            assert_eq!(payload["event"], "user.created");
             stream
                 .write_all(
                     format!(
@@ -394,6 +414,7 @@ async fn webhook_replay_records_real_http_failure_success_and_tenant_scope() {
                 )
                 .await
                 .unwrap();
+            stream.shutdown().await.unwrap();
         }
     });
     let webhook = uuid::Uuid::new_v4().to_string();

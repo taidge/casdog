@@ -1200,6 +1200,18 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                         value: "Notification".into(),
                         label: "Notification".into(),
                     },
+                    SelectOption {
+                        value: "Scan".into(),
+                        label: "Scan".into(),
+                    },
+                    SelectOption {
+                        value: "Log".into(),
+                        label: "Log".into(),
+                    },
+                    SelectOption {
+                        value: "ID Verification".into(),
+                        label: "ID Verification".into(),
+                    },
                 ]),
                 required: true,
             },
@@ -1263,8 +1275,64 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                         value: "Custom".into(),
                         label: "Custom".into(),
                     },
+                    SelectOption {
+                        value: "Local".into(),
+                        label: "Local".into(),
+                    },
+                    SelectOption {
+                        value: "Local File System".into(),
+                        label: "Local File System".into(),
+                    },
+                    SelectOption {
+                        value: "Security Scan".into(),
+                        label: "Security Scan".into(),
+                    },
+                    SelectOption {
+                        value: "MCP Scan".into(),
+                        label: "MCP Scan".into(),
+                    },
+                    SelectOption {
+                        value: "OpenClaw".into(),
+                        label: "OpenClaw".into(),
+                    },
+                    SelectOption {
+                        value: "HTTP".into(),
+                        label: "HTTP".into(),
+                    },
+                    SelectOption {
+                        value: "Generic".into(),
+                        label: "Generic".into(),
+                    },
+                    SelectOption {
+                        value: "Custom HTTP".into(),
+                        label: "Custom HTTP".into(),
+                    },
                 ]),
                 required: true,
+            },
+            FieldDef {
+                key: "sub_type",
+                label: "Subtype",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "endpoint",
+                label: "Endpoint URL / paths",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "scopes",
+                label: "Scopes / discovery targets",
+                kind: FieldKind::TextArea,
+                required: false,
+            },
+            FieldDef {
+                key: "content",
+                label: "Content / discovery ports",
+                kind: FieldKind::TextArea,
+                required: false,
             },
             FieldDef {
                 key: "client_id",

@@ -338,6 +338,9 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
             | "set-password"
             | "check-user-password"
             | "reset-email-or-phone"
+            | "verify-identification"
+            | "login/oauth/device/verify"
+            | "login/oauth/device/authorize"
             | "grant-consent"
             | "revoke-consent"
             | "sso-logout"
@@ -376,6 +379,10 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
     if matches!(
         path.as_str(),
         "get-agents"
+            | "upload-resource"
+            | "get-openclaw-session-transcript"
+            | "sync-mcp-tool"
+            | "scan"
             | "get-agent"
             | "add-agent"
             | "update-agent"

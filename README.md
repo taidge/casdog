@@ -9,7 +9,7 @@ Casdog is an Identity and Access Management (IAM) / Single Sign-On (SSO) server 
 ## Compatibility status
 
 Casdog is a partial rewrite, not a drop-in replacement for current Casdoor.
-The [2026-10-28 parity review](docs/parity-review.md) records implemented behavior,
+The [2026-11-11 parity review](docs/parity-review.md) records implemented behavior,
 known gaps and verification. The [route inventory](docs/casdoor-route-inventory.json)
 is reproducible with `python scripts/check-casdoor-parity.py --reference <casdoor-checkout>`.
 Kerberos ticket authentication is currently unavailable: unverified identity claims are rejected.
@@ -150,8 +150,9 @@ trunk serve
 
 Trunk serves the application on port 8080 and proxies `/api/` to the backend on
 `http://127.0.0.1:8000`. Configure the backend `server.public_url` as
-`http://127.0.0.1:8080` during development so social-login redirects and MFA
-cookies use the frontend origin. Provider callback URLs must use the same origin.
+`http://localhost:8080` during development so social-login redirects and MFA
+cookies use the frontend origin. Access the UI through `http://localhost:8080`. WebAuthn requires a DNS hostname
+for the relying party. Provider callback URLs must use the same origin.
 An optional `CASDOG_API_BASE` environment variable sets the frontend's initial
 API base at compile time.
 
@@ -178,6 +179,32 @@ The browser checks use installed Microsoft Edge by default, or another installed
 Playwright channel selected with `PLAYWRIGHT_CHANNEL`. They exercise the compiled
 WASM application with API fixtures and write screenshots and results beneath
 `web/target/browser-check/`. Backend/database regressions run separately.
+
+The real backend browser check requires a disposable PostgreSQL database with
+migrations 001–026 applied. It starts a local server, uses a browser virtual
+authenticator for native WebAuthn operations, and receives recovery email through
+a local HTTP provider. Run these commands from the repository root.
+
+```powershell
+$env:CASDOG_TEST_DATABASE_URL = 'postgres://user:password@localhost:5432/casdog_test'
+cargo test --workspace --tests --no-fail-fast -- --include-ignored --test-threads=1
+npm --prefix web run check:e2e
+```
+
+The integration-test build produces the server binary used by `check:e2e`.
+The check discovers the workspace target directory through Cargo metadata and
+writes results beneath its `phase5/browser-e2e/` directory. Set
+`CASDOG_E2E_BASE_URL` to test an already running disposable server instead.
+Backend configuration environment keys use a double underscore after the prefix,
+for example `CASDOG__SERVER__PUBLIC_URL` and `CASDOG__DATABASE__URL`.
+
+Local storage for tenant users uses the operator-controlled
+`CASDOG_LOCAL_STORAGE_ROOT`, which defaults to `./uploads` relative to the server
+working directory. Each tenant's directory is the lowercase SHA-256 hex digest
+of its exact owner name. Tenant-configured Local buckets must reside within that
+directory. Existing buckets outside this boundary require an operator to move
+their objects and update their provider configuration. Global administrators can
+configure explicit Local buckets for administrative operations.
 
 ## Project Structure
 

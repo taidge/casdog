@@ -12,7 +12,7 @@ use crate::models::{
 };
 use crate::services::providers::storage_provider::{StorageProvider, get_storage_provider};
 use crate::services::{
-    GroupService, PermissionService, ProviderService, ResourceService, RoleService, UserService,
+    GroupService, PermissionService, ResourceService, RoleService, UserService,
 };
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -447,7 +447,15 @@ pub async fn upload_resource(
         .name()
         .map(|n| n.to_string())
         .unwrap_or_else(|| format!("file_{}", uuid::Uuid::new_v4()));
+    if file_name.chars().count() > 255 {
+        return Err(AppError::Validation(
+            "Filename exceeds 255 characters".into(),
+        ));
+    }
     let file_size = file.size();
+    if file_size > 32 * 1024 * 1024 {
+        return Err(AppError::Validation("File exceeds 32 MiB".into()));
+    }
 
     // Determine content type
     let content_type = file
@@ -455,6 +463,11 @@ pub async fn upload_resource(
         .map(|ct| ct.to_string())
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
+    if content_type.chars().count() > 100 {
+        return Err(AppError::Validation(
+            "Content type exceeds 100 characters".into(),
+        ));
+    }
     // Read file bytes from the temp path
     let file_bytes = tokio::fs::read(file.path())
         .await
@@ -468,36 +481,100 @@ pub async fn upload_resource(
     let tag = req.form::<String>("tag").await.unwrap_or_default();
     let application = req.form::<String>("application").await.unwrap_or_default();
     let description = req.form::<String>("description").await.unwrap_or_default();
-    let provider_name = req.form::<String>("provider").await;
+    let provider_name = req
+        .form::<String>("provider")
+        .await
+        .filter(|value| !value.trim().is_empty());
 
-    // Determine storage provider
-    let storage: Box<dyn StorageProvider> = if let Some(ref prov_name) = provider_name {
-        // Look up configured storage provider from the database
-        match ProviderService::get_by_name_internal(&pool, prov_name).await {
-            Ok(prov) => get_storage_provider(
-                &prov.provider_type,
-                prov.client_id.as_deref().unwrap_or(""),
-                prov.client_secret.as_deref().unwrap_or(""),
-                prov.region_id.as_deref().unwrap_or(""),
-                prov.bucket.as_deref().unwrap_or("./uploads"),
-                prov.endpoint.as_deref().unwrap_or(""),
-            )?,
-            Err(_) => {
-                // Fallback to local storage
-                get_storage_provider("local", "", "", "", "./uploads", "")?
-            }
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if !principal.global_admin() && owner != principal.owner {
+        return Err(AppError::Authorization(
+            "Upload owner belongs to another organization".into(),
+        ));
+    }
+    crate::handlers::parity_resources::service::identity(&owner, "resource")?;
+    if std::path::Path::new(&tag)
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || tag.contains(['\\', ':'])
+    {
+        return Err(AppError::Validation("Invalid resource tag".into()));
+    }
+    if tag == "openclawTranscript" {
+        let entry = req.form::<String>("entryId").await.ok_or_else(|| {
+            AppError::Validation("entryId is required for transcript uploads".into())
+        })?;
+        let provider = provider_name.as_deref().ok_or_else(|| {
+            AppError::Validation("Storage provider is required for transcript uploads".into())
+        })?;
+        if entry.split_once('/').map(|(entry_owner, _)| entry_owner) != Some(owner.as_str()) {
+            return Err(AppError::Validation(
+                "Entry owner does not match upload owner".into(),
+            ));
         }
+        let value = crate::services::protocol_gap_service::upload_transcript(
+            &pool,
+            &principal,
+            &entry,
+            provider,
+            &file_name,
+            &file_bytes,
+        )
+        .await?;
+        return Ok(Json(UploadResponse {
+            name: value["name"].as_str().unwrap_or_default().into(),
+            url: value["url"].as_str().unwrap_or_default().into(),
+            size: file_size as u64,
+            file_type: "application/jsonl".into(),
+        }));
+    }
+
+    let provider = if let Some(reference) = provider_name.as_deref() {
+        let (provider_owner, name) = reference.split_once('/').unwrap_or((&owner, reference));
+        if provider_owner != owner {
+            return Err(AppError::Authorization(
+                "Storage provider belongs to another organization".into(),
+            ));
+        }
+        let provider = sqlx::query_as::<_, crate::models::Provider>(
+            "SELECT * FROM providers WHERE owner=$1 AND name=$2 AND category='Storage'",
+        )
+        .bind(&owner)
+        .bind(name)
+        .fetch_optional(&pool)
+        .await?;
+        if provider.is_none() && name != "local" {
+            return Err(AppError::NotFound("Storage provider not found".into()));
+        }
+        provider
     } else {
-        get_storage_provider("local", "", "", "", "./uploads", "")?
+        None
     };
+    let (storage, _) = crate::services::protocol_gap_service::storage_for_owner(
+        &principal,
+        &owner,
+        provider.as_ref(),
+        true,
+    )
+    .await?;
 
     // Generate a unique object key with extension
     let ext = std::path::Path::new(&file_name)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("bin");
-    let object_key = format!("{}/{}/{}.{}", owner, tag, uuid::Uuid::new_v4(), ext);
+    let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let object_key = if tag.is_empty() {
+        filename
+    } else {
+        format!("{tag}/{filename}")
+    };
 
+    if object_key.len() > 1024 || ext.chars().count() > 50 {
+        return Err(AppError::Validation(
+            "Object key or file extension exceeds storage limits".into(),
+        ));
+    }
     // Upload to storage provider
     let url = storage
         .upload(&object_key, &file_bytes, &content_type)
@@ -506,7 +583,7 @@ pub async fn upload_resource(
     // Create resource record in database
     let resource_req = crate::models::CreateResourceRequest {
         owner: owner.clone(),
-        name: file_name.clone(),
+        name: object_key.clone(),
         user: user_id,
         provider: provider_name.or_else(|| Some("local".to_string())),
         application: if application.is_empty() {
@@ -528,7 +605,10 @@ pub async fn upload_resource(
         },
     };
 
-    ResourceService::create(&pool, resource_req).await?;
+    if let Err(error) = ResourceService::create(&pool, resource_req).await {
+        let _ = storage.delete(&object_key).await;
+        return Err(error);
+    }
 
     Ok(Json(UploadResponse {
         name: file_name,
@@ -536,6 +616,159 @@ pub async fn upload_resource(
         size: file_size as u64,
         file_type: content_type,
     }))
+}
+
+fn authorize_file(
+    principal: &crate::hoops::authz::Principal,
+    resource: &crate::models::ResourceResponse,
+) -> Result<(), AppError> {
+    let own = resource.user == principal.id
+        || resource.user == principal.name
+        || resource.user == format!("{}/{}", principal.owner, principal.name);
+    if principal.global_admin() || (principal.owner == resource.owner && (principal.admin || own)) {
+        Ok(())
+    } else {
+        Err(AppError::Authorization(
+            "Resource belongs to another account or organization".into(),
+        ))
+    }
+}
+fn relative_object_key(key: &str) -> Result<(), AppError> {
+    if key.len() > 1024
+        || key.is_empty()
+        || key.contains(['\\', ':'])
+        || std::path::Path::new(key)
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(AppError::Validation("Invalid resource object key".into()));
+    }
+    Ok(())
+}
+async fn resource_storage(
+    conn: &mut sqlx::PgConnection,
+    principal: &crate::hoops::authz::Principal,
+    resource: &crate::models::ResourceResponse,
+) -> Result<(Box<dyn StorageProvider>, String), AppError> {
+    let reference = resource.provider.as_deref().unwrap_or("local");
+    let (owner, name) = reference
+        .split_once('/')
+        .unwrap_or((&resource.owner, reference));
+    if owner != resource.owner {
+        return Err(AppError::Authorization(
+            "Storage provider belongs to another organization".into(),
+        ));
+    }
+    let provider: Option<crate::models::Provider> =
+        sqlx::query_as("SELECT * FROM providers WHERE owner=$1 AND name=$2 AND category='Storage'")
+            .bind(owner)
+            .bind(name)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if provider.is_none() && name != "local" {
+        return Err(AppError::NotFound("Storage provider not found".into()));
+    }
+    let bucket = provider
+        .as_ref()
+        .and_then(|provider| provider.bucket.as_deref())
+        .unwrap_or("");
+    let legacy_default =
+        principal.global_admin() && provider.is_none() && resource.name == resource.file_name;
+    let (storage, local_root) = if legacy_default {
+        let base =
+            std::env::var("CASDOG_LOCAL_STORAGE_ROOT").unwrap_or_else(|_| "./uploads".into());
+        let root = crate::services::protocol_gap_service::local_storage_root(
+            principal,
+            &resource.owner,
+            Some(&base),
+            false,
+        )
+        .await?;
+        let storage = get_storage_provider(
+            "local",
+            "",
+            "",
+            "",
+            root.to_str()
+                .ok_or_else(|| AppError::Config("Storage path must be UTF-8".into()))?,
+            "",
+        )?;
+        (storage, Some(root))
+    } else {
+        crate::services::protocol_gap_service::storage_for_owner(
+            principal,
+            &resource.owner,
+            provider.as_ref(),
+            false,
+        )
+        .await?
+    };
+    let mut key = resource.name.clone();
+    if let Some(root) = local_root {
+        let path = if resource.name == resource.file_name {
+            // Older uploads saved the original filename in name and a file://
+            // path in url. Resolve only files inside the configured storage root.
+            let legacy = resource.url.strip_prefix("file://").ok_or_else(|| {
+                AppError::Validation("Legacy resource has no local object reference".into())
+            })?;
+            std::path::PathBuf::from(legacy)
+        } else {
+            relative_object_key(&key)?;
+            root.join(&key)
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| AppError::Validation("Invalid local object reference".into()))?;
+        let parent = tokio::fs::canonicalize(parent)
+            .await
+            .map_err(|_| AppError::NotFound("Resource object directory unavailable".into()))?;
+        if !parent.starts_with(&root) {
+            return Err(AppError::Authorization(
+                "Resource path escapes storage root".into(),
+            ));
+        }
+        let filename = path
+            .file_name()
+            .ok_or_else(|| AppError::Validation("Invalid local object name".into()))?;
+        let candidate = parent.join(filename);
+        if let Ok(resolved) = tokio::fs::canonicalize(&candidate).await {
+            if !resolved.starts_with(&root) {
+                return Err(AppError::Authorization(
+                    "Resource path escapes storage root".into(),
+                ));
+            }
+        }
+        key = candidate
+            .strip_prefix(&root)
+            .map_err(|_| AppError::Authorization("Resource path escapes storage root".into()))?
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+    } else if resource.name == resource.file_name {
+        // Existing S3 uploads stored a URL, not an object key. Strip only the
+        // configured bucket's exact URL prefix, without making requests to it.
+        let provider = provider
+            .as_ref()
+            .ok_or_else(|| AppError::NotFound("Storage provider missing".into()))?;
+        let endpoint = provider.endpoint.as_deref().unwrap_or("");
+        let base = if endpoint.is_empty() {
+            format!(
+                "https://{}.s3.{}.amazonaws.com",
+                bucket,
+                provider.region_id.as_deref().unwrap_or("")
+            )
+        } else {
+            format!("{}/{}", endpoint.trim_end_matches('/'), bucket)
+        };
+        key = urlencoding::decode(resource.url.strip_prefix(&format!("{base}/")).ok_or_else(
+            || AppError::Validation("Legacy URL does not match storage provider".into()),
+        )?)
+        .map_err(|_| AppError::Validation("Invalid legacy object URL".into()))?
+        .into_owned();
+    }
+    relative_object_key(&key)?;
+    Ok((storage, key))
 }
 
 /// Delete a resource and its file from storage.
@@ -557,55 +790,38 @@ pub async fn delete_resource_with_file(
     req: &mut Request,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
-
+        .obtain::<sqlx::PgPool>()
+        .cloned()
+        .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
     let id = req
         .param::<String>("id")
-        .ok_or_else(|| AppError::Validation("Resource ID required".to_string()))?;
-
-    // Get resource info to determine storage location
-    let resource = ResourceService::get_by_id(&pool, &id).await?;
-
-    // Resolve storage provider for deletion
-    let storage: Box<dyn StorageProvider> = if let Some(ref prov_name) = resource.provider {
-        match ProviderService::get_by_name_internal(&pool, prov_name).await {
-            Ok(prov) => get_storage_provider(
-                &prov.provider_type,
-                prov.client_id.as_deref().unwrap_or(""),
-                prov.client_secret.as_deref().unwrap_or(""),
-                prov.region_id.as_deref().unwrap_or(""),
-                prov.bucket.as_deref().unwrap_or("./uploads"),
-                prov.endpoint.as_deref().unwrap_or(""),
-            )
-            .unwrap_or_else(|_| {
-                Box::new(
-                    crate::services::providers::local_storage::LocalStorageProvider::new(
-                        "./uploads".to_string(),
-                    ),
-                )
-            }),
-            Err(_) => Box::new(
-                crate::services::providers::local_storage::LocalStorageProvider::new(
-                    "./uploads".to_string(),
-                ),
-            ),
-        }
-    } else {
-        Box::new(
-            crate::services::providers::local_storage::LocalStorageProvider::new(
-                "./uploads".to_string(),
-            ),
-        )
-    };
-
-    // Best-effort: try to delete from storage, but always remove the DB record
-    let _ = storage.delete(&resource.url).await;
-
-    // Delete resource record from database
-    ResourceService::delete(&pool, &id).await?;
-
+        .ok_or_else(|| AppError::Validation("Resource ID required".into()))?;
+    let mut tx = pool.begin().await?;
+    let resource: crate::models::Resource = sqlx::query_as(
+        "SELECT resources.*,user_id AS \"user\" FROM resources WHERE id=$1 FOR UPDATE",
+    )
+    .bind(&id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Resource not found".into()))?;
+    let resource: crate::models::ResourceResponse = resource.into();
+    authorize_file(&principal, &resource)?;
+    // The provider lookup uses the current transaction so a one-slot pool works.
+    // Release no resource lock before the corresponding object is removed.
+    let (storage, key) = resource_storage(&mut tx, &principal, &resource).await?;
+    match tokio::time::timeout(std::time::Duration::from_secs(30), storage.delete(&key))
+        .await
+        .map_err(|_| AppError::Internal("Storage delete timed out".into()))?
+    {
+        Ok(()) | Err(AppError::NotFound(_)) => {}
+        Err(error) => return Err(error),
+    }
+    sqlx::query("DELETE FROM resources WHERE id=$1")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok("Resource deleted")
 }
 
@@ -630,69 +846,38 @@ pub async fn download_resource(
     res: &mut Response,
 ) -> Result<(), AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
-        .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
-        .clone();
-
+        .obtain::<sqlx::PgPool>()
+        .cloned()
+        .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
     let id = req
         .param::<String>("id")
-        .ok_or_else(|| AppError::Validation("Resource ID required".to_string()))?;
-
-    // Look up resource record
+        .ok_or_else(|| AppError::Validation("Resource ID required".into()))?;
     let resource = ResourceService::get_by_id(&pool, &id).await?;
-
-    // Resolve storage provider
-    let storage: Box<dyn StorageProvider> = if let Some(ref prov_name) = resource.provider {
-        match ProviderService::get_by_name_internal(&pool, prov_name).await {
-            Ok(prov) => get_storage_provider(
-                &prov.provider_type,
-                prov.client_id.as_deref().unwrap_or(""),
-                prov.client_secret.as_deref().unwrap_or(""),
-                prov.region_id.as_deref().unwrap_or(""),
-                prov.bucket.as_deref().unwrap_or("./uploads"),
-                prov.endpoint.as_deref().unwrap_or(""),
-            )
-            .unwrap_or_else(|_| {
-                Box::new(
-                    crate::services::providers::local_storage::LocalStorageProvider::new(
-                        "./uploads".to_string(),
-                    ),
-                )
-            }),
-            Err(_) => Box::new(
-                crate::services::providers::local_storage::LocalStorageProvider::new(
-                    "./uploads".to_string(),
-                ),
-            ),
-        }
-    } else {
-        Box::new(
-            crate::services::providers::local_storage::LocalStorageProvider::new(
-                "./uploads".to_string(),
-            ),
-        )
-    };
-
-    // Download file bytes from storage.
-    // The `url` field stores the key/path that was used during upload.
-    let data = storage.download(&resource.url).await?;
-
-    let content_type = &resource.file_type;
-    let filename = &resource.file_name;
-
+    authorize_file(&principal, &resource)?;
+    let mut conn = pool.acquire().await?;
+    let (storage, key) = resource_storage(&mut conn, &principal, &resource).await?;
+    drop(conn);
+    let data = tokio::time::timeout(std::time::Duration::from_secs(30), storage.download(&key))
+        .await
+        .map_err(|_| AppError::Internal("Storage download timed out".into()))??;
     res.headers_mut().insert(
         salvo::http::header::CONTENT_TYPE,
-        content_type
+        resource
+            .file_type
             .parse()
             .unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
     );
     res.headers_mut().insert(
         salvo::http::header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", filename)
-            .parse()
-            .unwrap(),
+        format!(
+            "attachment; filename*=UTF-8''{}",
+            urlencoding::encode(&resource.file_name)
+        )
+        .parse()
+        .map_err(|_| AppError::Validation("Invalid filename".into()))?,
     );
-    res.write_body(data).ok();
-
+    res.write_body(data)
+        .map_err(|_| AppError::Internal("Cannot write download response".into()))?;
     Ok(())
 }

@@ -2,7 +2,8 @@
   "name": "casdog-web-checks",
   "private": true,
   "scripts": {
-    "check": "node ../scripts/check-web.cjs"
+    "check": "node ../scripts/check-web.cjs",
+    "check:e2e": "node ../scripts/check-web-e2e.cjs"
   },
   "devDependencies": {
     "playwright": "1.65.0"

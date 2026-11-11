@@ -127,6 +127,20 @@ async function main() {
     await page.getByText('Resource saved.',{exact:true}).waitFor();
     assert.equal(calls.find(c=>c.endpoint==='/api/sites'&&c.method==='POST').body.ssl_mode,'HTTP Only');
     assert.match(calls.find(c=>c.endpoint==='/api/sites'&&c.method==='POST').raw,/"port":8443[,}]/);
+    await page.getByRole('button',{name:'Providers',exact:true}).click();
+    await page.getByRole('combobox',{name:'Category',exact:true}).selectOption({label:'Scan'});
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'MCP Scan'});
+    await fill(page.getByRole('textbox',{name:'Subtype',exact:true}),'Intranet Scan');
+    await fill(page.getByRole('textbox',{name:'Endpoint URL / paths',exact:true}),'/mcp');
+    await fill(page.getByRole('textbox',{name:'Scopes / discovery targets',exact:true}),'127.0.0.1/32');
+    await fill(page.getByRole('textbox',{name:'Content / discovery ports',exact:true}),'8080');
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();
+    await page.getByText('Resource saved.',{exact:true}).waitFor();
+    const providerWrite=calls.find(c=>c.endpoint==='/api/providers'&&c.method==='POST').body;
+    assert.equal(providerWrite.type,'MCP Scan');
+    assert.equal(providerWrite.scopes,'127.0.0.1/32');
+    assert.equal(providerWrite.content,'8080');
+
     await page.getByRole('button',{name:'Account',exact:true}).click();
     await page.getByRole('button',{name:'Email and phone',exact:true}).click();
     await fill(page.getByRole('textbox',{name:'New contact',exact:true}),'new@example.test');

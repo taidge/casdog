@@ -470,6 +470,7 @@ fn sessions(app: AppState) -> Element {
 }
 fn webauthn(app: AppState) -> Element {
     boxed(widget(move |scope| {
+        let _ = scope.retain(crate::webauthn::CancelOnDrop);
         let rows = scope.cage(Vec::<Value>::new());
         let refresh = scope.cage(0_u64);
         let name = scope.cage(String::new());
@@ -478,8 +479,7 @@ fn webauthn(app: AppState) -> Element {
         let owner = scope.clone();
         scope.effect(move || {
             let _ = refresh.get();
-            let (tenant, user) = identity(app);
-            let path = format!("/api/webauthn/credentials/{}/{}", query_component(&tenant), query_component(&user));
+            let path = "/api/webauthn/credentials";
             let _ = owner.spawn(async move {
                 match app.request("GET", &path, None).await {
                     Ok(v) => rows.set(api::extract_collection(v)),
@@ -492,13 +492,7 @@ fn webauthn(app: AppState) -> Element {
                 let id = value["id"].as_str().unwrap_or_default().to_string();
                 let title = format!("Remove {}", api::item_title(&value));
                 action(scope, &title, busy, message, move || {
-                    let (tenant, user) = identity(app);
-                    let path = format!(
-                        "/api/webauthn/credentials/{}/{}/{}",
-                        query_component(&tenant),
-                        query_component(&user),
-                        query_component(&id)
-                    );
+                    let path = format!("/api/webauthn/credentials/{}", query_component(&id));
                     async move {
                         app.request("DELETE", &path, None).await?;
                         refresh.set(refresh.get() + 1);
@@ -511,20 +505,23 @@ fn webauthn(app: AppState) -> Element {
         stack((
             heading("WebAuthn credentials"),
             field(scope, "Credential name", name),
-            action(scope, "Begin credential registration", busy, message, move || async move {
-                let (tenant, user) = identity(app);
-                let path =
-                    format!("/api/webauthn/register/begin/{}/{}", query_component(&tenant), query_component(&user));
-                app.request(
-                    "POST",
-                    &path,
-                    Some(json!({
-                        "name": name.get(),
-                    })),
-                )
-                .await?;
-                Ok("Registration initialized. Browser credential creation is required to finish enrollment.".into())
+            label("Create a passkey using your device's screen lock or a security key."),
+            action(scope, "Register passkey", busy, message, move || async move {
+                let begin = app.request("GET", "/api/webauthn/signup/begin", None).await?;
+                let request_id = begin["requestId"].as_str().ok_or("Registration request ID missing")?;
+                let options = begin.get("options").cloned().ok_or("Registration options missing")?;
+                let credential = crate::webauthn::register(options).await?;
+                let path = format!(
+                    "/api/webauthn/signup/finish?requestId={}&name={}",
+                    query_component(request_id),
+                    query_component(name.get().trim())
+                );
+                app.request("POST", &path, Some(credential)).await?;
+                name.set(String::new());
+                refresh.set(refresh.get() + 1);
+                Ok("Passkey registered.".into())
             }),
+            sapid::button().label("Cancel passkey request").enabled(busy).on_press(crate::webauthn::cancel),
             list,
             notice(message),
         ))

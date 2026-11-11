@@ -18,7 +18,7 @@ impl ResourceService {
         let resources: Vec<Resource> = if let Some(owner) = owner {
             sqlx::query_as(
                 r#"
-                SELECT id, owner, name, created_at, "user", provider, application,
+                SELECT id, owner, name, created_at, user_id AS "user", provider, application,
                        tag, parent, file_name, file_type, file_format, file_size, url, description
                 FROM resources
                 WHERE owner = $1
@@ -34,7 +34,7 @@ impl ResourceService {
         } else {
             sqlx::query_as(
                 r#"
-                SELECT id, owner, name, created_at, "user", provider, application,
+                SELECT id, owner, name, created_at, user_id AS "user", provider, application,
                        tag, parent, file_name, file_type, file_format, file_size, url, description
                 FROM resources
                 ORDER BY created_at DESC
@@ -64,7 +64,7 @@ impl ResourceService {
     pub async fn get_by_id(pool: &PgPool, id: &str) -> AppResult<ResourceResponse> {
         let resource: Resource = sqlx::query_as(
             r#"
-            SELECT id, owner, name, created_at, "user", provider, application,
+            SELECT id, owner, name, created_at, user_id AS "user", provider, application,
                    tag, parent, file_name, file_type, file_format, file_size, url, description
             FROM resources
             WHERE id = $1
@@ -79,12 +79,19 @@ impl ResourceService {
     }
 
     pub async fn create(pool: &PgPool, req: CreateResourceRequest) -> AppResult<ResourceResponse> {
+        if req.name.is_empty() || req.name.len() > 1024 || req.file_name.chars().count() > 255 {
+            return Err(AppError::Validation(
+                "Resource name must contain 1–1024 bytes and filename at most 255 characters"
+                    .into(),
+            ));
+        }
+
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
         sqlx::query(
             r#"
-            INSERT INTO resources (id, owner, name, created_at, "user", provider, application,
+            INSERT INTO resources (id, owner, name, created_at, user_id, provider, application,
                                    tag, parent, file_name, file_type, file_format, file_size, url, description)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             "#,

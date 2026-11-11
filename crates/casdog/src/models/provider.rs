@@ -63,6 +63,8 @@ pub struct CreateProviderRequest {
     #[serde(rename = "type")]
     pub provider_type: String,
     pub sub_type: Option<String>,
+    pub content: Option<String>,
+    pub scopes: Option<String>,
     pub method: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -88,6 +90,8 @@ pub struct UpdateProviderRequest {
     #[serde(rename = "type")]
     pub provider_type: Option<String>,
     pub sub_type: Option<String>,
+    pub content: Option<String>,
+    pub scopes: Option<String>,
     pub method: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -117,6 +121,8 @@ pub struct ProviderResponse {
     #[serde(rename = "type")]
     pub provider_type: String,
     pub sub_type: Option<String>,
+    pub content: Option<String>,
+    pub scopes: Option<String>,
     pub client_id: Option<String>,
     pub host: Option<String>,
     pub port: Option<i32>,
@@ -136,6 +142,8 @@ impl From<Provider> for ProviderResponse {
             category: p.category,
             provider_type: p.provider_type,
             sub_type: p.sub_type,
+            content: p.content,
+            scopes: p.scopes,
             client_id: p.client_id,
             host: p.host,
             port: p.port,
