@@ -15,7 +15,7 @@ const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--f
   encoding: 'utf8',
   windowsHide: true,
 }));
-const artifacts = path.join(metadata.target_directory, 'phase9', 'browser-e2e');
+const artifacts = path.join(metadata.target_directory, 'phase11', 'browser-e2e');
 const origin = process.env.CASDOG_E2E_BASE_URL || 'http://localhost:18085';
 const database = process.env.CASDOG_TEST_DATABASE_URL;
 assert.ok(database, 'CASDOG_TEST_DATABASE_URL must identify a migrated disposable database');
@@ -48,16 +48,27 @@ function browserTrace(){
 async function main() {
   await fs.mkdir(artifacts, { recursive: true });
   const mail = [];
+  const scimToken=crypto.randomBytes(24).toString('hex'),scimRequests=[];
+  let scimUsers=[];
   const appBundle = Buffer.from(JSON.stringify({manifest:{id:'browser-portal',type:'app',version:'1.0',variables:[{name:'appUrl',label:{en:'Application URL'},type:'url',required:true}]},files:{'application.json':{redirectUris:['{{appUrl}}/callback']}}}));
   const providerBundle = Buffer.from(JSON.stringify({manifest:{id:'browser-provider',type:'provider',version:'1.0',variables:[]},files:{'provider.json':{category:'OAuth',type:'GitHub',scopes:'user:email'}}}));
+  const themeBundle = Buffer.from(JSON.stringify({manifest:{id:'browser-theme',type:'theme',version:'1.0',variables:[]},files:{'theme.json':{themeData:{isEnabled:true,themeType:'light',colorPrimary:'#126f85',borderRadius:12,isCompact:true},formOffset:4,formCss:'body h2 { color:rgb(13,75,125); } .sidebar { display:none; }',formCssMobile:'body h2 { color:rgb(40,100,80); }',formSideHtml:'<strong>Browser theme side panel</strong>',footerHtml:'<p>Browser theme footer</p>',formBackgroundUrl:'',formBackgroundUrlMobile:''}}}));
   const registry = {integrations:[
     {id:'browser-portal',name:{en:'Browser portal'},type:'app',latest:'1.0',versions:[{version:'1.0',url:'app.json',sha256:crypto.createHash('sha256').update(appBundle).digest('hex')}]},
     {id:'browser-provider',name:{en:'Browser provider'},type:'provider',latest:'1.0',versions:[{version:'1.0',url:'provider.json',sha256:crypto.createHash('sha256').update(providerBundle).digest('hex')}]},
+    {id:'browser-theme',name:{en:'Browser theme'},type:'theme',latest:'1.0',versions:[{version:'1.0',url:'theme.json',sha256:crypto.createHash('sha256').update(themeBundle).digest('hex')}]},
   ]};
   const mailServer = http.createServer(async (request, response) => {
     const pathname = new URL(request.url, 'http://localhost').pathname;
+    if(request.method==='GET'&&pathname==='/scim/v2/Users'){
+      scimRequests.push(request.headers.authorization);
+      if(request.headers.authorization!==`Bearer ${scimToken}`){response.writeHead(401);response.end('{}');return;}
+      const url=new URL(request.url,'http://localhost'),start=Number(url.searchParams.get('startIndex')||1),count=Number(url.searchParams.get('count')||100),rows=scimUsers.slice(start-1,start-1+count);
+      response.writeHead(200,{'Content-Type':'application/scim+json'});
+      response.end(JSON.stringify({schemas:['urn:ietf:params:scim:api:messages:2.0:ListResponse'],totalResults:scimUsers.length,startIndex:start,itemsPerPage:rows.length,Resources:rows}));return;
+    }
     if (request.method === 'GET') {
-      const body = {'/marketplace/index.json':JSON.stringify(registry),'/marketplace/app.json':appBundle,'/marketplace/provider.json':providerBundle}[pathname];
+      const body = {'/marketplace/index.json':JSON.stringify(registry),'/marketplace/app.json':appBundle,'/marketplace/provider.json':providerBundle,'/marketplace/theme.json':themeBundle}[pathname];
       response.writeHead(body ? 200 : 404, {'Content-Type':'application/json'});
       response.end(body || '{}');
       return;
@@ -73,6 +84,7 @@ async function main() {
   let directoryUsername='';
   const directory=await startDirectory(()=>directoryUsername);
   let server, browser, page, runtimeImage;
+  let startupError;
   const serverOutput = [];
   const checks = [];
   const runtimeErrors = [];
@@ -102,18 +114,28 @@ async function main() {
       });
       server.stdout.on('data', chunk => serverOutput.push(chunk.toString()));
       server.stderr.on('data', chunk => serverOutput.push(chunk.toString()));
-      server.on('error', error => serverOutput.push(error.message));
+      server.on('error', error => {startupError=error;serverOutput.push(error.message);});
     }
     let ready = false;
-    for (let attempt = 0; attempt < 200; attempt++) {
+    const startupStarted=Date.now();let nextStartupReport=0;
+    while (!ready) {
       try {
-        ready = (await fetch(`${origin}/api/health`)).ok;
+        ready = (await fetch(`${origin}/api/health`,{signal:AbortSignal.timeout(2000)})).ok;
       } catch {}
       if (ready) break;
+      if(startupError)break;
       if (server?.exitCode !== null && server?.exitCode !== undefined) break;
+      // A live owned process is still starting, even when an observation window
+      // expires. Keep its PID and diagnostics available instead of restarting it.
+      if(!server&&Date.now()-startupStarted>=50000)break;
+      if(Date.now()>=nextStartupReport){
+        await fs.writeFile(path.join(artifacts,'startup-state.json'),JSON.stringify({pid:server?.pid,exitCode:server?.exitCode,signal:server?.signalCode,elapsedMs:Date.now()-startupStarted,ready:false}));
+        nextStartupReport=Date.now()+30000;
+      }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
-    assert.ok(ready, `Backend did not start. ${serverOutput.join('').slice(-3000)}`);
+    await fs.writeFile(path.join(artifacts,'startup-state.json'),JSON.stringify({pid:server?.pid,exitCode:server?.exitCode,signal:server?.signalCode,elapsedMs:Date.now()-startupStarted,ready}));
+    assert.ok(ready, `Backend did not start (PID ${server?.pid}, exit ${server?.exitCode}, signal ${server?.signalCode}). ${serverOutput.join('').slice(-3000)}`);
     browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'msedge', headless: true });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     page = await context.newPage();
@@ -175,15 +197,23 @@ async function main() {
     assert.ok((await context.request.get(`${origin}/api/users`,{headers:keyHeaders})).ok());
     assert.ok((await context.request.get(`${origin}/api/users?${new URLSearchParams({accessKey,accessSecret})}`)).ok());
     const disabled=page.waitForResponse(response=>response.url().endsWith('/api/update-key'));
+    const disabledReload=page.waitForResponse(response=>response.url().includes('/api/get-key?')&&response.request().method()==='GET');
     await page.getByRole('combobox',{name:'Key state',exact:true}).selectOption('Inactive');
+    await page.evaluate(()=>new Promise(requestAnimationFrame));
     await page.getByRole('button',{name:'Save API key',exact:true}).click();
     assert.ok((await disabled).ok());
+    assert.equal((await (await disabledReload).json()).data.state,'Inactive');
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     await page.waitForFunction(()=>Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='Save API key'&&button.getAttribute('aria-busy')==='false'));
     assert.equal((await context.request.get(`${origin}/api/users`,{headers:keyHeaders})).status(),401);
     const enabled=page.waitForResponse(response=>response.url().endsWith('/api/update-key'));
+    const enabledReload=page.waitForResponse(response=>response.url().includes('/api/get-key?')&&response.request().method()==='GET');
     await page.getByRole('combobox',{name:'Key state',exact:true}).selectOption('Active');
+    await page.evaluate(()=>new Promise(requestAnimationFrame));
     await page.getByRole('button',{name:'Save API key',exact:true}).click();
     assert.ok((await enabled).ok());
+    assert.equal((await (await enabledReload).json()).data.state,'Active');
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     await page.waitForFunction(()=>Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='Save API key'&&button.getAttribute('aria-busy')==='false'));
     assert.ok((await context.request.get(`${origin}/api/users`,{headers:keyHeaders})).ok());
     await page.getByRole('button',{name:'Delete API key',exact:true}).click();
@@ -193,11 +223,33 @@ async function main() {
     await navigate('Site settings','Site settings');
     await page.getByRole('button',{name:'Load site settings',exact:true}).click();
     await page.getByText('Site settings loaded.',{exact:true}).waitFor();
+    const previousPool=(await api('GET','/api/get-setting',undefined,admin.token)).data.runtime.generation;
     await fill('Audit retention days','30');
+    await fill('Maximum open connections','8');await fill('Maximum idle connections','1');await fill('Connection lifetime (seconds)','60');
     await page.getByRole('button',{name:'Save site settings',exact:true}).click();
-    await page.getByText('Audit retention saved and active for the next cleanup. Pool settings remain pending.',{exact:true}).waitFor();
-    assert.equal((await api('GET','/api/get-setting',undefined,admin.token)).data.recordRetentionDays,30);
-    checks.push('Global settings UI persists an active audit retention policy while truthfully showing pool settings as pending');
+    await page.getByText('Audit retention and connection pool settings are active.',{exact:true}).waitFor();
+    const poolSettings=(await api('GET','/api/get-setting',undefined,admin.token)).data;
+    assert.equal(poolSettings.recordRetentionDays,30);assert.equal(poolSettings.runtime.poolSettingsApplied,true);
+    assert.equal(poolSettings.runtime.effectiveMaxOpen,8);assert.equal(poolSettings.runtime.effectiveMaxIdle,1);assert.notEqual(poolSettings.runtime.generation,previousPool);
+    await page.screenshot({path:path.join(artifacts,'site-settings.png'),fullPage:true});
+    checks.push('Global settings UI applies real SQLx and Diesel pool limits to a new generation while retaining active audit retention');
+    scimUsers=[{schemas:['urn:ietf:params:scim:schemas:core:2.0:User'],id:`scim-id-${suffix}`,userName:`scim-ui-${suffix}`,displayName:'SCIM browser user',active:true,title:'SCIM engineer',locale:'en',preferredLanguage:'en',addresses:[{primary:true,formatted:'Browser work address',locality:'Shanghai',region:'SH'}]}];
+    secretsThatMustNotBeLogged.push(scimToken);
+    await navigate('Syncers','Syncers');
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'SCIM'});
+    await page.getByText('SCIM reads users from Host/Users.',{exact:false}).waitFor();
+    await fill('Owner','built-in');await fill('Name',`browser-scim-${suffix}`);await fill('Organization','built-in');
+    await fill('Host',`http://127.0.0.1:${mailServer.address().port}/scim/v2`);await fill('Password',scimToken,true);
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:`browser-scim-${suffix}`,exact:true}).click();
+    await page.getByRole('button',{name:'Run selected syncer',exact:true}).click();
+    await page.getByText('Synchronization completed.',{exact:false}).waitFor();
+    const scimAccount=(await api('GET',`/api/get-user?id=built-in/scim-ui-${suffix}`,undefined,admin.token)).data;
+    const scimProfile=await api('GET',`/api/users/${scimAccount.id}`,undefined,admin.token);
+    assert.equal(scimProfile.title,'SCIM engineer');assert.equal(scimProfile.location,'Shanghai');assert.equal(scimProfile.region,'SH');
+    assert.deepEqual(scimProfile.address,['Browser work address']);assert.ok(scimRequests.includes(`Bearer ${scimToken}`));
+    await page.screenshot({path:path.join(artifacts,'scim-syncer.png'),fullPage:true});
+    checks.push('SCIM source configured and run through Glory imports a real authenticated HTTP directory user and standard profile fields');
     const logProvider=await api('POST','/api/providers',{owner:'built-in',name:`browser-log-${suffix}`,display_name:'Browser OpenClaw telemetry',category:'Log',type:'Agent',sub_type:'OpenClaw'},admin.token);
     const logApplication=await api('POST','/api/applications',{owner:'admin',name:`browser-telemetry-${suffix}`,display_name:'Browser telemetry',organization:'built-in'},admin.token);
     await navigate('Telemetry','Telemetry receivers');
@@ -221,6 +273,8 @@ async function main() {
     await page.getByText('Receiver revoked.',{exact:true}).waitFor();
     assert.equal((await exportTrace(currentExporter)).status(),401);
     assert.equal(await page.getByLabel('Exporter token',{exact:true}).count(),0);
+    await page.getByText(/^Receiver .* · built-in · Disabled$/).waitFor();
+    await page.screenshot({path:path.join(artifacts,'telemetry-revoked.png'),fullPage:true});
     checks.push('Telemetry UI approves a real receiver; OTLP protobuf persists an Entry and rotation/revocation immediately reject old exporter tokens');
 
     await navigate('Marketplace', 'Marketplace integrations');
@@ -257,6 +311,39 @@ async function main() {
     await page.getByText('Integration uninstalled.',{exact:true}).waitFor();
     const unlinkedApp = await api('GET', `/api/get-application?id=built-in/market-app-${suffix}`, undefined, admin.token);
     assert.deepEqual(unlinkedApp.data.providers, []);
+    const themedRef=`built-in/market-app-${suffix}`;
+    const originalBrand=(await api('GET',`/api/auth/branding?application=${encodeURIComponent(themedRef)}`)).data;
+    await page.getByRole('button',{name:'Preview Browser theme',exact:true}).click();
+    await page.getByRole('textbox',{name:'Theme application',exact:true}).waitFor();
+    await fill('Installation name',`market-theme-${suffix}`);await fill('Theme application',themedRef);
+    await page.getByRole('button',{name:'Install integration',exact:true}).click();
+    await page.getByText('Integration installed.',{exact:true}).waitFor();
+    await navigate('Sign in','Sign in');await fill('Application',themedRef);
+    await page.waitForFunction(()=>getComputedStyle(document.querySelector('.main h2')).color==='rgb(13, 75, 125)');
+    assert.equal(await page.locator('.sidebar').isVisible(),true);
+    assert.equal(await page.locator('iframe[title="Application side panel"]').getAttribute('sandbox'),'');
+    await page.frameLocator('iframe[title="Application side panel"]').getByText('Browser theme side panel',{exact:true}).waitFor();
+    await page.frameLocator('iframe[title="Application footer"]').getByText('Browser theme footer',{exact:true}).waitFor();
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assert.equal(await page.locator('iframe[title="Application side panel"]').isVisible(),true);
+    await page.screenshot({path:path.join(artifacts,'theme-desktop.png'),fullPage:true});
+    await page.setViewportSize({width:390,height:844});
+    await page.waitForFunction(()=>getComputedStyle(document.querySelector('.main h2')).color==='rgb(40, 100, 80)');
+    await page.frameLocator('iframe[title="Application footer"]').getByText('Browser theme footer',{exact:true}).waitFor();
+    assert.equal(await page.locator('iframe[title="Application side panel"]').isVisible(),false);
+    await page.screenshot({path:path.join(artifacts,'theme-mobile.png'),fullPage:true});
+    await page.setViewportSize({width:1440,height:1000});
+    await navigate('Sign up','Create account');await fill('Application',themedRef);
+    await page.waitForFunction(()=>getComputedStyle(document.querySelector('.main h2')).color==='rgb(13, 75, 125)');
+    await navigate('Authorize','Authorize application');await fill('Client ID',installedApp.data.clientId);
+    await page.waitForFunction(()=>getComputedStyle(document.querySelector('.main h2')).color==='rgb(13, 75, 125)');
+    await navigate('Marketplace','Marketplace integrations');
+    assert.equal(await page.locator('.casdog-auth-root').count(),0);
+    await page.getByRole('button',{name:`Uninstall built-in/market-theme-${suffix}`,exact:true}).click();
+    await page.getByText('Integration uninstalled.',{exact:true}).waitFor();
+    const restoredBrand=(await api('GET',`/api/auth/branding?application=${encodeURIComponent(themedRef)}`)).data;
+    assert.deepEqual(restoredBrand,originalBrand);
+    checks.push('Checksummed Marketplace theme installs, renders scoped desktop/mobile login/signup/authorization branding, isolates HTML and restores the complete original application styling on uninstall');
     const appDeletion = page.waitForResponse(response => response.url().endsWith('/api/delete-integration') && response.request().postDataJSON().name === `market-app-${suffix}`);
     await page.getByRole('button', {name:`Uninstall built-in/market-app-${suffix}`,exact:true}).click();
     assert.ok((await appDeletion).ok());
@@ -317,6 +404,7 @@ async function main() {
     await page.getByRole('button',{name:'Disable renewal',exact:true}).waitFor();
     owned=await api('GET','/api/store/purchases',undefined,token);
     assert.equal(owned.subscriptions[0].renewal.enabled,true);assert.equal(owned.subscriptions[0].renewal.max_amount_cents,450);
+    await page.screenshot({path:path.join(artifacts,'store-renewal.png'),fullPage:true});
     await page.getByRole('button',{name:'Disable renewal',exact:true}).click();
     await page.getByText('Future renewals disabled.',{exact:true}).waitFor();
     owned=await api('GET','/api/store/purchases',undefined,token);assert.equal(owned.subscriptions[0].renewal.enabled,false);
@@ -548,6 +636,40 @@ async function main() {
     await signIn(recoveredPassword);
     await page.getByRole('heading', { name: 'Identity and access management' }).waitFor();
     checks.push('Password recovery delivered through a local HTTP email provider and new password login succeeded');
+    await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
+    await fill('Username','admin');await fill('Password','123',true);await page.getByRole('button',{name:'Sign in',exact:true}).last().click();
+    await page.getByRole('heading',{name:'Identity and access management'}).waitFor();
+    const restoreAdmin=await page.evaluate(()=>JSON.parse(localStorage.getItem('casdog.auth.token')));
+    const restoredName=`restored-${suffix}`,restoredId=crypto.randomUUID(),restoreSeed='GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ',restoreRecovery=crypto.randomUUID(),restorePassword='RestoredBrowser42!';
+    secretsThatMustNotBeLogged.push(restoreSeed,restoreRecovery,restorePassword);
+    await navigate('Restore users and MFA','Restore users and MFA');
+    const restoreFile=path.join(artifacts,'restore-upload.json');
+    await fs.writeFile(restoreFile,JSON.stringify({users:[{id:restoredId,owner:'built-in',name:restoredName,displayName:'Restored browser user',password:restorePassword,passwordType:'plain',preferredMfaType:'app',totpSecret:restoreSeed,recoveryCodes:[restoreRecovery]}]}));
+    try {
+      const [chooser]=await Promise.all([page.waitForEvent('filechooser'),page.getByRole('button',{name:'Casdoor JSON backup',exact:true}).click()]);
+      await chooser.setFiles(restoreFile);await page.getByText('Ready to restore 1 accounts.',{exact:false}).waitFor();
+    } finally {await fs.unlink(restoreFile).catch(()=>{});}
+    const restoreText=await page.locator('body').innerText();assert.ok(!restoreText.includes(restoreSeed)&&!restoreText.includes(restoreRecovery));
+    await page.getByRole('button',{name:'Restore users and MFA',exact:true}).last().click();
+    await page.getByText('Confirm that this is a trusted, current MFA backup.',{exact:true}).waitFor();
+    await page.getByRole('checkbox',{name:'I am restoring a current, unmasked backup with MFA credentials',exact:true}).check();
+    await page.getByRole('button',{name:'Restore users and MFA',exact:true}).last().click();
+    await page.getByText('Restored 1 accounts with their supported MFA credentials.',{exact:true}).waitFor();
+    const restoredProfile=await api('GET',`/api/users/${restoredId}`,undefined,restoreAdmin);
+    assert.equal(restoredProfile.mfa_enabled,true);assert.equal(restoredProfile.preferred_mfa_type,'app');
+    assert.ok(!(await page.evaluate(()=>JSON.stringify({...localStorage,...sessionStorage}))).includes(restoreSeed));
+    await page.screenshot({path:path.join(artifacts,'mfa-restored.png'),fullPage:true});
+    await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
+    const signInRestored=async()=>{await fill('Username',restoredName);await fill('Password',restorePassword,true);await page.getByRole('button',{name:'Sign in',exact:true}).last().click();await page.getByRole('combobox',{name:'Verification method'}).waitFor();assert.equal(await page.evaluate(()=>localStorage.getItem('casdog.auth.token')),null);await page.getByRole('combobox',{name:'Verification method'}).selectOption('recovery');await fill('Verification code',restoreRecovery);};
+    await signInRestored();await page.getByRole('button',{name:'Sign in',exact:true}).last().click();await page.getByRole('heading',{name:'Identity and access management'}).waitFor();
+    const restoredToken=await page.evaluate(()=>JSON.parse(localStorage.getItem('casdog.auth.token')));
+    assert.equal((await api('GET','/api/get-account',undefined,restoredToken)).id,restoredId);
+    await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
+    await signInRestored();
+    const reusedRecovery=page.waitForResponse(response=>response.url().endsWith('/api/auth/password/session')&&response.request().postData()?.includes(restoreRecovery));
+    await page.getByRole('button',{name:'Sign in',exact:true}).last().click();assert.equal((await reusedRecovery).ok(),false);
+    assert.equal(await page.evaluate(()=>localStorage.getItem('casdog.auth.token')),null);
+    checks.push('Trusted local JSON MFA backup restores through the admin UI, keeps secrets out of browser storage, enforces password MFA and consumes the original recovery code once');
     assert.deepEqual(runtimeErrors, []);
     for(const secret of secretsThatMustNotBeLogged)assert.ok(!serverOutput.join('').includes(secret),'Request tracing must omit query secrets');
     await fs.writeFile(path.join(artifacts, 'results.json'), JSON.stringify({ passed: true, checks, runtimeErrors, apiInterception: false }, null, 2));

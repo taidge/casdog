@@ -146,6 +146,10 @@ fn profile(app: AppState) -> Element {
                     data.get()["name"].as_str().unwrap_or_default()
                 )
             }),
+            // Do not expose editable fields until their initial values arrive.
+            // A slow account lookup must not overwrite an edit made meanwhile.
+            when(scope.bond(move || data.get()["id"].as_str().is_some()), move || widget(move |scope| {
+                stack((
             field(scope, "Display name", display),
             field(scope, "Avatar URL", avatar),
             field(scope, "Bio", bio),
@@ -175,6 +179,8 @@ fn profile(app: AppState) -> Element {
                 }
                 Ok("Profile saved.".into())
             }),
+                )).build(scope)
+            })),
             notice(message),
         ))
         .build(scope)

@@ -79,6 +79,14 @@ pub fn page(app: AppState, config: ResourceConfig) -> Element {
                 refresh.set(refresh.get() + 1);
                 Ok("Resource deleted.".into())
             }),
+            when(scope.bond(move || config.slug == "syncers"), move || widget(move |scope| {
+                action(scope,"Run selected syncer",busy,message,move ||async move {
+                    let id=selected.get().ok_or("Select a syncer first.")?;
+                    let result=app.request("POST",&format!("/api/syncers/{}/run",query_component(&id)),None).await?;
+                    refresh.set(refresh.get()+1);
+                    Ok(format!("Synchronization completed. Updated: {}. Disabled: {}.",result["recordsSynced"].as_u64().unwrap_or(0),result["recordsForbidden"].as_u64().unwrap_or(0)))
+                }).build(scope)
+            })),
             notice(message),
         ))
         .build(scope)

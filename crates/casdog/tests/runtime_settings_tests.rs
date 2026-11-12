@@ -148,7 +148,7 @@ impl Fixture {
     }
     async fn record(&self, owner: &str, days: i64) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO records(id,owner,name,created_at) VALUES($1,$2,$1,clock_timestamp()-make_interval(days=>$3))").bind(&id).bind(owner).bind(days as i32).execute(&self.pool).await.unwrap();
+        sqlx::query("INSERT INTO records(id,owner,name,method,request_uri,action,created_at) VALUES($1,$2,$1,'GET','/retention-test','retention-test',clock_timestamp()-make_interval(days=>$3))").bind(&id).bind(owner).bind(days as i32).execute(&self.pool).await.unwrap();
         id
     }
     async fn exists(&self, id: &str) -> bool {
@@ -408,5 +408,267 @@ async fn cleanup_uses_shared_policy_and_advisory_lock_and_rejects_malformed_poli
         .unwrap();
     assert!(!f.exists(&row).await);
     other.close().await;
+    f.cleanup().await;
+}
+
+#[derive(Clone)]
+struct PoolProbeGate {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+#[handler]
+async fn pool_generation_probe(req: &mut Request, depot: &mut Depot) -> Json<Value> {
+    let generation = depot
+        .obtain::<std::sync::Arc<casdog::runtime_pool::PoolGeneration>>()
+        .unwrap()
+        .clone();
+    let pool = depot.obtain::<PgPool>().unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    if req.query::<bool>("hold") == Some(true) {
+        let gate = depot.obtain::<PoolProbeGate>().unwrap();
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+    let after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    Json(json!({"generation":generation.id,"before":before,"after":after}))
+}
+#[derive(diesel::QueryableByName)]
+struct BackendPid {
+    #[diesel(sql_type=diesel::sql_types::Integer)]
+    pid: i32,
+}
+async fn diesel_pid(pool: &casdog::diesel_pool::DieselPool) -> i32 {
+    use diesel_async::RunQueryDsl;
+    let mut c = pool.get().await.unwrap();
+    diesel::sql_query("SELECT pg_backend_pid() AS pid")
+        .get_result::<BackendPid>(&mut *c)
+        .await
+        .unwrap()
+        .pid
+}
+async fn persist_pool_settings(pool: &PgPool, open: i64, idle: i64, lifetime: i64) {
+    sqlx::query("UPDATE operation_settings SET data=jsonb_build_object('dbMaxOpenConns',$1::bigint,'dbMaxIdleConns',$2::bigint,'dbConnMaxLifetime',$3::bigint,'recordRetentionDays',0),updated_at=clock_timestamp() WHERE singleton").bind(open).bind(idle).bind(lifetime).execute(pool).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires migrated CASDOG_TEST_DATABASE_URL"]
+async fn runtime_generations_apply_actual_sqlx_diesel_limits_and_keep_inflight_requests_alive() {
+    use casdog::runtime_pool::{RuntimePoolManager, RuntimePools};
+    let f = Fixture::new().await;
+    persist_pool_settings(&f.pool, 2, 1, 1).await;
+    let url = std::env::var("CASDOG_TEST_DATABASE_URL").unwrap();
+    let manager = RuntimePoolManager::new(&url, &f.pool).await.unwrap();
+    let original = manager.current();
+    let managed = Service::new(casdog::routes::create_router()).hoop(RuntimePools(manager.clone()));
+    let mut response = TestClient::post("http://localhost/api/update-setting")
+        .add_header(
+            "Authorization",
+            format!("Bearer {}", f.administrator()),
+            true,
+        )
+        .json(&json!({"dbMaxOpenConns":2,"dbMaxIdleConns":1,"dbConnMaxLifetime":1}))
+        .send(&managed)
+        .await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let applied: Value = response.take_json().await.unwrap();
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["runtime"]["effectiveMaxIdle"], 1);
+
+    assert_eq!(original.limits.max_open, 2);
+    assert_eq!(original.limits.max_idle, 1);
+    let a = original.sqlx.acquire().await.unwrap();
+    let b = original.sqlx.acquire().await.unwrap();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            original.sqlx.acquire()
+        )
+        .await
+        .is_err()
+    );
+    let da = original.diesel.get().await.unwrap();
+    let db = original.diesel.get().await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), original.diesel.get())
+            .await
+            .is_err()
+    );
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let first = barrier.clone();
+    let release_a = tokio::spawn(async move {
+        first.wait().await;
+        drop(a);
+        drop(da);
+    });
+    let second = barrier.clone();
+    let release_b = tokio::spawn(async move {
+        second.wait().await;
+        drop(b);
+        drop(db);
+    });
+    barrier.wait().await;
+    release_a.await.unwrap();
+    release_b.await.unwrap();
+    for _ in 0..100 {
+        if original.sqlx.num_idle() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(original.sqlx.num_idle(), 1);
+    assert_eq!(original.diesel.idle_count(), 1);
+    let first: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&original.sqlx)
+        .await
+        .unwrap();
+    let diesel_first = diesel_pid(&original.diesel).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let next: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&original.sqlx)
+        .await
+        .unwrap();
+    assert_ne!(first, next);
+    assert_ne!(diesel_first, diesel_pid(&original.diesel).await);
+    let gate = PoolProbeGate {
+        entered: Default::default(),
+        release: Default::default(),
+    };
+    let service = std::sync::Arc::new(
+        Service::new(Router::with_path("probe").get(pool_generation_probe))
+            .hoop(salvo::affix_state::AffixList::new().inject(gate.clone()))
+            .hoop(RuntimePools(manager.clone())),
+    );
+    let held_service = service.clone();
+    let request = tokio::spawn(async move {
+        let mut r = TestClient::get("http://localhost/probe?hold=true")
+            .send(&*held_service)
+            .await;
+        r.take_json::<Value>().await.unwrap()
+    });
+    gate.entered.notified().await;
+    persist_pool_settings(&f.pool, 3, 2, 0).await;
+    manager.refresh().await.unwrap();
+    let current = manager.current();
+    assert_ne!(current.id, original.id);
+    assert_eq!(current.limits.max_open, 3);
+    assert_eq!(current.limits.max_idle, 2);
+    let mut r = TestClient::get("http://localhost/probe")
+        .send(&*service)
+        .await;
+    let fresh: Value = r.take_json().await.unwrap();
+    assert_eq!(fresh["generation"], current.id);
+    gate.release.notify_one();
+    let old = request.await.unwrap();
+    assert_eq!(old["generation"], original.id);
+    assert_eq!(old["before"], old["after"]);
+    // A second server starts with the saved settings, then both converge on
+    // concurrent edits without rebuilding an unchanged generation each poll.
+    let second = RuntimePoolManager::new(&url, &f.pool).await.unwrap();
+    assert_eq!(second.current().limits, current.limits);
+    let unchanged = manager.current().id.clone();
+    manager.refresh().await.unwrap();
+    assert_eq!(manager.current().id, unchanged);
+    let ((), ()) = tokio::join!(
+        persist_pool_settings(&f.pool, 4, 1, 0),
+        persist_pool_settings(&f.pool, 5, 2, 0)
+    );
+    let (a, b) = tokio::join!(manager.refresh(), second.refresh());
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(manager.current().limits, second.current().limits);
+    let active = manager.current();
+    sqlx::query("UPDATE operation_settings SET data='{\"dbMaxOpenConns\":\"invalid\"}'::jsonb WHERE singleton").execute(&f.pool).await.unwrap();
+    assert!(manager.refresh().await.is_err());
+    assert_eq!(manager.current().id, active.id);
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&active.sqlx)
+            .await
+            .unwrap(),
+        1
+    );
+    let status = manager.status(&RuntimeSettings {
+        db_max_open_conns: 6,
+        db_max_idle_conns: 1,
+        ..Default::default()
+    });
+    assert_eq!(status["poolSettingsApplied"], false);
+    assert!(status["lastError"].is_string());
+    // Zero adds no client ceiling below the PostgreSQL server's real capacity.
+    // SQLx allocates a bounded queue, so never pass u32::MAX as unlimited.
+    persist_pool_settings(&f.pool, 0, 0, 0).await;
+    manager.refresh().await.unwrap();
+    let server_capacity: i32 = sqlx::query_scalar("SELECT current_setting('max_connections')::int")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(manager.current().limits.max_open, server_capacity as u32);
+    // Exercise the real zero-default startup path, not just limits arithmetic.
+    let zero_startup = RuntimePoolManager::new(&url, &f.pool).await.unwrap();
+    let zero_generation = zero_startup.current();
+    assert_eq!(zero_generation.limits.max_open, server_capacity as u32);
+    assert_eq!(
+        zero_generation.limits.max_idle,
+        2u32.min(server_capacity as u32)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&zero_generation.sqlx)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(diesel_pid(&zero_generation.diesel).await > 0);
+    let zero_status = zero_startup.status(&RuntimeSettings::default());
+    assert_eq!(zero_status["poolSettingsApplied"], true);
+    assert_eq!(zero_status["serverMaxConnections"], server_capacity);
+    assert_eq!(zero_status["effectiveMaxOpen"], server_capacity);
+    assert_eq!(zero_status["effectiveMaxIdle"], 2i32.min(server_capacity));
+
+    assert_eq!(manager.current().limits.max_idle, 2);
+    assert_eq!(manager.current().limits.lifetime, None);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated CASDOG_TEST_DATABASE_URL"]
+async fn zero_default_pool_settings_start_with_the_real_postgres_capacity() {
+    let f = Fixture::new().await;
+    persist_pool_settings(&f.pool, 0, 0, 0).await;
+    let capacity: i32 = sqlx::query_scalar("SELECT current_setting('max_connections')::int")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let url = std::env::var("CASDOG_TEST_DATABASE_URL").unwrap();
+    let manager = casdog::runtime_pool::RuntimePoolManager::new(&url, &f.pool)
+        .await
+        .unwrap();
+    let generation = manager.current();
+    assert_eq!(generation.limits.max_open, capacity as u32);
+    assert_eq!(generation.limits.max_idle, 2u32.min(capacity as u32));
+    assert_eq!(generation.limits.lifetime, None);
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&generation.sqlx)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(diesel_pid(&generation.diesel).await > 0);
+    let status = manager.status(&RuntimeSettings::default());
+    assert_eq!(status["poolSettingsApplied"], true);
+    assert_eq!(status["effectiveMaxOpen"], capacity);
+    assert_eq!(status["serverMaxConnections"], capacity);
+    let id = generation.id.clone();
+    manager.refresh().await.unwrap();
+    assert_eq!(manager.current().id, id);
     f.cleanup().await;
 }

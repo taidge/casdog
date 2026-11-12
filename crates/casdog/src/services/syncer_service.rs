@@ -83,14 +83,20 @@ impl SyncerService {
                 "Syncer organization is unavailable".into(),
             ));
         }
-        if !matches!(s.syncer_type.as_str(), "Database" | "LDAP" | "Keycloak") {
+        if !matches!(
+            s.syncer_type.as_str(),
+            "Database" | "LDAP" | "Keycloak" | "SCIM"
+        ) {
             return Err(AppError::Validation("Unsupported syncer type".into()));
         }
         if !s.is_read_only && s.syncer_type != "Database" {
             return Err(AppError::Validation(
-                "LDAP and Keycloak writeback are unsupported; enable read-only synchronization"
+                "LDAP, Keycloak and SCIM writeback are unsupported; enable read-only synchronization"
                     .into(),
             ));
+        }
+        if s.syncer_type == "SCIM" {
+            return super::syncer_scim::ScimSource::validate(s);
         }
         if s.database.as_deref().is_none_or(str::is_empty)
             || s.database.as_ref().is_some_and(|v| v.len() > 100)
@@ -213,7 +219,9 @@ impl SyncerService {
             row.port = v;
         }
         if let Some(v) = req.user {
-            row.user = v;
+            if !(row.syncer_type == "SCIM" && row.password.is_empty() && v == "***") {
+                row.user = v;
+            }
         }
         if let Some(v) = req.password.filter(|v| v != "***") {
             row.password = v;

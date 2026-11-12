@@ -424,7 +424,7 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
     if path == "telemetry/receivers" || path.starts_with("telemetry/receivers/") {
         return Ok(()); // Handler validates current real administrator and stored receiver scope.
     }
-    if path == "upload-users" {
+    if path == "upload-users" || path == "upload-users-with-mfa" {
         return if p.admin { Ok(()) } else { Err(denied()) };
     }
 

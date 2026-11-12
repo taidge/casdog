@@ -22,9 +22,12 @@ pub async fn get_setting(depot: &mut Depot) -> AppResult<Json<Value>> {
             "Current global administrator is unavailable".into(),
         ));
     }
-    Ok(Json(
-        json!({"status":"ok","data":RuntimeSettingsService::read(&pool).await?}),
-    ))
+    let mut data = RuntimeSettingsService::read(&pool).await?;
+    if let Ok(manager) = depot.obtain::<crate::runtime_pool::RuntimePoolManager>() {
+        data["runtime"] = manager
+            .status(&crate::services::runtime_settings_service::RuntimeSettings::parse(&data)?);
+    }
+    Ok(Json(json!({"status":"ok","data":data})))
 }
 #[handler]
 pub async fn update_setting(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
@@ -33,8 +36,17 @@ pub async fn update_setting(depot: &mut Depot, req: &mut Request) -> AppResult<J
         .parse_json()
         .await
         .map_err(|_| AppError::Validation("Invalid settings JSON".into()))?;
-    Ok(Json(
+    let mut result =
         RuntimeSettingsService::update(&RuntimeSettingsService::pool(depot)?, &principal, &value)
-            .await?,
-    ))
+            .await?;
+    if let Ok(manager) = depot.obtain::<crate::runtime_pool::RuntimePoolManager>() {
+        let _ = manager.refresh().await; // persisted-but-failed remains truthful
+        let status = manager
+            .status(&crate::services::runtime_settings_service::RuntimeSettings::parse(&value)?);
+        result["applied"] = status["poolSettingsApplied"].clone();
+        result["poolSettingsApplied"] = status["poolSettingsApplied"].clone();
+        result["msg"] = status["poolSettingsMessage"].clone();
+        result["runtime"] = status;
+    }
+    Ok(Json(result))
 }

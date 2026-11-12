@@ -6,7 +6,7 @@ rust-version = "1.95"
 
 [dependencies]
 glory = { version = "=0.7.0", default-features = false, features = ["web"] }
-sapid = "=0.7.1"
+sapid = { version = "=0.7.1", features = ["files"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Document", "DomException", "Element", "Event", "EventTarget", "History", "HtmlHeadElement", "HtmlInputElement", "HtmlSelectElement", "HtmlTextAreaElement", "KeyboardEvent", "Location", "UrlSearchParams", "Window"] }

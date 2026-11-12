@@ -80,6 +80,7 @@ pub fn page(app: AppState) -> Element {
         let primary_method = scope.cage("password".to_string());
         let primary_code = scope.cage(String::new());
         let application = scope.cage(query("application"));
+        crate::branding::bind(scope, app, application);
         let mode = scope.cage(String::new());
         let methods = scope.cage(Vec::<String>::new());
         let method = scope.cage("app".to_string());

@@ -10,19 +10,29 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 **结论：已有较广的 IAM 骨架和不少真实实现，但不能称为完整 Casdoor 替代品。**
 路由存在、编译通过、返回 401/500 均不证明功能等价。旧 `_todos.md` 把上一轮的局部修复扩大为整体完成，本次纠正。
 
-## 第九阶段提交状态（2026-11-12）
+## 第十一阶段提交快照（2026-11-12）
 
-本次提交包含第八阶段已验证成果，以及第九阶段新增的订阅续费授权和后台对账、PostgreSQL Syncer 双向同步、OTLP/HTTP protobuf 接收、审计记录保留策略与对应 Glory/Sapid 页面。部署前需应用迁移 033–039。
+本次提交新增只读 SCIM 外部目录同步、Keycloak 原生 Argon 凭据验证及显式 MFA 备份恢复，并包含此前主题和连接池改进。部署需顺序应用迁移至 042。历史阶段记录中的未完成项以本节最新状态为准。
 
-第八阶段完整后端回归为 462 次执行通过，其中 140 个显式 PostgreSQL 测试函数实际执行；真实后端浏览器回归为 17 项通过。第九阶段前端 7 个原生测试、WASM 检查、Trunk release 构建与浏览器夹具已通过；新增后端专项和扩展后的真实后端浏览器端到端回归尚未执行完成，不能沿用第八阶段结果作为新功能验收结论。
+后端全量回归为 35 个测试程序、474 次执行、0 失败、0 忽略；181 个显式 PostgreSQL 测试函数已逐名核对。其中 Syncer 14 项、SCIM 4 项、导入与 MFA 恢复 15 项全部通过。前端 7 项原生测试、WASM 检查、Trunk release 和浏览器夹具通过；提交前再次运行原生测试及最新构建的浏览器夹具均通过。第十阶段真实后端浏览器的 21 项通过记录仍为历史证据；新增流程对应的 23 项端到端回归尚未完整通过，不能计为本阶段验收完成。
 
-新增功能仍有明确边界：外部支付自动续费尚无离线扣款授权，只创建待用户主动支付的订单；Syncer 双向写回目前限于满足键约束和可逆映射的 PostgreSQL 源，LDAP/Keycloak 写回拒绝；OTLP 仅支持 HTTP protobuf，可接收 gzip，不包含 gRPC 或 JSON；连接池设置保存后尚未应用到运行中的连接池，审计保留策略独立生效。复核上游 Agent 只有管理 CRUD，没有此前报告假设的代理执行协议，因此不再把代理执行列为上游缺口。
+SCIM 已覆盖分页完整快照、失败回滚、稳定账号归属、资料映射及令牌脱敏；目前只读。Keycloak 原生 Argon 支持有界参数和明确元数据，拒绝损坏或未知配置。MFA 恢复使用独立管理员接口，验证应用与投递提供商绑定，保留单次消费及防删除后重新导入的凭据收据；不支持的因子明确拒绝。短信恢复目前要求国际 E.164 格式，上游 national phone 加 ISO countryCode 的规范化兼容尚未实现。
+
+重新核对参考 Casdoor 后，未发现退款接口；此前报告将退款与权益冲回误列为上游必需差距，现纠正为可选扩展。后续仍需处理购物车、更多目录和云提供商、Kerberos/协议互操作及专用前端，并补齐新增流程的真实后端浏览器验收；不能把静态路由覆盖或本地模拟服务验证等同整体功能等价。
+
+## 第十阶段状态（历史记录，2026-11-12）
+
+当前实现包含此前认证、同步和商业流程，以及本阶段 Keycloak 凭据闭环、SQLx/Diesel 运行时连接池切换、Marketplace 主题安装恢复和 Glory 实际主题渲染。部署前需顺序应用迁移至 040。
+
+第十阶段最终全量回归通过：34 个测试程序、463 次执行、0 失败、0 忽略；172 个显式 PostgreSQL 测试函数逐名核对成功日志。二进制复用库模块后移除了 38 次重复单测执行，因此不能直接与上一阶段的 492 次比较；本阶段实际增加 9 项测试。前端 7 项原生测试、WASM 检查、Trunk release 和浏览器夹具通过，真实后端浏览器回归扩展至 21 项。详细证据与范围见末尾第十阶段及 phase10-gap-assessment.json；这些结果不代表整体 Casdoor 功能等价。
+
+功能边界仍明确：外部支付续费尚无离线扣款授权；Syncer 双向写回限于满足约束的 PostgreSQL 源，LDAP/Keycloak 写回拒绝，Keycloak 原生 Argon 凭据尚未实现；OTLP 仅支持 HTTP protobuf/gzip。连接池上限分别约束 SQLx、Diesel 的每个世代，旧请求排空期间可能有额外连接；0 最大连接数使用 PostgreSQL 服务器实际容量。主题只接受已声明的静态安全子集，拒绝主动代码及不支持的 CSS/HTML，不等同全部上游 React 主题或动态资源域名策略。上游 Agent 只有管理 CRUD，不包含代理执行协议。
 
 ## 可重复的覆盖指标
 
 运行 `python scripts/check-casdoor-parity.py --reference E:/Repos/casdoor --output docs/casdoor-route-inventory.json`。
 
-| 指标 | 复核前 | 当前（第八阶段） | 边界 |
+| 指标 | 复核前 | 第八阶段覆盖快照 | 边界 |
 | --- | ---: | ---: | --- |
 | 上游显式路由唯一路径 | 336 | 336 | 含协议和非 API 路径 |
 | 可比较的扁平 API 路径＋HTTP 方法 | 299 | 299 | 排除嵌套协议和通配方法 |
@@ -95,10 +105,10 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 | P1 | 找回密码 | 前后端、本机邮件 HTTP 及真实后端浏览器闭环已验证；租户/应用绑定、错误/过期/重放、并发消费与会话撤销已有数据库回归。真实 SMTP/云邮件环境仍需部署验收。 |
 | P1 | MFA | 密码、社交、Passkey 和 FaceID 均已接入补验；第六阶段增加 PostgreSQL TOTP 时间步原子消费与 FaceID nonce 原子消费。FaceID 仍是现有 embedding 接口，可信摄像头采集和活体检查未实现；第七阶段已实现邮件/短信 code 和 LDAP 首因子及额外 MFA；生产目录与投递仍需部署验收。 |
 | P1 | 兼容业务语义 | 已补专用 XLSX/CSV/JSON 用户导入、密码摘要/type/salt 语义与整批事务，Syncer 的 REST/兼容 CRUD 共用校验；其余资源副作用、复杂分页过滤、MFA enrollment 迁移与完整导出仍需逐场景补齐。 |
-| P1 | 上游新模块 | 已补 Agent/Server/Entry/Key 管理、Marketplace 应用/提供商安装页面、OpenClaw 基础图及 Local/S3 transcript；Key API 凭证与应用虚拟身份已在第七阶段实现；第九阶段新增 OTLP/HTTP protobuf，专项验收仍待完成，theme 集成及更多专用页面仍有缺口。上游 Agent 仅有管理 CRUD，不包含代理执行协议。 |
-| P1 | 商业流程 | 普通商品购买已增加异步持久库存预留、通知验签/终态/幂等、管理员手工履约及 CRUD 约束。第七阶段已补计划/充值权益，第八阶段增加持久 checkout 恢复、Stripe 对账/远端 expire、PayPal capture 和普通用户商店。自动续费调度、购物车、完整退款及权益冲回、超出幂等窗口的自动恢复仍缺；未知历史买家须人工审核。 |
-| P2 | 运维功能 | 第四阶段已补首次管理员密码、设置保存、Dashboard 热图/MFA/提供商与 Webhook 历史/重放；设置运行时应用仍缺；第五阶段已补配置化系统升级与持久化设备授权流程，部署验收边界见末尾。 |
-| P2 | 提供商 | 当前存储工厂仅 Local/S3，上游列出 11 类；同步器本轮验证 PostgreSQL/LDAP 单向新增更新与持久互斥调度；外部写回、源删除禁用、affiliation 外表和 values 转换仍缺。上游大量云目录、支付和消息提供商未覆盖。 |
+| P1 | 上游新模块 | 已补 Agent/Server/Entry/Key 管理、Marketplace 应用/提供商安装页面、OpenClaw 基础图及 Local/S3 transcript；OTLP/HTTP protobuf 已验收，第十阶段新增静态安全主题安装恢复及实际 Glory 渲染。gRPC、OTLP JSON、上游全部主题语法及更多专用页面仍有边界。上游 Agent 仅有管理 CRUD，不包含代理执行协议。 |
+| P1 | 商业流程 | 已补计划/充值权益、持久 checkout 恢复、Stripe 对账/远端 expire、PayPal capture、普通用户商店；第九阶段增加明确受益人授权、余额自动续费及后台对账。外部离线扣款授权、购物车、超出幂等窗口的自动恢复仍缺；未知历史买家须人工审核。退款及权益冲回属于可选扩展，参考上游未发现对应接口。 |
+| P2 | 运维功能 | 已补首次管理员密码、Dashboard、Webhook 重放、系统升级、持久设备授权、审计保留及 SQLx/Diesel 运行时连接池世代切换；两驱动各有独立上限，旧代排空可能暂时增加连接。生产集群与真实升级部署仍需验收。 |
+| P2 | 提供商 | 存储仍仅 Local/S3，上游列出 11 类；同步器已验证 PostgreSQL 双向、源删除禁用、Values/affiliation、LDAP 单向、Keycloak PBKDF2/原生 Argon 凭据及只读 SCIM 外部目录。LDAP 分页、更多数据库及云目录仍缺；LDAP/Keycloak 写回明确拒绝。 |
 | P2 | 前端 | 105 个上游页面组件无法由 29 个通用 JSON 资源编辑器替代；复杂字段、验证、批量操作、关系选择、主题/i18n、组织应用定制需要逐场景验收。 |
 
 ## 验证
@@ -296,4 +306,42 @@ Windows 本次构建使用已安装 PostgreSQL 18 附带的 OpenSSL 3 头文件/
 
 最终 `cargo check --offline -p casdog --tests --jobs 2` 通过，日志为 `target/phase8/final-check.log`。
 
-整体功能仍未达到 Casdoor 等价。下一优先级为退款及权益冲回、真正自动续费和后台对账、Syncer 双向与删除语义、Agent 执行/OTLP、Kerberos/SAML 互操作及更多专用前端。新增 API、真实本机协议回归和数据库状态证明本轮闭环，不能代替生产服务及硬件验收。
+第八阶段结束时，退款及权益冲回、自动续费和后台对账、Syncer 双向与删除语义、OTLP、Kerberos/SAML 互操作及更多专用前端仍有缺口；第九阶段的实际进展与边界见下节。上游 Agent 只有管理 CRUD，不存在此前报告假设的代理执行协议。
+
+## 第九阶段：订阅续费、双向同步、OTLP 与审计保留（2026-11-12）
+
+- 订阅：迁移 036 将受益人的明确续费授权与已付权益、商品、提供商配置、周期、币种和金额上限绑定。客户端显示的报价由服务器在授权事务内重验，不能利用并发涨价扩大授权；管理员可以停用他人的续费，不能替他人授权支出。到期任务按订阅和周期唯一，持久租约及单一订单支持重试，余额不足后仍复用原单；实际余额扣款事务重验授权、组织、用户和价格，组织删除或禁止登录时不扣款。精确延长目标订阅，不误改同一用户的其他订阅。
+- 支付后台：独立任务恢复已接受的远端付款，继续使用原幂等键、提供商凭据摘要与租约；错误金额或币种不能触发入账。组织被禁用后，已接受的外部真实付款仍会记账，不能简单丢弃资金事实。余额续费可以自动完成；Stripe/PayPal 尚无离线扣款授权，后台只生成需要用户主动支付的订单，不暗中占库存或创建远端付款。
+- Syncer：迁移 037 保存本地/源三方基线、配置摘要、冲突与持久出站操作。PostgreSQL 源写回在唯一源键行锁下比较预期值；外部提交但本地确认失败时，重试识别已提交结果，不重复写回。源完整快照消失只禁用本同步器管理的账户，失败或不完整读取不触发删除；恢复时保护后续人工改动。新增显式可逆 Values 与 affiliation 外表映射，凭据仅比较带域分隔的 HMAC 指纹；密码算法无法在源中正确表达时进入冲突，不能把升级后的 Argon2 写成 bcrypt。未变化的凭据列不出现在出站 UPDATE 中。
+- 同步边界：双向写回要求 PostgreSQL 单列唯一键和可逆映射；LDAP/Keycloak 写回明确拒绝，空源字段暂保留本地值。MySQL、SQL Server、Active Directory、SCIM 及更多上游来源仍未实现。只读复核还发现已开放 Keycloak 的凭据拼装不符合真实 Base64/算法元数据契约，当前回归不覆盖 Keycloak，下一阶段需优先修复，不能把 PostgreSQL/LDAP 通过扩大成全目录覆盖。
+- OTLP：迁移 038 为租户管理员批准的 OpenClaw Log/Agent 提供商及实际应用建立接收器。支持 `/api/v1/{traces,metrics,logs}` 和 `/v1/*` 的 HTTP protobuf 与 gzip，三类信号均持久化原始数据和可由正常 Entry API 读取的记录；解析前限制结构及消息数，原始/解压后各 4 MiB、Entry JSON 2 MiB。随机 Bearer 密钥只显示一次，摘要保存，轮换或撤销立即生效；直接来源 IP 必须显式批准，不信任转发头，错误 Bearer 不回退 IP。共享数据库配额、事务写入和 protobuf 错误响应已加入验证。尚无 gRPC 或 OTLP JSON。
+- 审计与前端：迁移 039 增加组织级保留天数，0 继承全局，全局 0 永久保存。后台批量清理使用共享锁、当前策略与事务，拒绝损坏策略。全局站点设置、接收器批准/轮换/撤销及用户续费授权已加入 Glory/Sapid 页面。SQLx 和 Diesel 连接池设置目前仅保存，运行时切换尚未实现，API 与页面明确显示未应用；不把最大空闲连接数错误映射为最小连接数。接收器撤销后的列表与编辑状态更新也加入浏览器断言。
+- 导入补强：普通 Casdoor 用户 API 会隐藏 MFA 密钥但保留 preferredMfaType。导入现拒绝该非空标记（含未知类型或空白）、Radius/Push 等启用标记和非法类型，整批不写入，避免管理员补回密码后产生无 MFA 账户。专用 enrollment 恢复尚未实现；本轮仅防止静默降级。
+
+### 第九阶段验证
+
+- 最终独立后端库及浏览器库均执行全新迁移 001–039，同步源使用另一 PostgreSQL 数据库。无 Docker 构建，无 Cargo/TEMP 或全局缓存重定向。
+- 最终命令 `cargo test --offline --locked --workspace --tests --no-fail-fast --jobs 1 -- --include-ignored --test-threads=1` 通过：**33 个测试程序，492 次执行，0 失败、0 忽略**。lib/main 各运行相同 38 项单元测试，执行次数不是独立业务场景数。
+- **165 个显式 PostgreSQL 测试函数全部通过**，逐个将源码 ignore 函数名与相应测试程序的成功日志匹配，比第八阶段增加 25 项：续费 8、双向同步 5、OTLP/接收器/Agent 8、审计保留 3、导入 MFA 标记 1。保留原有四个数据库端到端场景。审计夹具原先缺 records 必填字段，补齐后 4 项测试全部通过；导入最终回归包含空白 preferredMfaType 和整批零写入断言。
+- 前端 **7 项原生测试**、WASM 检查、Trunk release 及增强的浏览器夹具通过；最终二进制配合实际 Glory/Sapid WASM 的 **20 项真实后端浏览器检查通过**，未拦截 API。新增站点策略保存、真实 OTLP 入库及密钥轮换/撤销、明确续费报价授权；撤销后的 Disabled 列表与编辑状态已断言，相关截图已检查。
+- 首次全量已通过；最后重编遇到 rustc 内存分配失败，保留 `target/phase9/backend-build-crash.log`，以单任务重新构建并执行上述最终完整命令成功，不把编译器崩溃记作业务测试通过。最终日志为 `target/phase9/backend-tests-final.log`，逐程序及逐 PostgreSQL 函数证据为 `target/phase9/test-summary.json`；浏览器日志/结果为 `target/phase9/browser-e2e-final.log`、`target/phase9/browser-e2e/results.json`。未运行远端 CI 或严格 Clippy，真实支付、云目录和集群部署验收仍保留。详见 [phase9-gap-assessment.json](phase9-gap-assessment.json)。
+
+## 第十阶段：Keycloak 凭据、连接池运行时设置与应用主题（2026-11-12）
+
+- Keycloak：不再把 Base64 密码与盐拼成内部 hex/文本盐格式。新增有界 PBKDF2-SHA256/SHA512 表示与恒时校验，保留真实二进制盐、派生长度和轮数。同一源库 repeatable-read 事务读取用户、credential、群组和联邦身份，限定配置 schema；损坏 JSON、未知算法、缺字段、KDF 超限或群组读取失败整批回滚。没有密码的账户仅在明确联邦绑定时允许导入资料，新账户使用不可知随机密码；正常登录升级 Argon 后，未变化的源凭据不覆盖升级结果。原生 Keycloak Argon 仍明确拒绝，不冒充已支持。
+- 连接池：运行时设置现在真实影响主 SQLx 和 Diesel 池。每个请求捕获同一世代的两套池和 Casbin，事务持续使用原连接；新请求与后台任务获取新世代，旧连接正常排空。启动加载持久设置，多实例每 5 秒读取共享设置；候选池验证和最终设置行锁复核后发布，失败保留旧代并报告未应用。最大空闲连接数是上限；生命周期在获取连接时也强制检查，不能继续借出超龄 idle 连接。
+- 零设置与容量：0 最大连接数读取 PostgreSQL `max_connections`，0 最大空闲连接保留 2 个并按最大连接数收敛，0 寿命不限年龄。初版把 0 映射 `u32::MAX` 导致 SQLx 预分配约 206 GB 队列，已由真实默认启动用例修复并验收。上限分别约束每个世代的 SQLx、Diesel，不能当作两套驱动和全部旧代合计的进程硬上限；服务器角色、预留连接和全局限制仍适用。外部同步源池不随主池设置改变。
+- 主题：迁移 040 补应用缺失字段并以资源 UUID 限制每应用一个已安装主题。安装在事务中备份完整八字段，含 SQL NULL themeData，卸载精确恢复；当前管理员、租户、并发安装和同名重装绑定均检查。公开 `/api/auth/branding` 只返回白名单资料，重新检查应用、组织及主题安全策略。全局管理员批准的额外静态资产 URL 与主题指纹绑定，不能在后来修改字段时借用旧批准。
+- Glory/Sapid：Marketplace 增加目标应用选择，登录、注册、授权实际消费 themeData、桌面/移动 CSS、背景及 formOffset 的上游枚举布局。CSS 限于认证容器，字体导入仅限已批准分发源；侧栏和页脚为无脚本/同源/表单权限的 sandbox iframe，实际文字渲染有浏览器断言。应用切换、离页和慢请求均清理旧主题，卸载后恢复原值。主题 HTML/CSS 是明确静态安全子集，不执行主动代码、不支持全部旧 React 类名或动态 Storage domain/formCssAllowedUrls 扩展。
+- 构建入口复用现有库模块，避免 lib/bin 重复编译全部服务。38 项库单测保留，二进制不再重复执行；不能用原始执行次数的变化推断覆盖下降。
+
+### 第十阶段验证
+
+- 全新最终后端库及浏览器库顺序执行 001–040，同步源使用另一专用 PostgreSQL 数据库。
+- 最终完整命令 `cargo test --offline --locked --workspace --tests --no-fail-fast --jobs 1 -- --include-ignored --test-threads=1`：**34 个测试程序，463 次执行，0 失败、0 忽略**。172 个显式 PostgreSQL 测试函数逐个核对成功日志；比第九阶段新增 7 个 PG 函数：Keycloak 2、主题 3、运行时池 2，另增 2 个非 PG 向量/安全单测。原四个数据库端到端场景仍全部通过。
+- 前端 **7 项原生测试**、WASM 检查、Trunk release 与增强夹具通过；**21 项真实后端浏览器检查通过**，未拦截 API。新增主题安装→实际桌面/移动登录/注册/授权渲染→隔离 HTML 文本→卸载完整恢复，站点设置检查实际世代变化、连接数及空闲上限。
+- 真实专项发现并修复超龄连接借出和默认零配置内存分配问题；保留 `runtime-targeted.log`、`backend-tests-initial.log`、`browser-startup-allocator.log`。最终池专项 6 项全过；主题和 Keycloak 的最终结果以完整回归为准。浏览器脚本补等待异步主题预览，防测试输入被默认名称覆盖，并等待 iframe 中实际文字渲染后截图。
+- 最后浏览器复跑还发现资料初始查询覆盖已输入编辑值的竞态，已让资料表单在初始数据到达后才开放编辑。此处仅改前端；后端源码保持全量回归时的版本，随后重新执行前端 7 项原生测试、WASM、Trunk、可控延迟夹具以及全新数据库上的 21 项真实浏览器检查，全部通过，保留原始 `browser-profile-load-race.log`。
+- 最终日志/逐函数证据：`target/phase10/backend-tests-final.log`、`target/phase10/test-summary.json`；浏览器日志/结果：`target/phase10/browser-e2e-final.log`、`target/phase10/browser-e2e/results.json`。后端检查、格式与空白检查通过，未运行远端 CI 或严格 Clippy。完整范围见 [phase10-gap-assessment.json](phase10-gap-assessment.json)。
+
+整体目标仍在推进。下一优先级为 MFA enrollment 专用恢复、退款与权益冲回、更多目录来源和 Keycloak Argon，以及 Kerberos/协议互操作；生产提供商、集群与可信硬件验收继续保留，不能由本地模拟服务结果替代。

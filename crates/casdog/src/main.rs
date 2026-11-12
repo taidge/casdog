@@ -1,14 +1,5 @@
-mod config;
-mod diesel_pool;
-mod error;
-mod handlers;
-mod hoops;
-mod models;
-mod routes;
-mod schema;
-mod services;
+use casdog::{config, hoops, routes, runtime_pool, services};
 
-use salvo::affix_state::AffixList;
 use salvo::cors::Cors;
 use salvo::http::Method;
 use salvo::prelude::*;
@@ -17,8 +8,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::AppConfig;
+use crate::runtime_pool::{RuntimePoolManager, RuntimePools};
+use crate::services::InitService;
 use crate::services::syncer_executor::SyncerExecutor;
-use crate::services::{CasbinService, InitService};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,10 +38,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("SQLx database connection pool created");
 
-    let diesel_pool = diesel_pool::create_diesel_pool(&config.database.url).await?;
-
-    tracing::info!("Diesel database connection pool created");
-
     services::system_gap_service::reconcile_upgrades(
         &pool,
         &services::system_gap_service::SystemGapConfig::from_env(),
@@ -62,66 +50,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Ensure uploads directory exists for local file storage
     std::fs::create_dir_all("./uploads").ok();
 
-    let casbin_service = CasbinService::with_pool(pool.clone()).await?;
-    tracing::info!("Casbin authorization service initialized");
-
-    let syncer_pool = pool.clone();
+    let manager = RuntimePoolManager::new(&config.database.url, &pool).await?;
+    manager.refresh().await?;
+    drop(pool);
+    let refresh_manager = manager.clone();
     tokio::spawn(async move {
-        SyncerExecutor::start_scheduler(syncer_pool, tokio::time::Duration::from_secs(60)).await;
-    });
-
-    let renewal_pool = pool.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
-            interval.tick().await;
-            if let Err(error) =
-                services::subscription_renewal_service::SubscriptionRenewalService::run_once(
-                    &renewal_pool,
-                    100,
-                )
-                .await
-            {
-                tracing::error!(%error,"Subscription renewal worker failed");
+            timer.tick().await;
+            if let Err(error) = refresh_manager.refresh().await {
+                tracing::error!(%error,"Runtime pool settings refresh failed; previous generation remains active");
             }
         }
     });
-    let reconcile_pool = pool.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            if let Err(error) =
-                services::payment_reconcile_scheduler::PaymentReconcileScheduler::run_once(
-                    &reconcile_pool,
-                    20,
-                )
-                .await
-            {
-                tracing::error!(%error,"Payment reconciliation worker failed");
-            }
-        }
-    });
-    let retention_pool = pool.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            match services::runtime_settings_service::RuntimeSettingsService::run_once(
-                &retention_pool,
-            )
-            .await
-            {
-                Ok(deleted) if deleted > 0 => {
-                    tracing::info!(deleted, "Expired audit records removed")
+    for worker in 0..4 {
+        let worker_manager = manager.clone();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                timer.tick().await;
+                let generation = worker_manager.current();
+                let result=match worker {
+                    0=>SyncerExecutor::execute_all_due(&generation.sqlx).await.map(|_|()),
+                    1=>services::subscription_renewal_service::SubscriptionRenewalService::run_once(&generation.sqlx,100).await.map(|_|()),
+                    2=>services::payment_reconcile_scheduler::PaymentReconcileScheduler::run_once(&generation.sqlx,20).await.map(|_|()),
+                    _=>services::runtime_settings_service::RuntimeSettingsService::run_once(&generation.sqlx).await.map(|_|()),
+                };
+                if let Err(error) = result {
+                    tracing::error!(%error,worker,"Database worker failed");
                 }
-                Ok(_) => {}
-                Err(error) => tracing::error!(%error,"Audit record retention worker failed"),
             }
-        }
-    });
+        });
+    }
 
     let cors = Cors::new()
         .allow_origin("*")
@@ -140,12 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = Service::new(router)
         .hoop(hoops::record_filter::RequestLogger)
         .hoop(cors)
-        .hoop(
-            AffixList::new()
-                .inject(pool)
-                .inject(diesel_pool)
-                .inject(casbin_service),
-        )
+        .hoop(RuntimePools(manager))
         .hoop(hoops::RecordFilter);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);

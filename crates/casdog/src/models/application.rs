@@ -81,6 +81,9 @@ pub struct Application {
     pub is_deleted: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub theme_data: Option<serde_json::Value>,
+    pub footer_html: Option<String>,
+    pub form_background_url_mobile: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

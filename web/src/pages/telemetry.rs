@@ -49,92 +49,90 @@ fn editor(app: AppState) -> Element {
                 }
             });
         });
-        let rows = each(items)
-            .key(|item| api::item_id(item).unwrap_or_default())
-            .seed(move |item| {
-                widget(move |scope| {
-                    let item = item.clone();
-                    let id = item["id"].as_str().unwrap_or_default().to_string();
-                    let revoke = id.clone();
-                    stack((
-                        label(&format!(
-                            "Receiver {id} · {} · {}",
-                            item["organization"].as_str().unwrap_or(""),
-                            if item["enabled"] == true {
-                                "Enabled"
-                            } else {
-                                "Disabled"
+        let rows = each(items).key(|item| item.to_string()).seed(move |item| {
+            widget(move |scope| {
+                let item = item.clone();
+                let id = item["id"].as_str().unwrap_or_default().to_string();
+                let revoke = id.clone();
+                let revoked_provider = item["provider"].as_str().unwrap_or_default().to_string();
+                stack((
+                    label(&format!(
+                        "Receiver {id} · {} · {}",
+                        item["organization"].as_str().unwrap_or(""),
+                        if item["enabled"] == true {
+                            "Enabled"
+                        } else {
+                            "Disabled"
+                        }
+                    )),
+                    action(
+                        scope,
+                        &format!("Configure receiver {id}"),
+                        busy,
+                        message,
+                        move || {
+                            let item = item.clone();
+                            async move {
+                                provider.set(item["provider"].as_str().unwrap_or_default().into());
+                                application
+                                    .set(item["application"].as_str().unwrap_or_default().into());
+                                mode.set(item["authMode"].as_str().unwrap_or("token").into());
+                                enabled.set(
+                                    if item["enabled"] == true {
+                                        "true"
+                                    } else {
+                                        "false"
+                                    }
+                                    .into(),
+                                );
+                                sources.set(
+                                    item["allowedSources"]
+                                        .as_array()
+                                        .map(|values| {
+                                            values
+                                                .iter()
+                                                .filter_map(Value::as_str)
+                                                .collect::<Vec<_>>()
+                                                .join("\n")
+                                        })
+                                        .unwrap_or_default(),
+                                );
+                                selected.set(Some(provider.get()));
+                                secret.set(String::new());
+                                revealed.set(false);
+                                Ok(String::new())
                             }
-                        )),
-                        action(
-                            scope,
-                            &format!("Configure receiver {id}"),
-                            busy,
-                            message,
-                            move || {
-                                let item = item.clone();
-                                async move {
-                                    provider
-                                        .set(item["provider"].as_str().unwrap_or_default().into());
-                                    application.set(
-                                        item["application"].as_str().unwrap_or_default().into(),
-                                    );
-                                    mode.set(item["authMode"].as_str().unwrap_or("token").into());
-                                    enabled.set(
-                                        if item["enabled"] == true {
-                                            "true"
-                                        } else {
-                                            "false"
-                                        }
-                                        .into(),
-                                    );
-                                    sources.set(
-                                        item["allowedSources"]
-                                            .as_array()
-                                            .map(|values| {
-                                                values
-                                                    .iter()
-                                                    .filter_map(Value::as_str)
-                                                    .collect::<Vec<_>>()
-                                                    .join("\n")
-                                            })
-                                            .unwrap_or_default(),
-                                    );
-                                    selected.set(Some(provider.get()));
-                                    secret.set(String::new());
-                                    revealed.set(false);
-                                    Ok(String::new())
+                        },
+                    ),
+                    action(
+                        scope,
+                        &format!("Revoke receiver {revoke}"),
+                        busy,
+                        message,
+                        move || {
+                            let id = revoke.clone();
+                            let revoked_provider = revoked_provider.clone();
+                            async move {
+                                app.request(
+                                    "DELETE",
+                                    &format!("/api/telemetry/receivers/{}", query_component(&id)),
+                                    None,
+                                )
+                                .await?;
+                                secret.set(String::new());
+                                revealed.set(false);
+                                if selected.get().as_deref() == Some(revoked_provider.as_str()) {
+                                    enabled.set("false".into());
                                 }
-                            },
-                        ),
-                        action(
-                            scope,
-                            &format!("Revoke receiver {revoke}"),
-                            busy,
-                            message,
-                            move || {
-                                let id = revoke.clone();
-                                async move {
-                                    app.request(
-                                        "DELETE",
-                                        &format!(
-                                            "/api/telemetry/receivers/{}",
-                                            query_component(&id)
-                                        ),
-                                        None,
-                                    )
-                                    .await?;
-                                    secret.set(String::new());
-                                    revealed.set(false);
-                                    revision.set(revision.get() + 1);
-                                    Ok("Receiver revoked.".into())
-                                }
-                            },
-                        ),
-                    ))
-                    .build(scope)
-                })
-            });
+                                revision.set(revision.get() + 1);
+                                Ok("Receiver revoked.".into())
+                            }
+                        },
+                    ),
+                ))
+                .build(scope)
+            })
+        });
         stack((
             label("Approve an OpenClaw Log/Agent provider and its application. Exporters use OTLP/HTTP protobuf at /api/v1/traces, /api/v1/metrics and /api/v1/logs; /v1 paths are also supported."),
             action(scope,"New receiver",busy,message,move ||async move {provider.set(String::new());application.set(String::new());sources.set(String::new());mode.set("token".into());enabled.set("true".into());selected.set(None);secret.set(String::new());revealed.set(false);Ok(String::new())}),

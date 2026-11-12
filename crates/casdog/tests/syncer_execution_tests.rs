@@ -34,6 +34,45 @@ fn columns() -> Value {
         {"name":"mail","type":"String","casdoorName":"Email"}
     ])
 }
+
+#[test]
+fn keycloak_pbkdf2_base64_interoperability_vectors_are_algorithm_and_parameter_bound() {
+    // SHA256 is Casdoor's Keycloak-compatible pbkdf2-salt vector;
+    // SHA512 was independently computed with Python hashlib.pbkdf2_hmac.
+    for (kind, key) in [
+        (
+            "keycloak-pbkdf2-sha256",
+            "p6XETX9kSIy9ZwWTiGafUdPW9KUJsfJSWQD9lWRuomav7bGCMfY03kxznJu2emdUprJ3DVemHMlpE5c0+dmsAA==",
+        ),
+        (
+            "keycloak-pbkdf2-sha512",
+            "s49/4jq/ybaidrqwij0i+yoONDNkwHvuCmjXms4FJsc=",
+        ),
+    ] {
+        let encoded = format!("${kind}$27500$c2FsdA==${key}");
+        assert!(PasswordService::verify_password("password", &encoded, kind, None).unwrap());
+        assert!(!PasswordService::verify_password("wrong", &encoded, kind, None).unwrap());
+        assert!(PasswordService::import_credential(&encoded, None, None, true).is_ok());
+        assert!(
+            !PasswordService::verify_password(
+                "password",
+                &encoded.replace("27500", "27501"),
+                kind,
+                None
+            )
+            .unwrap()
+        );
+        assert!(
+            !PasswordService::verify_password(
+                "password",
+                &encoded.replace("27500", "2000001"),
+                kind,
+                None
+            )
+            .unwrap()
+        );
+    }
+}
 struct Fixture {
     pool: PgPool,
     other: PgPool,
@@ -1397,4 +1436,453 @@ async fn postgres_writeback_reverses_affiliation_and_boolean_values_with_typed_n
         "typed key and converted values must settle to an idempotent acknowledged baseline"
     );
     f.cleanup().await;
+}
+
+async fn keycloak_fixture(f: &Fixture) -> (String, String) {
+    sqlx::raw_sql(&format!("ALTER TABLE {s}.people ADD COLUMN enabled boolean DEFAULT true,ADD COLUMN federation_link text; CREATE TABLE {s}.credential(id text PRIMARY KEY,user_id text,type text,secret_data text,credential_data text,created_date bigint); CREATE TABLE {s}.keycloak_group(id text PRIMARY KEY,name text); CREATE TABLE {s}.user_group_membership(user_id text,group_id text); CREATE TABLE {s}.federated_identity(user_id text,identity_provider text); INSERT INTO {s}.keycloak_group VALUES('g1','Migrated application'); INSERT INTO {s}.user_group_membership VALUES('s1','g1')",s=f.schema)).execute(&f.source).await.unwrap();
+    let app = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO applications(id,owner,name,display_name,organization,client_id,client_secret,redirect_uris,enable_password) VALUES($1,$2,'kc-login','Keycloak test',$2,$1,'secret','',true)").bind(&app).bind(&f.owner).execute(&f.pool).await.unwrap();
+    let mut body = f.database_body("keycloak", "people");
+    body["type"] = json!("Keycloak");
+    body["tableColumns"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"enabled","type":"Boolean","casdoorName":"IsForbidden"}));
+    let id = f.json("POST", "/api/syncers", Some(body)).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (id, app)
+}
+async fn keycloak_password(
+    f: &Fixture,
+    id: &str,
+    algorithm: &str,
+    key_bytes: usize,
+    password: &str,
+) {
+    use base64::Engine;
+    let salt = b"binary\0salt-12345";
+    let mut key = vec![0; key_bytes];
+    let rounds = 27500;
+    match algorithm {
+        "pbkdf2-sha256" => {
+            pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), salt, rounds, &mut key)
+        }
+        "pbkdf2-sha512" => {
+            pbkdf2::pbkdf2_hmac::<sha2::Sha512>(password.as_bytes(), salt, rounds, &mut key)
+        }
+        _ => unreachable!(),
+    }
+    let secret = json!({"value":base64::engine::general_purpose::STANDARD.encode(key),"salt":base64::engine::general_purpose::STANDARD.encode(salt)});
+    sqlx::query(&format!("INSERT INTO {}.credential(id,user_id,type,secret_data,credential_data,created_date) VALUES($1,$1,'password',$2,$3,1) ON CONFLICT(id) DO UPDATE SET secret_data=$2,credential_data=$3",f.schema))
+        .bind(id).bind(secret.to_string()).bind(json!({"algorithm":algorithm,"hashIterations":rounds}).to_string()).execute(&f.source).await.unwrap();
+}
+async fn keycloak_login(f: &Fixture, app: &str, name: &str, password: &str) -> Response {
+    TestClient::post("http://localhost/api/login")
+        .add_header("Origin", "http://127.0.0.1:8000", true)
+        .json(&json!({"owner":f.owner,"name":name,"password":password,"clientId":app}))
+        .send(&f.service)
+        .await
+}
+async fn keycloak_cleanup(f: Fixture, app: &str) {
+    sqlx::query("DELETE FROM tokens WHERE owner=$1")
+        .bind(&f.owner)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM applications WHERE id=$1")
+        .bind(app)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.cleanup().await;
+}
+#[tokio::test]
+#[ignore = "requires migrated PostgreSQL main and separate source databases"]
+async fn keycloak_real_pbkdf2_credentials_login_and_source_stability_preserve_rehashed_passwords() {
+    let f = Fixture::new().await;
+    let (id, app) = keycloak_fixture(&f).await;
+    keycloak_password(&f, "s1", "pbkdf2-sha256", 64, "Keycloak256密码!").await;
+    keycloak_password(&f, "s2", "pbkdf2-sha512", 32, "Keycloak512Password!").await;
+    assert_eq!(f.run(&id).await["status"], "ok");
+    let imported = f.user().await;
+    assert_eq!(
+        imported.password_type.as_deref(),
+        Some("keycloak-pbkdf2-sha256")
+    );
+    assert_eq!(
+        imported.signup_application.as_deref(),
+        Some("Migrated application")
+    );
+    for (name, password) in [
+        ("alice", "Keycloak256密码!"),
+        ("bob", "Keycloak512Password!"),
+    ] {
+        assert_ne!(
+            keycloak_login(&f, &app, name, "incorrect-password")
+                .await
+                .status_code,
+            Some(StatusCode::OK)
+        );
+        assert_eq!(
+            keycloak_login(&f, &app, name, password).await.status_code,
+            Some(StatusCode::OK)
+        );
+    }
+    let upgraded = f.user().await;
+    assert!(upgraded.password_hash.starts_with("$argon2"));
+    f.run(&id).await;
+    let repeated = f.user().await;
+    assert_eq!(repeated.password_hash, upgraded.password_hash);
+    assert_eq!(
+        repeated.last_change_password_time,
+        upgraded.last_change_password_time
+    );
+    keycloak_password(&f, "s1", "pbkdf2-sha256", 32, "SourceChangedPassword!").await;
+    f.run(&id).await;
+    assert_ne!(
+        keycloak_login(&f, &app, "alice", "Keycloak256密码!")
+            .await
+            .status_code,
+        Some(StatusCode::OK)
+    );
+    assert_eq!(
+        keycloak_login(&f, &app, "alice", "SourceChangedPassword!")
+            .await
+            .status_code,
+        Some(StatusCode::OK)
+    );
+    sqlx::raw_sql(&format!(
+        "UPDATE {}.people SET enabled=false WHERE source_id='s2'",
+        f.schema
+    ))
+    .execute(&f.source)
+    .await
+    .unwrap();
+    f.run(&id).await;
+    assert_ne!(
+        keycloak_login(&f, &app, "bob", "Keycloak512Password!")
+            .await
+            .status_code,
+        Some(StatusCode::OK)
+    );
+    let foreign: String =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE owner=$1 AND name='alice'")
+            .bind(&f.foreign)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(foreign, "foreign-hash");
+    keycloak_cleanup(f, &app).await;
+}
+#[tokio::test]
+#[ignore = "requires migrated PostgreSQL main and separate source databases"]
+async fn keycloak_invalid_credentials_and_group_read_failures_roll_back_and_federation_is_explicit()
+{
+    let f = Fixture::new().await;
+    let (id, app) = keycloak_fixture(&f).await;
+    keycloak_password(&f, "s1", "pbkdf2-sha256", 32, "ValidSourcePassword!").await;
+    sqlx::raw_sql(&format!(
+        "INSERT INTO {}.federated_identity VALUES('s2','external-idp')",
+        f.schema
+    ))
+    .execute(&f.source)
+    .await
+    .unwrap();
+    let previous = f.user().await;
+    f.run(&id).await;
+    sqlx::raw_sql(&format!("INSERT INTO {s}.credential VALUES('bad-second','s2','password','{{}}','{{\"algorithm\":\"pbkdf2-sha256\",\"hashIterations\":27500}}',2); UPDATE {s}.people SET fullname='Earlier valid row must roll back' WHERE source_id='s1'",s=f.schema)).execute(&f.source).await.unwrap();
+    assert_eq!(
+        f.request("POST", &format!("/api/syncers/{id}/run"), None)
+            .await
+            .status_code,
+        Some(StatusCode::INTERNAL_SERVER_ERROR)
+    );
+    assert_eq!(f.user().await.display_name, "Source Alice");
+    sqlx::raw_sql(&format!("DELETE FROM {s}.credential WHERE id='bad-second'; UPDATE {s}.people SET fullname='Source Alice' WHERE source_id='s1'",s=f.schema)).execute(&f.source).await.unwrap();
+    let bob: User = sqlx::query_as("SELECT * FROM users WHERE owner=$1 AND name='bob'")
+        .bind(&f.owner)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert!(bob.password_hash.starts_with("$argon2"));
+    assert_ne!(
+        keycloak_login(&f, &app, "bob", "ValidSourcePassword!")
+            .await
+            .status_code,
+        Some(StatusCode::OK)
+    );
+    for bad in [
+        json!({"algorithm":"argon2","hashIterations":2}),
+        json!({"algorithm":"unknown","hashIterations":1}),
+        json!({"algorithm":"pbkdf2-sha512"}),
+        json!({"algorithm":"pbkdf2-sha256","hashIterations":2000001}),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE {}.credential SET credential_data=$1",
+            f.schema
+        ))
+        .bind(bad.to_string())
+        .execute(&f.source)
+        .await
+        .unwrap();
+        sqlx::raw_sql(&format!(
+            "UPDATE {}.people SET fullname='Must roll back' WHERE source_id='s2'",
+            f.schema
+        ))
+        .execute(&f.source)
+        .await
+        .unwrap();
+        assert_eq!(
+            f.request("POST", &format!("/api/syncers/{id}/run"), None)
+                .await
+                .status_code,
+            Some(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+        let stable = f.user().await;
+        assert_eq!(stable.display_name, "Source Alice");
+        assert_eq!(
+            stable.password_type.as_deref(),
+            Some("keycloak-pbkdf2-sha256")
+        );
+    }
+    keycloak_password(&f, "s1", "pbkdf2-sha256", 32, "ValidSourcePassword!").await;
+    for secret in [
+        "not-json",
+        "{}",
+        "{\"value\":\"invalid base64\",\"salt\":\"c2FsdA==\"}",
+    ] {
+        sqlx::query(&format!(
+            "UPDATE {}.credential SET secret_data=$1",
+            f.schema
+        ))
+        .bind(secret)
+        .execute(&f.source)
+        .await
+        .unwrap();
+        assert_eq!(
+            f.request("POST", &format!("/api/syncers/{id}/run"), None)
+                .await
+                .status_code,
+            Some(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+    keycloak_password(&f, "s1", "pbkdf2-sha256", 32, "ValidSourcePassword!").await;
+    sqlx::raw_sql(&format!(
+        "ALTER TABLE {}.keycloak_group RENAME TO unavailable_group",
+        f.schema
+    ))
+    .execute(&f.source)
+    .await
+    .unwrap();
+    assert_eq!(
+        f.request("POST", &format!("/api/syncers/{id}/run"), None)
+            .await
+            .status_code,
+        Some(StatusCode::INTERNAL_SERVER_ERROR)
+    );
+    sqlx::raw_sql(&format!("ALTER TABLE {}.unavailable_group RENAME TO keycloak_group; DELETE FROM {}.federated_identity",f.schema,f.schema)).execute(&f.source).await.unwrap();
+    assert_eq!(
+        f.request("POST", &format!("/api/syncers/{id}/run"), None)
+            .await
+            .status_code,
+        Some(StatusCode::INTERNAL_SERVER_ERROR)
+    );
+    sqlx::raw_sql(&format!(
+        "UPDATE {}.people SET federation_link='ldap-provider' WHERE source_id='s2'",
+        f.schema
+    ))
+    .execute(&f.source)
+    .await
+    .unwrap();
+    assert_eq!(f.run(&id).await["status"], "ok");
+    let unchanged: User = sqlx::query_as("SELECT * FROM users WHERE id=$1")
+        .bind(&bob.id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(unchanged.password_hash, bob.password_hash);
+    assert_ne!(f.user().await.password_hash, previous.password_hash);
+    keycloak_cleanup(f, &app).await;
+}
+
+// Independent vectors: Python argon2-cffi (libargon2), not this Rust verifier.
+const KEYCLOAK_ARGON_VECTORS: [(&str, &str, &str); 6] = [
+    ("id", "1.0", "anQ8TWEZggkDOEU0hrtlnznkJySCVfEHVnRir8MYayg"),
+    ("id", "1.3", "01cSjhubKHaeetowtm3uVN7o7sXX0fx3AN8oOXgSmj4"),
+    ("i", "1.0", "iO0xo7vCxh/RAtjZWkI2rE2IengHUsVHse3A/1K/pbc"),
+    ("i", "1.3", "jGPD2RTvWJfxebmaXIKuSzwUxkMWgInihSuLqZMautY"),
+    ("d", "1.0", "29C9xTby7otVklPtHK12LjCgYX0pkjhQYk+EQUDZxeE"),
+    ("d", "1.3", "sslrY6egxILuin0mvFmJQ2XeYA4jGpw9yIjKKhxsw/Y"),
+];
+fn keycloak_argon_json(variant: &str, version: &str, digest: &str) -> (Value, Value) {
+    (
+        json!({"value":format!("{digest}="),"salt":"a2V5Y2xvYWstc2FsdC0xNg==","additionalParameters":{}}),
+        json!({"algorithm":"argon2","hashIterations":5,"additionalParameters":{"type":[variant],"version":[version],"hashLength":["32"],"memory":["7168"],"parallelism":["1"]}}),
+    )
+}
+#[test]
+fn keycloak_native_argon_vectors_cover_types_versions_and_reject_resource_and_metadata_ambiguity() {
+    for (variant, version, digest) in KEYCLOAK_ARGON_VECTORS {
+        let (secret, metadata) = keycloak_argon_json(variant, version, digest);
+        let imported = PasswordService::import_keycloak_argon(&secret, &metadata).unwrap();
+        assert!(
+            PasswordService::verify_password(
+                "KeycloakArgonPassword!",
+                &imported.hash,
+                &imported.password_type,
+                None
+            )
+            .unwrap()
+        );
+        assert!(
+            !PasswordService::verify_password(
+                "wrong-password",
+                &imported.hash,
+                &imported.password_type,
+                None
+            )
+            .unwrap()
+        );
+    }
+    let (secret, metadata) = keycloak_argon_json("id", "1.3", KEYCLOAK_ARGON_VECTORS[1].2);
+    for (field, value) in [
+        ("memory", json!(["262145"])),
+        ("memory", json!(["262144"])),
+        ("memory", json!(["-1"])),
+        ("parallelism", json!(["17"])),
+        ("parallelism", json!(["0"])),
+        ("hashLength", json!(["64"])),
+        ("type", json!(["unknown"])),
+        ("version", json!(["19"])),
+        ("memory", json!(["7168", "7168"])),
+        ("memory", json!(7168)),
+    ] {
+        let mut bad = metadata.clone();
+        bad["additionalParameters"][field] = value;
+        assert!(
+            PasswordService::import_keycloak_argon(&secret, &bad).is_err(),
+            "accepted {field}: {bad}"
+        );
+    }
+    for rounds in [0, 11, 1000000] {
+        let mut bad = metadata.clone();
+        bad["hashIterations"] = json!(rounds);
+        assert!(PasswordService::import_keycloak_argon(&secret, &bad).is_err());
+    }
+    let mut bad = metadata.clone();
+    bad["additionalParameters"]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    assert!(PasswordService::import_keycloak_argon(&secret, &bad).is_err());
+    let mut bad = metadata.clone();
+    bad["algorithmData"] = json!({});
+    assert!(PasswordService::import_keycloak_argon(&secret, &bad).is_err());
+    let mut bad = metadata.clone();
+    bad["additionalParameters"]["secret"] = json!(["not-supported"]);
+    assert!(PasswordService::import_keycloak_argon(&secret, &bad).is_err());
+    for (field, value) in [
+        ("salt", "!!!"),
+        ("salt", "YQ=="),
+        ("value", "invalid-base64!"),
+    ] {
+        let mut bad = secret.clone();
+        bad[field] = json!(value);
+        assert!(PasswordService::import_keycloak_argon(&bad, &metadata).is_err());
+    }
+}
+async fn set_keycloak_raw_argon(f: &Fixture, id: &str, secret: &Value, metadata: &Value) {
+    sqlx::query(&format!("INSERT INTO {}.credential(id,user_id,type,secret_data,credential_data,created_date) VALUES($1,$1,'password',$2,$3,1) ON CONFLICT(id) DO UPDATE SET secret_data=$2,credential_data=$3",f.schema))
+ .bind(id).bind(secret.to_string()).bind(metadata.to_string()).execute(&f.source).await.unwrap();
+}
+#[tokio::test]
+#[ignore = "requires migrated PostgreSQL main and separate source databases"]
+async fn keycloak_native_argon_raw_credentials_sync_login_defaults_rehash_and_batch_failure() {
+    let f = Fixture::new().await;
+    let (id, app) = keycloak_fixture(&f).await;
+    sqlx::raw_sql(&format!(
+        "INSERT INTO {}.federated_identity VALUES('s2','idp')",
+        f.schema
+    ))
+    .execute(&f.source)
+    .await
+    .unwrap();
+    for (variant, version, digest) in KEYCLOAK_ARGON_VECTORS {
+        let (secret, metadata) = keycloak_argon_json(variant, version, digest);
+        set_keycloak_raw_argon(&f, "s1", &secret, &metadata).await;
+        assert_eq!(f.run(&id).await["status"], "ok");
+        let imported = f.user().await;
+        assert!(imported.password_hash.starts_with(&format!(
+            "$argon2{variant}$v={}",
+            if version == "1.3" { 19 } else { 16 }
+        )));
+        assert!(imported.password_hash.contains("m=7168,t=5,p=1"));
+        assert_ne!(
+            keycloak_login(&f, &app, "alice", "wrong-password")
+                .await
+                .status_code,
+            Some(StatusCode::OK)
+        );
+        assert_eq!(
+            keycloak_login(&f, &app, "alice", "KeycloakArgonPassword!")
+                .await
+                .status_code,
+            Some(StatusCode::OK)
+        );
+        let upgraded = f.user().await;
+        assert!(upgraded.password_hash.contains("m=19456,t=2,p=1"));
+        f.run(&id).await;
+        let repeated = f.user().await;
+        assert_eq!(repeated.password_hash, upgraded.password_hash);
+        assert_eq!(
+            repeated.last_change_password_time,
+            upgraded.last_change_password_time
+        );
+    }
+    let before = f.user().await;
+    let (secret, metadata) = keycloak_argon_json("id", "1.3", KEYCLOAK_ARGON_VECTORS[1].2);
+    for (field, value) in [
+        ("memory", json!(["4294967295"])),
+        ("version", json!(["2.0"])),
+        ("hashLength", json!(["64"])),
+        ("parallelism", json!(["1", "2"])),
+    ] {
+        let mut bad = metadata.clone();
+        bad["additionalParameters"][field] = value;
+        set_keycloak_raw_argon(&f, "s2", &secret, &bad).await;
+        sqlx::raw_sql(&format!(
+            "UPDATE {}.people SET fullname='No partial write' WHERE source_id='s1'",
+            f.schema
+        ))
+        .execute(&f.source)
+        .await
+        .unwrap();
+        assert_eq!(
+            f.request("POST", &format!("/api/syncers/{id}/run"), None)
+                .await
+                .status_code,
+            Some(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+        let stable = f.user().await;
+        assert_eq!(stable.password_hash, before.password_hash);
+        assert_eq!(stable.display_name, before.display_name);
+    }
+    sqlx::raw_sql(&format!("DELETE FROM {}.credential WHERE user_id='s2'; UPDATE {}.people SET fullname='Source Alice',enabled=false WHERE source_id='s1'",f.schema,f.schema)).execute(&f.source).await.unwrap();
+    assert_eq!(f.run(&id).await["status"], "ok");
+    assert_ne!(
+        keycloak_login(&f, &app, "alice", "KeycloakArgonPassword!")
+            .await
+            .status_code,
+        Some(StatusCode::OK)
+    );
+    let foreign: String =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE owner=$1 AND name='alice'")
+            .bind(&f.foreign)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(foreign, "foreign-hash");
+    keycloak_cleanup(f, &app).await;
 }

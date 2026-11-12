@@ -449,6 +449,23 @@ pub async fn import_users(
     owner: Option<&str>,
     records: Vec<Map<String, Value>>,
 ) -> AppResult<crate::handlers::upload::BulkUploadResponse> {
+    import_mode(pool, principal, owner, records, false).await
+}
+pub async fn import_users_with_mfa(
+    pool: &PgPool,
+    principal: &Principal,
+    owner: Option<&str>,
+    records: Vec<Map<String, Value>>,
+) -> AppResult<crate::handlers::upload::BulkUploadResponse> {
+    import_mode(pool, principal, owner, records, true).await
+}
+async fn import_mode(
+    pool: &PgPool,
+    principal: &Principal,
+    owner: Option<&str>,
+    records: Vec<Map<String, Value>>,
+    restore: bool,
+) -> AppResult<crate::handlers::upload::BulkUploadResponse> {
     if !principal.admin || principal.is_application() {
         return Err(AppError::Authorization(
             "A real administrator is required for user import".into(),
@@ -486,10 +503,32 @@ pub async fn import_users(
             if id.len()>36 || !ids.insert(id.clone()) {return Err(invalid("Invalid or duplicate user ID"));}
             PasswordService::normalize_import_fields(&mut object,false)?;
             if !object.contains_key("password_hash") {object.insert("password_hash".into(),json!(""));object.insert("password_type".into(),json!("argon2"));}
+            let enrollment=if restore {super::mfa_restore_service::prepare(&mut object)?}else{None};
             for field in ["totp_secret","recovery_codes","mfa_items","mfa_accounts","webauthn_credentials"] {
                 if object.get(field).is_some_and(|v|!v.is_null() && v!=&json!("") && v!=&json!([])) {return Err(invalid("Credential enrollment import is not supported; do not silently discard MFA credentials"));}
             }
-            if ["mfa_enabled","mfa_email_enabled","mfa_phone_enabled"].iter().any(|field|object.get(*field)==Some(&json!(true))) {return Err(invalid("Enabled MFA accounts require a dedicated enrollment migration"));}
+            // Casdoor marks MFA active with preferredMfaType, not mfaEnabled.
+            // Its ordinary masked export removes the secret but retains this
+            // marker. Never turn that export into a password-only account.
+            if let Some(preferred)=object.get("preferred_mfa_type").filter(|v|!v.is_null()) {
+                let preferred=preferred.as_str().ok_or_else(||invalid("MFA preference must be a string"))?;
+                if !preferred.is_empty() {return Err(invalid("Enabled MFA accounts require a dedicated enrollment migration"));}
+            }
+            for field in ["mfa_enabled","mfa_email_enabled","mfa_phone_enabled","mfa_radius_enabled","mfa_push_enabled"] {
+                let enabled=match object.get(field) {
+                    None|Some(Value::Null)=>false,
+                    Some(Value::Bool(value))=>*value,
+                    // CSV/XLSX unknown columns are strings. Include the newer
+                    // upstream factors without silently dropping their flags.
+                    Some(Value::String(value))=>match value.to_ascii_lowercase().as_str() {
+                        "true"|"1"|"yes"=>true,
+                        "false"|"0"|"no"|""=>false,
+                        _=>return Err(invalid("MFA enrollment flags must be booleans")),
+                    },
+                    _=>return Err(invalid("MFA enrollment flags must be booleans")),
+                };
+                if enabled {return Err(invalid("Enabled MFA accounts require a dedicated enrollment migration"));}
+            }
             if let Some(ldap)=object.get("ldap").filter(|value|!value.is_null()) {
                 let reference=ldap.as_str().ok_or_else(||invalid("LDAP binding must be a string"))?;
                 if !reference.is_empty() {
@@ -501,7 +540,7 @@ pub async fn import_users(
             object.insert("id".into(),json!(id));object.insert("owner".into(),json!(row_owner));object.insert("name".into(),json!(name));
             if !object.contains_key("display_name") {object.insert("display_name".into(),object["name"].clone());}
             validate_references(pool,principal,&Value::Object(object.clone())).await?;
-            Ok(object)
+            Ok((object,enrollment))
         }.await;
         match prepare {
             Ok(object) => prepared.push(object),
@@ -564,7 +603,14 @@ pub async fn import_users(
         "register_source",
     ];
     let mut tx = pool.begin().await?;
-    for (index, object) in prepared.into_iter().enumerate() {
+    let current:Option<bool>=sqlx::query_scalar("SELECT true FROM users WHERE id=$1 AND owner=$2 AND name=$3 AND is_admin AND NOT is_deleted AND NOT is_forbidden FOR SHARE").bind(&principal.id).bind(&principal.owner).bind(&principal.name).fetch_optional(&mut *tx).await?;
+    if current != Some(true) {
+        return Err(AppError::Authorization(
+            "Current administrator unavailable".into(),
+        ));
+    }
+    for (index, (object, enrollment)) in prepared.into_iter().enumerate() {
+        let id = object["id"].as_str().unwrap().to_owned();
         let columns: Vec<_> = ALLOWED
             .iter()
             .filter(|name| object.contains_key(**name))
@@ -589,6 +635,23 @@ pub async fn import_users(
                     index + 2
                 )],
             });
+        }
+        if restore {
+            if super::mfa_restore_service::restore(&mut tx, principal, &id, enrollment)
+                .await
+                .is_err()
+            {
+                tx.rollback().await?;
+                return Ok(crate::handlers::upload::BulkUploadResponse {
+                    total,
+                    created: 0,
+                    failed: total,
+                    errors: vec![format!(
+                        "row {}: enrollment binding unavailable, invalid or previously restored; no users were created",
+                        index + 2
+                    )],
+                });
+            }
         }
     }
     tx.commit().await?;

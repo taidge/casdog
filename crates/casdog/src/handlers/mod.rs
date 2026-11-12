@@ -77,3 +77,5 @@ pub mod commerce_store;
 
 pub mod runtime_settings;
 pub mod telemetry;
+
+pub mod branding;

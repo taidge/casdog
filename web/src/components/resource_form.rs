@@ -78,6 +78,18 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                                     .and_then(|index| values.get(index))
                                     .cloned()
                                     .unwrap_or_default();
+                                if config.slug == "syncers" && key == "type" && value == "SCIM" && read(editor, "type") != "SCIM" {
+                                    if let Ok(Value::Object(mut data)) = serde_json::from_str::<Value>(&editor.get()) {
+                                        data.insert("type".into(), json!("SCIM"));
+                                        data.insert("is_read_only".into(), json!(true));
+                                        data.insert("table_columns".into(), json!([]));
+                                        for field in ["database_type", "ssl_mode", "database", "table", "affiliation_table"] { data.insert(field.into(), Value::Null); }
+                                        for field in ["host", "user", "password"] { data.insert(field.into(), json!("")); }
+                                        editor.set(crate::api::pretty_json(&Value::Object(data)));
+                                        message.set(String::new());
+                                        return;
+                                    }
+                                }
                                 update(editor, key, json!(value), message);
                             }),
                     )
@@ -160,10 +172,12 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                     }
                 }
             };
-            widgets.push(boxed(stack((label(name), control))));
+            let sql_only = config.slug == "syncers" && ["database_type", "ssl_mode", "port", "database", "table", "affiliation_table"].contains(&key);
+            widgets.push(boxed(stack((label(name), control)).class_fn(move || if sql_only && read(editor,"type")=="SCIM" {"stack hidden".into()} else {"stack".into()})));
         }
         let structured = stack(widgets);
         stack((
+            when(scope.bond(move || config.slug=="syncers" && read(editor,"type")=="SCIM"), || label("SCIM reads users from Host/Users. Enter an HTTPS base URL, or local HTTP for testing. Leave Username blank and put a Bearer token in Password; enter both for Basic authentication. Empty mappings use standard SCIM fields. Only read-only synchronization is supported.")),
             sapid::button()
                 .label("Switch structured / JSON editor")
                 .on_press(move || raw.set(!raw.get())),
@@ -1639,6 +1653,10 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                     SelectOption {
                         value: "Keycloak".into(),
                         label: "Keycloak".into(),
+                    },
+                    SelectOption {
+                        value: "SCIM".into(),
+                        label: "SCIM".into(),
                     },
                 ]),
                 required: true,

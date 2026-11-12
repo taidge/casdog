@@ -70,6 +70,8 @@ quick-xml = "0.42"
 prost = "0.14"
 opentelemetry-proto = { version = "0.33.1", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs", "with-serde", "file-descriptors"] }
 prost-reflect = "0.16"
+html5ever = "0.40.1"
+markup5ever_rcdom = "0.40.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

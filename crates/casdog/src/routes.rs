@@ -103,6 +103,7 @@ fn api_router() -> Router {
 
 fn public_routes() -> Router {
     Router::new()
+        .push(Router::with_path("auth/branding").get(crate::handlers::branding::get_branding))
         .push(payment_notification_routes())
         .push(Router::with_path("v1/traces").post(crate::handlers::telemetry::traces))
         .push(Router::with_path("v1/metrics").post(crate::handlers::telemetry::metrics))
@@ -296,6 +297,7 @@ fn protected_routes() -> Router {
         .push(ticket_routes())
         .push(form_routes())
         .push(Router::with_path("upload-users").post(upload::upload_users))
+        .push(Router::with_path("upload-users-with-mfa").post(upload::upload_users_with_mfa))
         .push(Router::with_path("upload-groups").post(upload::upload_groups))
         .push(Router::with_path("upload-roles").post(upload::upload_roles))
         .push(Router::with_path("upload-permissions").post(upload::upload_permissions))

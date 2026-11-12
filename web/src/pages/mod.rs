@@ -14,3 +14,4 @@ pub mod store;
 
 pub mod settings;
 pub mod telemetry;
+pub mod user_import;

@@ -187,7 +187,7 @@ fn administrator_page(app: AppState) -> Element {
                 })
             });
         stack((
-            label("Install application and provider templates into your tenant."),
+            label("Install application, provider and theme templates into your tenant."),
             field(scope, "Integration owner", owner),
             action(
                 scope,
@@ -215,7 +215,15 @@ fn administrator_page(app: AppState) -> Element {
                     .to_string()
             }),
             field(scope, "Installation name", name),
-            fields,
+            stack((fields,
+            when(scope.bond(move || bundle.get()["manifest"]["type"] == "theme"), move || {
+                widget(move |scope| {
+                    stack((
+                        label("Apply to an existing application. Uninstalling restores its previous theme."),
+                        field(scope, "Theme application", application),
+                    )).build(scope)
+                })
+            }))),
             when(scope.bond(move || bundle.get()["manifest"]["type"] == "provider"), move || {
                 widget(move |scope| {
                     stack((
@@ -235,6 +243,9 @@ fn administrator_page(app: AppState) -> Element {
                     let id = item["id"].as_str().ok_or("Preview an integration first.")?;
                     if owner.get().trim().is_empty() || name.get().trim().is_empty() {
                         return Err("Enter an owner and installation name.".into());
+                    }
+                    if bundle.get()["manifest"]["type"] == "theme" && application.get().trim().is_empty() {
+                        return Err("Choose an application for the theme.".into());
                     }
                     if bundle.get()["manifest"]["type"] == "provider" && (client_id.get().trim().is_empty() || client_secret.get().is_empty()) {
                         return Err("Enter the provider client ID and secret.".into());

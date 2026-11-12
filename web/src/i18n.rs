@@ -99,6 +99,7 @@ fn en(key: &str) -> &str {
         "page.store" => "Store",
         "page.settings" => "Site settings",
         "page.telemetry" => "Telemetry",
+        "page.user_import" => "Restore users and MFA",
         "page.result" => "Result",
 
         // Common
@@ -303,6 +304,7 @@ fn zh(key: &str) -> Option<&'static str> {
         "page.store" => "商店",
         "page.settings" => "站点设置",
         "page.telemetry" => "遥测",
+        "page.user_import" => "恢复用户与 MFA",
         "page.result" => "结果",
 
         // Common

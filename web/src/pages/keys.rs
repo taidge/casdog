@@ -164,12 +164,13 @@ fn editor(app: AppState) -> Element {
             }),
             stack((field(scope, "Key name", draft.name),
             sapid::native_select("key-type").name("Key type").value(scope.bond(move || Some(draft.kind.get())))
+                .enabled(scope.bond(move || !busy.get()))
                 .options(["User", "Application", "Organization", "General"].into_iter().map(|v|sapid::select_option(v,v)))
                 .on_value_change(move |value| { let next=value.unwrap_or_else(||"User".into()); if next=="Application" { draft.user.set(String::new()); } draft.kind.set(next); }),
             field(scope, "Bound user", draft.user),
             field(scope, "Bound application", draft.application),
             field(scope, "Expires at (RFC3339, optional)", draft.expiry),
-            select(scope, "Key state", draft.state, vec![("Active".into(),"Active".into()),("Inactive".into(),"Inactive".into())]))),
+            select(scope, "Key state", draft.state, vec![("Active".into(),"Active".into()),("Inactive".into(),"Inactive".into())]).enabled(scope.bond(move || !busy.get())))),
             action(scope, "Save API key", busy, message, move || async move {
                 let namespace=owner.get();
                 let name=draft.name.get();

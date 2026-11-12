@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 pub fn page(app: AppState) -> Element {
     boxed(widget(move |scope| {
         let client = scope.cage(query("client_id"));
+        crate::branding::bind(scope, app, client);
         let redirect_uri = scope.cage(query("redirect_uri"));
         let scopes = scope.cage({
             let v = query("scope");

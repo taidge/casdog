@@ -20,6 +20,110 @@ pub struct ImportedPassword {
 const MAX_PBKDF2_ITERATIONS: u32 = 2_000_000;
 
 impl PasswordService {
+    /// Keycloak stores Argon2 parameters separately from raw Base64 digest/salt.
+    /// Reconstruct a canonical PHC string; parsing never runs the KDF.
+    pub fn import_keycloak_argon(
+        secret: &serde_json::Value,
+        metadata: &serde_json::Value,
+    ) -> AppResult<ImportedPassword> {
+        use base64::engine::general_purpose::STANDARD_NO_PAD;
+        let invalid = || {
+            AppError::Validation(
+                "Invalid or unsupported Keycloak Argon2 credential parameters".into(),
+            )
+        };
+        if metadata["algorithm"].as_str() != Some("argon2") {
+            return Err(invalid());
+        }
+        if let (Some(a), Some(b)) = (
+            metadata.get("additionalParameters"),
+            metadata.get("algorithmData"),
+        ) {
+            if a != b {
+                return Err(invalid());
+            }
+        }
+        let parameters = metadata
+            .get("additionalParameters")
+            .or_else(|| metadata.get("algorithmData"))
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(invalid)?;
+        if parameters.len() != 5
+            || parameters.keys().any(|k| {
+                !matches!(
+                    k.as_str(),
+                    "type" | "version" | "hashLength" | "memory" | "parallelism"
+                )
+            })
+        {
+            return Err(invalid());
+        }
+        let single = |name: &str| -> AppResult<&str> {
+            let a = parameters
+                .get(name)
+                .and_then(serde_json::Value::as_array)
+                .filter(|a| a.len() == 1)
+                .ok_or_else(invalid)?;
+            a[0].as_str().ok_or_else(invalid)
+        };
+        let variant = single("type")?;
+        if !matches!(variant, "id" | "i" | "d") {
+            return Err(invalid());
+        }
+        let version = match single("version")? {
+            "1.3" => 19,
+            "1.0" => 16,
+            _ => return Err(invalid()),
+        };
+        let integer = |name: &str| -> AppResult<u32> {
+            let v = single(name)?;
+            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            v.parse().map_err(|_| invalid())
+        };
+        let memory = integer("memory")?;
+        let parallelism = integer("parallelism")?;
+        let length = integer("hashLength")?;
+        let iterations = metadata["hashIterations"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(invalid)?;
+        let decode = |field: &str| -> AppResult<Vec<u8>> {
+            let raw = secret[field]
+                .as_str()
+                .filter(|s| s.len() <= 256)
+                .ok_or_else(invalid)?;
+            STANDARD
+                .decode(raw)
+                .or_else(|_| STANDARD_NO_PAD.decode(raw))
+                .map_err(|_| invalid())
+        };
+        let salt = decode("salt")?;
+        let digest = decode("value")?;
+        if !(8..=64).contains(&salt.len())
+            || digest.len() != length as usize
+            || !(16..=64).contains(&length)
+        {
+            return Err(invalid());
+        }
+        let hash = format!(
+            "$argon2{variant}$v={version}$m={memory},t={iterations},p={parallelism}${}${}",
+            STANDARD_NO_PAD.encode(salt),
+            STANDARD_NO_PAD.encode(digest)
+        );
+        let kind = if variant == "id" {
+            "argon2id"
+        } else {
+            "argon2"
+        };
+        Self::validate_encoded_hash(&hash, kind, None).map_err(|_| invalid())?;
+        Ok(ImportedPassword {
+            hash,
+            password_type: kind.into(),
+            salt: None,
+        })
+    }
     /// Canonicalize Casdoor `password` + `passwordType` and native explicit
     /// `password_hash` without ever treating a declared hash as plaintext.
     pub fn normalize_import_fields(
@@ -159,6 +263,10 @@ impl PasswordService {
             Some("pbkdf2-django")
         } else if password.starts_with("$pbkdf2-sha256$") {
             Some("pbkdf2-sha256")
+        } else if password.starts_with("$keycloak-pbkdf2-sha256$") {
+            Some("keycloak-pbkdf2-sha256")
+        } else if password.starts_with("$keycloak-pbkdf2-sha512$") {
+            Some("keycloak-pbkdf2-sha512")
         } else {
             None
         }
@@ -176,6 +284,21 @@ impl PasswordService {
             return Err(invalid());
         }
         let valid = match kind.to_ascii_lowercase().as_str() {
+            "keycloak-pbkdf2-sha256" | "keycloak-pbkdf2-sha512" => {
+                let parts: Vec<_> = hash.split('$').collect();
+                parts.len() == 5
+                    && parts[0].is_empty()
+                    && parts[1] == kind
+                    && parts[2]
+                        .parse::<u32>()
+                        .is_ok_and(|n| (1..=MAX_PBKDF2_ITERATIONS).contains(&n))
+                    && STANDARD
+                        .decode(parts[3])
+                        .is_ok_and(|s| (1..=128).contains(&s.len()))
+                    && STANDARD
+                        .decode(parts[4])
+                        .is_ok_and(|k| matches!(k.len(), 32 | 64))
+            }
             "argon2" | "argon2id" | "" => {
                 let parsed = PasswordHash::new(hash).map_err(|_| invalid())?;
                 let m = parsed.params.get_decimal("m").unwrap_or(0);
@@ -334,6 +457,35 @@ impl PasswordService {
             return Ok(false);
         }
         match kind.as_str() {
+            "keycloak-pbkdf2-sha256" | "keycloak-pbkdf2-sha512" => {
+                let parts: Vec<_> = password_hash.split('$').collect();
+                let rounds = parts[2]
+                    .parse::<u32>()
+                    .map_err(|_| AppError::Validation("Invalid Keycloak rounds".into()))?;
+                let decoded_salt = STANDARD
+                    .decode(parts[3])
+                    .map_err(|_| AppError::Validation("Invalid Keycloak salt".into()))?;
+                let expected = STANDARD
+                    .decode(parts[4])
+                    .map_err(|_| AppError::Validation("Invalid Keycloak digest".into()))?;
+                let mut computed = vec![0u8; expected.len()];
+                if kind == "keycloak-pbkdf2-sha256" {
+                    pbkdf2::pbkdf2_hmac::<Sha256>(
+                        password.as_bytes(),
+                        &decoded_salt,
+                        rounds,
+                        &mut computed,
+                    );
+                } else {
+                    pbkdf2::pbkdf2_hmac::<Sha512>(
+                        password.as_bytes(),
+                        &decoded_salt,
+                        rounds,
+                        &mut computed,
+                    );
+                }
+                Ok(bool::from(computed.ct_eq(&expected)))
+            }
             "argon2" | "argon2id" | "" => {
                 let Ok(parsed) = PasswordHash::new(password_hash) else {
                     return Ok(false);

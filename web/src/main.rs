@@ -1,4 +1,5 @@
 mod api;
+mod branding;
 mod components;
 mod i18n;
 mod pages;
@@ -107,6 +108,7 @@ fn application() -> impl Widget {
                     "store-page" => pages::store::page(app),
                     "settings-page" => pages::settings::page(app),
                     "telemetry-page" => pages::telemetry::page(app),
+                    "user-import-page" => pages::user_import::page(app),
                     "dashboard" => dashboard(app),
                     slug => match resources::resource_config(slug) {
                         Some(config) => pages::resource::page(app, config),
@@ -155,6 +157,7 @@ fn sidebar(app: AppState) -> impl Widget {
             ("store-page", "Store"),
             ("settings-page", "Site settings"),
             ("telemetry-page", "Telemetry"),
+            ("user-import-page", "Restore users and MFA"),
         ] {
             navigation.push(boxed(
                 sapid::button()
@@ -174,6 +177,7 @@ fn sidebar(app: AppState) -> impl Widget {
                                 "store-page" => "page.store",
                                 "settings-page" => "page.settings",
                                 "telemetry-page" => "page.telemetry",
+                                "user-import-page" => "page.user_import",
                                 _ => "page.result",
                             },
                             app.locale.get(),

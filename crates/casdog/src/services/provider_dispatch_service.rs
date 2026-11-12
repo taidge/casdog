@@ -519,6 +519,95 @@ fn split_receivers(receivers: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+/// Check a restored factor's actual delivery configuration without sending a
+/// message. Keep restore validation in sync with the normal delivery factory.
+pub fn validate_mfa_delivery_provider(provider: &Provider) -> AppResult<()> {
+    let invalid = || {
+        AppError::Validation("MFA delivery provider configuration is incomplete or invalid".into())
+    };
+    let nonempty = |value: Option<&str>| value.is_some_and(|v| !v.trim().is_empty());
+    let http = |value: Option<&str>| -> AppResult<()> {
+        let value = value.filter(|v| !v.trim().is_empty()).ok_or_else(invalid)?;
+        let url = reqwest::Url::parse(value).map_err(|_| invalid())?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    };
+    let kind = provider.provider_type.to_ascii_lowercase();
+    match provider.category.as_str() {
+        "Email" => {
+            email_provider_from_record(provider, None)?;
+            if kind.contains("custom http") {
+                http(provider.endpoint.as_deref())?;
+            } else {
+                let from = provider
+                    .client_id2
+                    .as_deref()
+                    .or(provider.receiver.as_deref())
+                    .or(provider.client_id.as_deref())
+                    .ok_or_else(invalid)?;
+                from.parse::<lettre::message::Mailbox>()
+                    .map_err(|_| invalid())?;
+                let credential = if kind.contains("sendgrid") {
+                    provider
+                        .client_secret
+                        .as_deref()
+                        .or(provider.client_id.as_deref())
+                } else {
+                    provider.client_secret.as_deref()
+                };
+                if !nonempty(credential) {
+                    return Err(invalid());
+                }
+                if !kind.contains("sendgrid")
+                    && (!nonempty(provider.host.as_deref())
+                        || !nonempty(provider.client_id.as_deref())
+                        || !(1..=65535).contains(&provider.port.unwrap_or(587)))
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        "SMS" => {
+            sms_provider_from_record(provider)?;
+            if !nonempty(provider.client_secret.as_deref()) {
+                return Err(invalid());
+            }
+            if kind.contains("twilio") {
+                if !nonempty(provider.client_id.as_deref())
+                    || !nonempty(
+                        provider
+                            .app_id
+                            .as_deref()
+                            .or(provider.sign_name.as_deref())
+                            .or(provider.receiver.as_deref()),
+                    )
+                {
+                    return Err(invalid());
+                }
+            } else {
+                http(
+                    provider
+                        .endpoint
+                        .as_deref()
+                        .or(provider.provider_url.as_deref()),
+                )?;
+            }
+        }
+        _ => {
+            return Err(AppError::Validation(
+                "An Email or SMS delivery provider is required".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn email_provider_from_record(
     provider: &Provider,
     sender: Option<&str>,

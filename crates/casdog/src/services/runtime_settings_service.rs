@@ -60,7 +60,7 @@ impl RuntimeSettingsService {
         let mut value:Value=sqlx::query_scalar("SELECT data||jsonb_build_object('createdTime',created_at,'updatedTime',updated_at) FROM operation_settings WHERE singleton")
             .fetch_one(pool).await?;
         RuntimeSettings::parse(&value)?;
-        value["runtime"] = json!({"recordRetentionApplied":true,"poolSettingsApplied":false,"poolSettingsMessage":"Pool limits are saved; live pool reconfiguration is not implemented"});
+        value["runtime"] = json!({"recordRetentionApplied":true,"poolSettingsApplied":false,"poolSettingsMessage":"No runtime pool manager is attached; settings persisted but pool application is unconfirmed"});
         Ok(value)
     }
     pub async fn update(pool: &PgPool, principal: &Principal, value: &Value) -> AppResult<Value> {
@@ -90,7 +90,7 @@ impl RuntimeSettingsService {
         }
         tx.commit().await?;
         Ok(
-            json!({"status":"ok","data":true,"applied":false,"recordRetentionApplied":true,"poolSettingsApplied":false,"msg":"Record retention applies at the next cleanup; pool settings are saved but live pool reconfiguration is not implemented"}),
+            json!({"status":"ok","data":true,"applied":false,"recordRetentionApplied":true,"poolSettingsApplied":false,"msg":"No runtime pool manager is attached; settings persisted but pool application is unconfirmed. Record retention applies at the next cleanup"}),
         )
     }
     /// Short shared transactions serialize policy edits with deletion. No

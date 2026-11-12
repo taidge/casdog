@@ -11,6 +11,7 @@ pub fn page(app: AppState) -> Element {
         let pass = scope.cage(String::new());
         let confirm = scope.cage(String::new());
         let application = scope.cage(query("application"));
+        crate::branding::bind(scope, app, application);
         let busy = scope.cage(false);
         let message = scope.cage(String::new());
         let fields: Vec<Element> = vec![

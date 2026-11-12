@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use hmac::{Hmac, Mac};
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -31,6 +30,7 @@ struct SyncedUserRecord {
     key_by_name: bool,
     key_field: String,
     password_plaintext: Option<String>,
+    credential_source: Option<String>,
     source_id: Option<String>,
     ldap_id: Option<String>,
     external_id: Option<String>,
@@ -43,6 +43,11 @@ struct SyncedUserRecord {
     phone: Option<String>,
     avatar: Option<String>,
     affiliation: Option<String>,
+    title: Option<String>,
+    language: Option<String>,
+    address: Option<Value>,
+    location: Option<String>,
+    region: Option<String>,
     signup_application: Option<String>,
     password_hash: Option<String>,
     password_type: Option<String>,
@@ -73,19 +78,6 @@ struct PendingOperation {
     expected_source: Option<Value>,
     desired_source: Value,
     local_snapshot: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct KeycloakSecretData {
-    value: Option<String>,
-    salt: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KeycloakCredentialData {
-    #[serde(rename = "hashIterations")]
-    hash_iterations: Option<u32>,
-    algorithm: Option<String>,
 }
 
 pub struct SyncerExecutor;
@@ -153,6 +145,7 @@ impl SyncerExecutor {
             let mut run = match syncer.syncer_type.as_str() {
                 "Database" | "Keycloak" => Self::execute_database_sync(&mut tx, &syncer).await?,
                 "LDAP" => Self::execute_ldap_sync(&mut tx, &syncer).await?,
+                "SCIM" => Self::execute_scim_sync(&mut tx, &syncer).await?,
                 _ => return Err(AppError::Validation("Unsupported syncer type".into())),
             };
             tx.commit().await?;
@@ -288,7 +281,11 @@ impl SyncerExecutor {
         if !syncer.is_read_only {
             Self::validate_writable_table(&external_pool, table, &columns).await?;
         }
-        let (rows, affiliations) = Self::fetch_postgres_snapshot(&external_pool, syncer).await?;
+        let mut snapshot = external_pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *snapshot)
+            .await?;
+        let (rows, affiliations) = Self::fetch_postgres_snapshot(&mut snapshot, syncer).await?;
         let mut seen = std::collections::HashSet::new();
         let mut prepared = Vec::new();
 
@@ -307,7 +304,9 @@ impl SyncerExecutor {
                 ));
             }
             if syncer.syncer_type == "Keycloak" {
-                Self::enrich_keycloak_user(&external_pool, &mut user).await?;
+                let fingerprint =
+                    Self::enrich_keycloak_user(&mut snapshot, syncer, &row, &mut user).await?;
+                user.credential_source = Some(fingerprint);
                 if let Some(hash) = user.password_hash.as_deref() {
                     PasswordService::validate_encoded_hash(
                         hash,
@@ -319,8 +318,13 @@ impl SyncerExecutor {
                     })?;
                 }
             }
-            prepared.push((Self::source_projection(syncer, &columns, &row)?, row, user));
+            let mut projection = Self::source_projection(syncer, &columns, &row)?;
+            if let Some(value) = &user.credential_source {
+                projection["_keycloakCredential"] = Value::String(value.clone());
+            }
+            prepared.push((projection, row, user));
         }
+        snapshot.commit().await?;
         external_pool.close().await;
         Self::reconcile_rows(conn, syncer, &columns, prepared, &affiliations).await
     }
@@ -511,6 +515,32 @@ impl SyncerExecutor {
         Self::reconcile_rows(conn, syncer, &columns, prepared, &HashMap::new()).await
     }
 
+    async fn execute_scim_sync(
+        conn: &mut PgConnection,
+        syncer: &Syncer,
+    ) -> AppResult<SyncRunResult> {
+        use crate::services::syncer_scim::ScimSource;
+        ScimSource::validate(syncer)?;
+        let columns = ScimSource::columns(syncer)?;
+        let rows = ScimSource::snapshot(syncer).await?;
+        let mut prepared = Vec::with_capacity(rows.len());
+        let mut seen = std::collections::HashSet::new();
+        for row in rows {
+            let incoming = Self::map_database_row(syncer, &columns, &row)?;
+            if !seen.insert(incoming.source_key.clone()) {
+                return Err(AppError::Validation(
+                    "Duplicate SCIM source identity".into(),
+                ));
+            }
+            prepared.push((
+                Self::source_projection(syncer, &columns, &row)?,
+                row,
+                incoming,
+            ));
+        }
+        Self::reconcile_rows(conn, syncer, &columns, prepared, &HashMap::new()).await
+    }
+
     pub(crate) fn parse_table_columns(syncer: &Syncer) -> AppResult<Vec<TableColumn>> {
         let raw = syncer
             .table_columns
@@ -561,6 +591,11 @@ impl SyncerExecutor {
                     | "passwordsalt"
                     | "isforbidden"
                     | "score"
+                    | "title"
+                    | "language"
+                    | "address"
+                    | "location"
+                    | "region"
             ) || !fields.insert(target.clone())
             {
                 return Err(AppError::Validation(
@@ -622,7 +657,7 @@ impl SyncerExecutor {
                 "Password metadata requires a password mapping".into(),
             ));
         }
-        if syncer.syncer_type != "LDAP" {
+        if !matches!(syncer.syncer_type.as_str(), "LDAP" | "SCIM") {
             Self::quote_identifier_path(syncer.table_name.as_deref().unwrap_or_default())?;
             if let Some(table) = syncer
                 .affiliation_table
@@ -690,14 +725,10 @@ impl SyncerExecutor {
     }
 
     async fn fetch_postgres_snapshot(
-        pool: &PgPool,
+        snapshot: &mut PgConnection,
         syncer: &Syncer,
     ) -> AppResult<(Vec<Map<String, Value>>, HashMap<i32, String>)> {
         let table = Self::quote_identifier_path(syncer.table_name.as_deref().unwrap_or_default())?;
-        let mut snapshot = pool.begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            .execute(&mut *snapshot)
-            .await?;
         let (count,size):(i64,i64)=sqlx::query_as(&format!("SELECT COUNT(*),COALESCE(SUM(octet_length(to_jsonb(t)::text)),0)::bigint FROM (SELECT * FROM {table} LIMIT 10001) t"))
             .fetch_one(&mut *snapshot).await.map_err(|_|AppError::Internal("Cannot inspect external PostgreSQL snapshot".into()))?;
         if count > 10000 || size > 32 * 1024 * 1024 {
@@ -752,7 +783,6 @@ impl SyncerExecutor {
                 }
             }
         }
-        snapshot.commit().await?;
         let rows = rows
             .into_iter()
             .map(|row| match row {
@@ -928,6 +958,17 @@ impl SyncerExecutor {
                 "phone" => user.phone = Some(value),
                 "avatar" => user.avatar = Some(value),
                 "affiliation" => user.affiliation = Some(value),
+                "title" => user.title = Some(value),
+                "language" => user.language = Some(value),
+                "location" => user.location = Some(value),
+                "region" => user.region = Some(value),
+                "address" => {
+                    let address: Value = serde_json::from_str(&value).map_err(|_| {
+                        AppError::Validation("Address mapping requires a JSON string array".into())
+                    })?;
+                    Self::validate_address(&address)?;
+                    user.address = Some(address);
+                }
                 "score" => {
                     user.score = Some(value.parse().map_err(|_| {
                         AppError::Validation("Invalid integer Score mapping".into())
@@ -1129,6 +1170,15 @@ impl SyncerExecutor {
             "phone" => user.phone.clone().unwrap_or_default(),
             "avatar" => user.avatar.clone().unwrap_or_default(),
             "affiliation" => user.affiliation.clone().unwrap_or_default(),
+            "title" => user.title.clone().unwrap_or_default(),
+            "language" => user.language.clone().unwrap_or_default(),
+            "location" => user.location.clone().unwrap_or_default(),
+            "region" => user.region.clone().unwrap_or_default(),
+            "address" => user
+                .address
+                .clone()
+                .unwrap_or_else(|| json!([]))
+                .to_string(),
             "ldap" => user.ldap.clone().unwrap_or_default(),
             "signupapplication" => user.signup_application.clone().unwrap_or_default(),
             "password" => user.password_hash.clone(),
@@ -1224,9 +1274,29 @@ impl SyncerExecutor {
                 }
             }
             value = Self::convert_value(c, &value, true)?;
-            result.insert(c.name.clone(), Value::String(value));
+            if field == "address" {
+                let address: Value = serde_json::from_str(&value)
+                    .map_err(|_| AppError::Validation("Invalid exported address".into()))?;
+                Self::validate_address(&address)?;
+                result.insert(c.name.clone(), address);
+            } else {
+                result.insert(c.name.clone(), Value::String(value));
+            }
         }
         Ok(Value::Object(result))
+    }
+
+    fn validate_address(address: &Value) -> AppResult<()> {
+        if !address.as_array().is_some_and(|a| {
+            a.len() <= 32
+                && a.iter()
+                    .all(|v| v.as_str().is_some_and(|s| s.len() <= 4096))
+        }) {
+            return Err(AppError::Validation(
+                "Address mapping requires at most 32 strings of 4096 bytes".into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn mark_conflict(
@@ -1293,6 +1363,18 @@ impl SyncerExecutor {
             if let Some(link) = links.get(&key) {
                 let mut user:User=sqlx::query_as("SELECT * FROM users WHERE id=$1 AND owner=$2 AND NOT is_deleted AND NOT is_admin FOR UPDATE")
                     .bind(&link.user_id).bind(&syncer.organization).fetch_optional(&mut *conn).await?.ok_or_else(||AppError::Validation("Linked account is unavailable or privileged".into()))?;
+                if syncer.syncer_type == "Keycloak"
+                    && source.get("_keycloakCredential").is_some()
+                    && link
+                        .baseline_source
+                        .as_ref()
+                        .and_then(|v| v.get("_keycloakCredential"))
+                        == source.get("_keycloakCredential")
+                {
+                    incoming.password_hash = None;
+                    incoming.password_type = None;
+                    incoming.password_salt = None;
+                }
                 if link.disabled_by_sync {
                     if link.disabled_user_updated_at == Some(user.updated_at) && user.is_forbidden {
                         user.is_forbidden = false;
@@ -1830,80 +1912,111 @@ impl SyncerExecutor {
     }
 
     async fn enrich_keycloak_user(
-        external_pool: &PgPool,
+        conn: &mut PgConnection,
+        syncer: &Syncer,
+        row: &Map<String, Value>,
         user: &mut SyncedUserRecord,
-    ) -> AppResult<()> {
-        let source_id = match user.source_id.as_deref() {
-            Some(source_id) if !source_id.is_empty() => source_id,
-            _ => return Ok(()),
-        };
-
-        let credential_row = sqlx::query(
-            r#"
-            SELECT secret_data, credential_data
-            FROM credential
-            WHERE type = 'password' AND user_id = $1
-            ORDER BY created_date DESC NULLS LAST
-            LIMIT 1
-            "#,
-        )
-        .bind(source_id)
-        .fetch_optional(external_pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to read Keycloak credentials: {}", e)))?;
-
-        if let Some(row) = credential_row {
-            let secret_data: Option<String> = row.try_get("secret_data").ok();
-            let credential_data: Option<String> = row.try_get("credential_data").ok();
-            if let Some(secret_data) = secret_data {
-                let secret: KeycloakSecretData =
-                    serde_json::from_str(&secret_data).map_err(|e| {
-                        AppError::Internal(format!("Failed to parse Keycloak secret_data: {}", e))
-                    })?;
-                if let (Some(value), Some(salt)) = (secret.value, secret.salt) {
-                    let iterations = credential_data
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str::<KeycloakCredentialData>(raw).ok())
-                        .and_then(|parsed| {
-                            if parsed
-                                .algorithm
-                                .as_deref()
-                                .map(|value| value.to_ascii_lowercase().contains("pbkdf2"))
-                                .unwrap_or(true)
-                            {
-                                parsed.hash_iterations
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(27_500);
-                    user.password_hash =
-                        Some(format!("$pbkdf2-sha256${}${}${}", iterations, salt, value));
-                    user.password_type = Some("pbkdf2-sha256".to_string());
-                    user.password_salt = None;
-                }
-            }
-        }
-
-        if user.signup_application.is_none() {
-            user.signup_application = sqlx::query_scalar::<_, String>(
-                r#"
-                SELECT kg.name
-                FROM keycloak_group kg
-                JOIN user_group_membership ugm ON kg.id = ugm.group_id
-                WHERE ugm.user_id = $1
-                ORDER BY kg.name
-                LIMIT 1
-                "#,
+    ) -> AppResult<String> {
+        let invalid = || {
+            AppError::Validation(
+                "Invalid or unsupported Keycloak credential metadata; no users were imported"
+                    .into(),
             )
-            .bind(source_id)
-            .fetch_optional(external_pool)
-            .await
-            .ok()
-            .flatten();
+        };
+        let id = user
+            .source_id
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                AppError::Validation(
+                    "Keycloak requires an Id mapping for credential identity".into(),
+                )
+            })?;
+        let table = syncer.table_name.as_deref().unwrap_or_default();
+        let prefix = table
+            .rsplit_once('.')
+            .map(|(schema, _)| Self::quote_identifier_path(schema).map(|q| format!("{q}.")))
+            .transpose()?
+            .unwrap_or_default();
+        let credential:Option<Value>=sqlx::query_scalar(&format!("SELECT CASE WHEN octet_length(to_jsonb(c)::text)<=32768 THEN to_jsonb(c) ELSE jsonb_build_object('oversized',true) END FROM {prefix}credential c WHERE type='password' AND user_id=$1 ORDER BY created_date DESC NULLS LAST,id DESC LIMIT 1"))
+            .bind(id).fetch_optional(&mut *conn).await.map_err(|_|AppError::Internal("Cannot read Keycloak credentials".into()))?;
+        let fingerprint = if let Some(credential) = credential {
+            let parse = |field: &str| -> AppResult<Value> {
+                let value = credential.get(field).ok_or_else(invalid)?;
+                let json = match value {
+                    Value::String(raw) if raw.len() <= 16384 => {
+                        serde_json::from_str(raw).map_err(|_| invalid())?
+                    }
+                    Value::Object(_) => value.clone(),
+                    _ => return Err(invalid()),
+                };
+                if !json.is_object() {
+                    return Err(invalid());
+                }
+                Ok(json)
+            };
+            let secret = parse("secret_data")?;
+            let metadata = parse("credential_data")?;
+            let algorithm = metadata["algorithm"].as_str().ok_or_else(invalid)?;
+            let (encoded, kind) = if algorithm == "argon2" {
+                let imported = PasswordService::import_keycloak_argon(&secret, &metadata)?;
+                (imported.hash, imported.password_type)
+            } else {
+                if !matches!(algorithm, "pbkdf2-sha256" | "pbkdf2-sha512") {
+                    return Err(AppError::Validation(
+                        "Unsupported Keycloak password algorithm".into(),
+                    ));
+                }
+                let rounds = metadata["hashIterations"]
+                    .as_u64()
+                    .filter(|n| *n > 0 && *n <= 2_000_000)
+                    .ok_or_else(invalid)?;
+                let salt = secret["salt"].as_str().ok_or_else(invalid)?;
+                let value = secret["value"].as_str().ok_or_else(invalid)?;
+                let kind = format!("keycloak-{algorithm}");
+                let encoded = format!("${kind}${rounds}${salt}${value}");
+                PasswordService::validate_encoded_hash(&encoded, &kind, None)
+                    .map_err(|_| invalid())?;
+                (encoded, kind)
+            };
+            user.password_hash = Some(encoded.clone());
+            user.password_type = Some(kind);
+            user.password_salt = None;
+            Self::credential_fingerprint(&encoded)
+        } else {
+            let linked = row
+                .get("federation_link")
+                .and_then(Value::as_str)
+                .is_some_and(|v| !v.is_empty());
+            let federated = if linked {
+                true
+            } else {
+                sqlx::query_scalar::<_, bool>(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM {prefix}federated_identity WHERE user_id=$1)"
+                ))
+                .bind(id)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|_| {
+                    AppError::Internal("Cannot determine Keycloak federated identity".into())
+                })?
+            };
+            if !federated {
+                return Err(AppError::Validation(
+                    "Keycloak account has no password credential or explicit federated identity"
+                        .into(),
+                ));
+            }
+            user.password_hash = None;
+            user.password_type = None;
+            user.password_salt = None;
+            Self::credential_fingerprint("federated-no-local-password")
+        };
+        if user.signup_application.is_none() {
+            user.signup_application=sqlx::query_scalar::<_,String>(&format!("SELECT kg.name FROM {prefix}keycloak_group kg JOIN {prefix}user_group_membership m ON kg.id=m.group_id WHERE m.user_id=$1 ORDER BY kg.name LIMIT 1"))
+                .bind(id).fetch_optional(&mut *conn).await.map_err(|_|AppError::Internal("Cannot read Keycloak group membership".into()))?;
         }
-
-        Ok(())
+        Ok(fingerprint)
     }
 
     async fn upsert_local_user(
@@ -2035,8 +2148,8 @@ impl SyncerExecutor {
                     .as_ref()
                     .is_some_and(|kind| Some(kind) != user.password_type.as_ref())
                 || incoming.password_hash.is_some() && incoming.password_salt != user.password_salt;
-            sqlx::query("UPDATE users SET name=$3,display_name=COALESCE($4,display_name),first_name=COALESCE($5,first_name),last_name=COALESCE($6,last_name),email=COALESCE($7,email),email_verified=COALESCE($8,email_verified),phone=COALESCE($9,phone),avatar=COALESCE($10,avatar),affiliation=COALESCE($11,affiliation),external_id=COALESCE($12,external_id),ldap=COALESCE($13,ldap),signup_application=COALESCE($14,signup_application),password_hash=COALESCE($15,password_hash),password_type=CASE WHEN $15::text IS NULL THEN password_type ELSE $16 END,password_salt=CASE WHEN $15::text IS NULL THEN password_salt ELSE $17 END,is_forbidden=COALESCE($18,is_forbidden),score=COALESCE($20,score),last_change_password_time=CASE WHEN $19 THEN to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') ELSE last_change_password_time END,updated_at=clock_timestamp() WHERE id=$1 AND owner=$2")
-                .bind(&user.id).bind(&syncer.organization).bind(&name).bind(&incoming.display_name).bind(&incoming.first_name).bind(&incoming.last_name).bind(&incoming.email).bind(incoming.email_verified).bind(&incoming.phone).bind(&incoming.avatar).bind(&incoming.affiliation).bind(&incoming.external_id).bind(&incoming.ldap_id).bind(&incoming.signup_application).bind(&incoming.password_hash).bind(&incoming.password_type).bind(&incoming.password_salt).bind(incoming.is_forbidden).bind(changed).bind(incoming.score).execute(&mut *conn).await?;
+            sqlx::query("UPDATE users SET name=$3,display_name=COALESCE($4,display_name),first_name=COALESCE($5,first_name),last_name=COALESCE($6,last_name),email=COALESCE($7,email),email_verified=COALESCE($8,email_verified),phone=COALESCE($9,phone),avatar=COALESCE($10,avatar),affiliation=COALESCE($11,affiliation),external_id=COALESCE($12,external_id),ldap=COALESCE($13,ldap),signup_application=COALESCE($14,signup_application),password_hash=COALESCE($15,password_hash),password_type=CASE WHEN $15::text IS NULL THEN password_type ELSE $16 END,password_salt=CASE WHEN $15::text IS NULL THEN password_salt ELSE $17 END,is_forbidden=COALESCE($18,is_forbidden),score=COALESCE($20,score),title=COALESCE($21,title),language=COALESCE($22,language),address=COALESCE($23,address),location=COALESCE($24,location),region=COALESCE($25,region),last_change_password_time=CASE WHEN $19 THEN to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') ELSE last_change_password_time END,updated_at=clock_timestamp() WHERE id=$1 AND owner=$2")
+                .bind(&user.id).bind(&syncer.organization).bind(&name).bind(&incoming.display_name).bind(&incoming.first_name).bind(&incoming.last_name).bind(&incoming.email).bind(incoming.email_verified).bind(&incoming.phone).bind(&incoming.avatar).bind(&incoming.affiliation).bind(&incoming.external_id).bind(&incoming.ldap_id).bind(&incoming.signup_application).bind(&incoming.password_hash).bind(&incoming.password_type).bind(&incoming.password_salt).bind(incoming.is_forbidden).bind(changed).bind(incoming.score).bind(&incoming.title).bind(&incoming.language).bind(&incoming.address).bind(&incoming.location).bind(&incoming.region).execute(&mut *conn).await?;
             sqlx::query("INSERT INTO syncer_user_links(syncer_id,source_key,user_id) VALUES($1,$2,$3) ON CONFLICT(syncer_id,source_key) DO NOTHING")
                 .bind(&syncer.id).bind(&incoming.source_key).bind(&user.id).execute(&mut *conn).await?;
         } else {
@@ -2049,8 +2162,8 @@ impl SyncerExecutor {
                 }
             };
             let display = incoming.display_name.unwrap_or_else(|| name.clone());
-            sqlx::query("INSERT INTO users(id,owner,name,password_hash,display_name,first_name,last_name,email,email_verified,phone,avatar,affiliation,external_id,ldap,signup_application,password_type,password_salt,is_forbidden,score) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)")
-                .bind(&id).bind(&syncer.organization).bind(&name).bind(hash).bind(display).bind(&incoming.first_name).bind(&incoming.last_name).bind(&incoming.email).bind(incoming.email_verified.unwrap_or(false)).bind(&incoming.phone).bind(&incoming.avatar).bind(&incoming.affiliation).bind(&incoming.external_id).bind(&incoming.ldap_id).bind(&incoming.signup_application).bind(if credential_present {incoming.password_type.as_deref().unwrap_or("argon2")} else {"argon2"}).bind(if credential_present {incoming.password_salt.as_deref()} else {None}).bind(incoming.is_forbidden.unwrap_or(false)).bind(incoming.score.unwrap_or(0)).execute(&mut *conn).await?;
+            sqlx::query("INSERT INTO users(id,owner,name,password_hash,display_name,first_name,last_name,email,email_verified,phone,avatar,affiliation,external_id,ldap,signup_application,password_type,password_salt,is_forbidden,score,title,language,address,location,region) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)")
+                .bind(&id).bind(&syncer.organization).bind(&name).bind(hash).bind(display).bind(&incoming.first_name).bind(&incoming.last_name).bind(&incoming.email).bind(incoming.email_verified.unwrap_or(false)).bind(&incoming.phone).bind(&incoming.avatar).bind(&incoming.affiliation).bind(&incoming.external_id).bind(&incoming.ldap_id).bind(&incoming.signup_application).bind(if credential_present {incoming.password_type.as_deref().unwrap_or("argon2")} else {"argon2"}).bind(if credential_present {incoming.password_salt.as_deref()} else {None}).bind(incoming.is_forbidden.unwrap_or(false)).bind(incoming.score.unwrap_or(0)).bind(&incoming.title).bind(&incoming.language).bind(&incoming.address).bind(&incoming.location).bind(&incoming.region).execute(&mut *conn).await?;
             sqlx::query(
                 "INSERT INTO syncer_user_links(syncer_id,source_key,user_id) VALUES($1,$2,$3)",
             )

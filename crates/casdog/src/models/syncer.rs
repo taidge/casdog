@@ -153,12 +153,16 @@ impl From<Syncer> for SyncerResponse {
             name: s.name,
             created_at: s.created_at,
             organization: s.organization,
-            syncer_type: s.syncer_type,
+            syncer_type: s.syncer_type.clone(),
             database_type: s.database_type,
             ssl_mode: s.ssl_mode,
             host: s.host,
             port: s.port,
-            user: s.user,
+            user: if s.syncer_type == "SCIM" && s.password.is_empty() && !s.user.is_empty() {
+                "***".into()
+            } else {
+                s.user
+            },
             database: s.database,
             table_name: s.table_name,
             table_columns: s

@@ -36,9 +36,12 @@ async function main() {
     page.on('pageerror',error=>{errors.push(error.message);console.error('Browser runtime error',error.message);});
     let users=[{id:'user-1',owner:'built-in',name:'alice',display_name:'Alice',is_admin:true,custom:{retained:'value'}}];
     const user={...users[0],email:'alice@example.test',phone:'+15555550123'};
+    let delayProfile=false,releaseProfile;
+    const profileGate=new Promise(resolve=>{releaseProfile=resolve;});
     let socialPending=false;
     let links=[],consents=[],sessions=[{id:'session-1',name:'Browser session'}];
     let integrations=[];
+    let themeInstalled=false;
     let keys=[];
     let siteSettings={dbMaxOpenConns:0,dbMaxIdleConns:0,dbConnMaxLifetime:0,recordRetentionDays:0};
     let receivers=[],receiverToken=0;
@@ -57,6 +60,10 @@ async function main() {
       if(endpoint==='/api/health')return reply(route,{status:'ok'});
       if(endpoint==='/api/get-setting')return reply(route,{status:'ok',data:siteSettings});
       if(endpoint==='/api/update-setting'){siteSettings=body;return reply(route,{status:'ok',data:true,recordRetentionApplied:true,poolSettingsApplied:false,applied:false});}
+      if(endpoint==='/api/upload-users-with-mfa'){
+        const failed=body.some(row=>row.totpSecret==='***');
+        return reply(route,{total:body.length,created:failed?0:body.length,failed:failed?body.length:0,errors:failed?['Invalid MFA enrollment; no accounts were created.']:[]});
+      }
       if(endpoint==='/api/telemetry/receivers'&&req.method()==='GET')return reply(route,{status:'ok',data:receivers});
       if(endpoint==='/api/telemetry/receivers'&&req.method()==='POST'){
         let existing=receivers.find(receiver=>receiver.provider===body.provider);
@@ -90,10 +97,14 @@ async function main() {
       if(endpoint==='/api/trust-application-credentials')return reply(route,{status:'ok'});
       if(endpoint==='/api/auth/code/start')return reply(route,{pending:true,expires_in:300,method:body.method});
       if(endpoint==='/api/get-integrations')return reply(route,{status:'ok',data:integrations});
-      if(endpoint==='/api/get-marketplace-index')return reply(route,{status:'ok',data:{integrations:[{id:'portal',name:{en:'Portal template'},latest:'1.0'},{id:'other',name:{en:'Other template'},latest:'1.0'},{id:'provider',name:{en:'OAuth provider'},latest:'1.0'}]}});
-      if(endpoint==='/api/get-marketplace-bundle')return reply(route,{status:'ok',data:{manifest:{id:url.searchParams.get('integrationId'),type:url.searchParams.get('integrationId')==='provider'?'provider':'app',version:'1.0',variables:url.searchParams.get('integrationId')==='provider'?[]:[{name:'appUrl',label:{en:'Application URL'},type:'url',required:true},{name:'secret',label:{en:'Integration secret'},type:'password',required:true}]}}});
-      if(endpoint==='/api/install-integration'){integrations=[{...body}];return reply(route,{status:'ok'});}
-      if(endpoint==='/api/delete-integration'){integrations=integrations.filter(i=>i.owner!==body.owner||i.name!==body.name);return reply(route,{status:'ok'});}
+      if(endpoint==='/api/get-marketplace-index')return reply(route,{status:'ok',data:{integrations:[{id:'portal',name:{en:'Portal template'},latest:'1.0'},{id:'other',name:{en:'Other template'},latest:'1.0'},{id:'provider',name:{en:'OAuth provider'},latest:'1.0'},{id:'theme',name:{en:'Portal theme'},latest:'1.0'}]}});
+      if(endpoint==='/api/get-marketplace-bundle'){
+        const id=url.searchParams.get('integrationId'),type=id==='provider'?'provider':id==='theme'?'theme':'app';
+        return reply(route,{status:'ok',data:{manifest:{id,type,version:'1.0',variables:type==='app'?[{name:'appUrl',label:{en:'Application URL'},type:'url',required:true},{name:'secret',label:{en:'Integration secret'},type:'password',required:true}]:[]}}});
+      }
+      if(endpoint==='/api/auth/branding')return reply(route,{status:'ok',data:themeInstalled&&['built-in/theme-app','theme-client'].includes(url.searchParams.get('application'))?{application:'built-in/theme-app',themeData:{isEnabled:true,colorPrimary:'#124678',borderRadius:12},formOffset:4,formCss:'body h2 { color: rgb(18, 70, 120); } .sidebar { display:none; }',formCssMobile:'h2 { color: rgb(40, 100, 80); }',formSideHtml:'<strong>Tenant portal</strong>',footerHtml:'<p>Tenant footer</p>'}:null});
+      if(endpoint==='/api/install-integration'){integrations=[{...body}];if(body.integrationId==='theme')themeInstalled=true;return reply(route,{status:'ok'});}
+      if(endpoint==='/api/delete-integration'){integrations=integrations.filter(i=>i.owner!==body.owner||i.name!==body.name);if(body.name==='theme')themeInstalled=false;return reply(route,{status:'ok'});}
       if(endpoint==='/api/login') {
         if(body.type==='code')return reply(route,body.code==='654321'?{token:'code-token',user}:{status:'error',msg:'Invalid sign-in proof'});
         if(body.type==='ldap')return reply(route,{token:'ldap-token',user});
@@ -111,7 +122,10 @@ async function main() {
       if(endpoint==='/api/auth/mock') {socialPending=true;return reply(route,{url:origin+'/?social=complete'});}
       if(endpoint==='/api/auth/mock/link'){links=[{provider_id:'provider-1',provider:'mock',display_name:'Mock provider'}];return reply(route,{url:origin+'/?social=linked'});}
       if(endpoint==='/api/auth/mock/unlink'){links=[];return reply(route,{status:'ok'});}
-      if(endpoint==='/api/get-account'||endpoint==='/api/userinfo')return reply(route,user);
+      if(endpoint==='/api/get-account'||endpoint==='/api/userinfo'){
+        if(endpoint==='/api/get-account'&&delayProfile){delayProfile=false;await profileGate;}
+        return reply(route,user);
+      }
       if(endpoint==='/api/users'&&req.method()==='GET')return reply(route,users);
       if(endpoint==='/api/users'&&req.method()==='POST'){users.push({...body,id:'user-new'});return reply(route,body);}
       if(endpoint.startsWith('/api/users/')&&req.method()==='PUT'){users=users.map(v=>v.id==='user-1'?{...v,...body}:v);return reply(route,body);}
@@ -187,6 +201,45 @@ async function main() {
     assert.equal(providerInstall.application,'portal');
     await page.getByRole('button',{name:'Preview OAuth provider',exact:true}).click();
     assert.equal(await page.getByLabel('Provider client secret',{exact:true}).inputValue(),'');
+    await page.getByRole('button',{name:'Preview Portal theme',exact:true}).click();
+    await page.getByRole('button',{name:'Install integration',exact:true}).click();
+    await page.getByText('Choose an application for the theme.',{exact:true}).waitFor();
+    await fill(page.getByRole('textbox',{name:'Theme application',exact:true}),'built-in/theme-app');
+    await page.getByRole('button',{name:'Install integration',exact:true}).click();
+    await page.getByText('Integration installed.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Sign in',exact:true}).first().click();
+    await fill(page.getByRole('textbox',{name:'Application',exact:true}),'built-in/theme-app');
+    await page.waitForFunction(()=>document.querySelector('.main').dataset.brandingApplication==='built-in/theme-app'&&getComputedStyle(document.querySelector('.main h2')).color==='rgb(18, 70, 120)');
+    assert.deepEqual(await page.locator('.main button').first().evaluate(node=>({color:getComputedStyle(node).backgroundColor,radius:getComputedStyle(node).borderRadius})),{color:'rgb(18, 70, 120)',radius:'12px'});
+    assert.equal(await page.locator('iframe[title="Application side panel"]').getAttribute('sandbox'),'');
+    assert.equal(await page.locator('iframe[title="Application footer"]').count(),1);
+    await page.frameLocator('iframe[title="Application side panel"]').getByText('Tenant portal',{exact:true}).waitFor();
+    await page.frameLocator('iframe[title="Application footer"]').getByText('Tenant footer',{exact:true}).waitFor();
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assert.equal(await page.locator('iframe[title="Application side panel"]').isVisible(),true);
+    assert.equal(await page.locator('.sidebar').isVisible(),true);
+    await page.setViewportSize({width:390,height:844});
+    await page.waitForFunction(()=>getComputedStyle(document.querySelector('.main h2')).color==='rgb(40, 100, 80)');
+    await page.frameLocator('iframe[title="Application footer"]').getByText('Tenant footer',{exact:true}).waitFor();
+    await page.setViewportSize({width:1440,height:1000});
+    await fill(page.getByRole('textbox',{name:'Application',exact:true}),'built-in/other-app');
+    await page.waitForFunction(()=>!document.querySelector('.casdog-auth-root')&&!document.querySelector('iframe[title="Application footer"]'));
+    await page.getByRole('button',{name:'Sign up',exact:true}).first().click();
+    await page.getByRole('heading',{name:'Create account',exact:true}).waitFor();
+    await fill(page.getByRole('textbox',{name:'Application',exact:true}),'built-in/theme-app');
+    await page.waitForFunction(()=>document.querySelector('.main').dataset.brandingApplication==='built-in/theme-app');
+    await page.getByRole('button',{name:'Authorize',exact:true}).click();
+    await page.getByRole('heading',{name:'Authorize application',exact:true}).waitFor();
+    await fill(page.getByRole('textbox',{name:'Client ID',exact:true}),'theme-client');
+    await page.waitForFunction(()=>document.querySelector('.main').dataset.brandingApplication==='built-in/theme-app');
+    await page.getByRole('button',{name:'Marketplace',exact:true}).click();
+    await page.waitForFunction(()=>!document.querySelector('.casdog-auth-root'));
+    await page.getByRole('button',{name:'Uninstall built-in/theme',exact:true}).click();
+    await page.getByText('Integration uninstalled.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Sign in',exact:true}).first().click();
+    await fill(page.getByRole('textbox',{name:'Application',exact:true}),'built-in/theme-app');
+    await page.waitForFunction(()=>!document.querySelector('.casdog-auth-root'));
+    await page.getByRole('button',{name:'Marketplace',exact:true}).click();
     await page.setViewportSize({width:390,height:844});
     await page.evaluate(()=>new Promise(requestAnimationFrame));
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
@@ -273,6 +326,7 @@ async function main() {
     assert.equal(receivers[0].token,undefined);
     await page.getByRole('button',{name:'Revoke receiver receiver-1',exact:true}).click();
     await page.getByText('Receiver revoked.',{exact:true}).waitFor();
+    await page.getByText(/^Receiver .* · built-in · Disabled$/).waitFor();
     assert.equal(await page.getByLabel('Exporter token',{exact:true}).count(),0);
     await page.getByRole('button',{name:'Products',exact:true}).click();
     await fill(page.getByRole('textbox',{name:'Name',exact:true}),'recharge-check');
@@ -304,6 +358,48 @@ async function main() {
     await page.getByText('Resource saved.',{exact:true}).waitFor();
     const syncerWrite=calls.find(call=>call.endpoint==='/api/syncers'&&call.method==='POST').body;
     assert.equal(syncerWrite.user,'directory-reader');assert.equal(syncerWrite.user_name,undefined);assert.equal(syncerWrite.table_columns[0].is_key,true);assert.equal(syncerWrite.is_read_only,true);
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'SCIM'});
+    await page.getByText('SCIM reads users from Host/Users.',{exact:false}).waitFor();
+    assert.equal(await page.getByRole('textbox',{name:'Database',exact:true}).isVisible(),false);
+    await fill(page.getByRole('textbox',{name:'Host',exact:true}),'https://directory.example/scim/v2');
+    await fill(page.getByLabel('Password',{exact:true}),'fixture-scim-token');
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();
+    await page.getByText('Resource saved.',{exact:true}).waitFor();
+    const scimWrite=calls.filter(call=>call.endpoint==='/api/syncers'&&call.method==='POST').at(-1).body;
+    assert.equal(scimWrite.type,'SCIM');assert.equal(scimWrite.user,'');assert.equal(scimWrite.password,'fixture-scim-token');
+    assert.deepEqual(scimWrite.table_columns,[]);assert.equal(scimWrite.is_read_only,true);
+    await page.getByRole('button',{name:'Restore users and MFA',exact:true}).first().click();
+    await page.getByRole('heading',{name:'Restore users and MFA',exact:true}).waitFor();
+    const chooseBackup=async value=>{
+      const file=path.join(artifacts,'restore-upload.json');
+      await fs.writeFile(file,JSON.stringify(value));
+      try {
+        const [chooser]=await Promise.all([page.waitForEvent('filechooser'),page.getByRole('button',{name:'Casdoor JSON backup',exact:true}).click()]);
+        // A real file path lets Chromium emit the trusted chooser event that
+        // Glory requires; payload-based synthetic change events are rejected.
+        await chooser.setFiles(file);
+        await page.getByText('Ready to restore 1 accounts.',{exact:false}).waitFor();
+      } finally {await fs.unlink(file).catch(()=>{});}
+    };
+    const rawSeed='GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ',rawRecovery='fixture-original-uuid-recovery';
+    await chooseBackup({users:[{owner:'built-in',name:'restore-fixture',password:'RestorePassword42!',passwordType:'plain',preferredMfaType:'app',totpSecret:rawSeed,recoveryCodes:[rawRecovery]}],providers:[{clientSecret:'unrelated-provider-secret'}],padding:'x'.repeat(70000)});
+    const visibleRestore=await page.locator('body').innerText();assert.ok(!visibleRestore.includes(rawSeed)&&!visibleRestore.includes(rawRecovery));
+    assert.ok(!(await page.evaluate(()=>JSON.stringify({...localStorage,...sessionStorage}))).includes(rawSeed));
+    await page.getByRole('button',{name:'Restore users and MFA',exact:true}).last().click();
+    await page.getByText('Confirm that this is a trusted, current MFA backup.',{exact:true}).waitFor();
+    assert.equal(calls.filter(call=>call.endpoint==='/api/upload-users-with-mfa').length,0);
+    await page.getByRole('checkbox',{name:'I am restoring a current, unmasked backup with MFA credentials',exact:true}).check();
+    await page.getByRole('button',{name:'Restore users and MFA',exact:true}).last().click();
+    await page.getByText('Restored 1 accounts with their supported MFA credentials.',{exact:true}).waitFor();
+    const restoredPayload=calls.find(call=>call.endpoint==='/api/upload-users-with-mfa');
+    assert.equal(Array.isArray(restoredPayload.body),true);assert.equal(restoredPayload.body[0].totpSecret,rawSeed);
+    assert.equal(restoredPayload.raw.includes('unrelated-provider-secret'),false);assert.equal(restoredPayload.query.owner,'built-in');
+    await page.getByText('No backup ready.',{exact:true}).waitFor();
+    await chooseBackup([{owner:'built-in',name:'masked-mfa',totpSecret:'***',preferredMfaType:'app'}]);
+    await page.getByRole('checkbox',{name:'I am restoring a current, unmasked backup with MFA credentials',exact:true}).check();
+    await page.getByRole('button',{name:'Restore users and MFA',exact:true}).last().click();
+    await page.getByText('Restore rejected. No accounts were created; review the errors below.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Clear backup',exact:true}).click();await page.getByText('No backup ready.',{exact:true}).waitFor();
     await page.getByRole('button',{name:'Users',exact:true}).click();
     await page.getByRole('button',{name:'Alice',exact:true}).click();
     const display=page.getByRole('textbox',{name:'Display name',exact:true});
@@ -344,7 +440,18 @@ async function main() {
     assert.equal(providerWrite.scopes,'127.0.0.1/32');
     assert.equal(providerWrite.content,'8080');
 
+    delayProfile=true;
+    const delayedProfile=page.waitForRequest(request=>new URL(request.url()).pathname==='/api/get-account');
     await page.getByRole('button',{name:'Account',exact:true}).click();
+    await page.getByRole('heading',{name:'Profile',exact:true}).waitFor();
+    await delayedProfile;
+    assert.equal(await page.getByRole('textbox',{name:'Display name',exact:true}).count(),0);
+    assert.equal(await page.getByRole('button',{name:'Save profile',exact:true}).count(),0);
+    releaseProfile();
+    await fill(page.getByRole('textbox',{name:'Display name',exact:true}),'Loaded profile edit');
+    await page.getByRole('button',{name:'Save profile',exact:true}).click();
+    await page.getByText('Profile saved.',{exact:true}).waitFor();
+    assert.equal(calls.filter(call=>call.endpoint==='/api/users/user-1'&&call.method==='PUT').at(-1).body.display_name,'Loaded profile edit');
     await page.getByRole('button',{name:'Email and phone',exact:true}).click();
     await fill(page.getByRole('textbox',{name:'New contact',exact:true}),'new@example.test');
     await page.getByRole('button',{name:'Send contact code'}).click();

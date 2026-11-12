@@ -1,0 +1,480 @@
+{
+  "date": "2026-11-12",
+  "base_commit": "3c3f6e8009c4f2789a31b485a6d88e2c4b300c31",
+  "reference_revision": "47da539f886d5b09d2c35cf6ae78d8b6b5f30a43",
+  "scope": "Phase 9 implementation and directly verified regressions; overall Casdoor equivalence remains incomplete.",
+  "flat_route_declarations": {
+    "matched": 299,
+    "expected": 299,
+    "meaning": "Static declarations only; not functional completion."
+  },
+  "migrations": [
+    "036_subscription_renewal.sql",
+    "037_syncer_reconciliation.sql",
+    "038_telemetry_receivers.sql",
+    "039_record_retention.sql"
+  ],
+  "implementation": {
+    "renewal": [
+      "Beneficiary consent tied to a proven paid purchase, provider fingerprint, period, exact currency and current amount cap; atomic validation of the UI quote.",
+      "Persistent due work, unique cycle orders, fenced leases, same-order retry after insufficient balance, precise target subscription fulfillment and current organization validation at actual debit.",
+      "Automatic wallet debit; external providers create action-required draft orders until the user explicitly starts payment. No implied off-session mandate."
+    ],
+    "reconciliation": [
+      "Independent worker resumes previously accepted remote payments with the original idempotency key and authenticated amount/currency validation.",
+      "Already accepted external funds remain reconcilable when the organization is disabled; this does not authorize new wallet debits."
+    ],
+    "syncers": [
+      "Durable three-way local/source baselines, credential HMAC fingerprints, conflicts, outbound operations and compare-and-set PostgreSQL writeback under source row locks.",
+      "Recovery after source commit and before local acknowledgement does not repeat remote writes; unchanged password columns are omitted from outbound updates.",
+      "Complete-snapshot source deletion only forbids managed accounts; failed/partial reads do not delete. Manual local changes are protected during source recovery.",
+      "Explicit reversible Values and affiliation mappings; unrepresentable password algorithm changes conflict instead of exporting a mislabeled hash."
+    ],
+    "telemetry": [
+      "OTLP/HTTP protobuf traces, metrics and logs at /api/v1/* and /v1/*, including fully consumed gzip members, persisted original wire bytes and normal Entry API interoperability.",
+      "Real administrator approval binds tenant/provider/application; one-time opaque token display, stored digest, immediate rotation/revocation and explicit direct-peer CIDR authentication.",
+      "Structural preflight, 4 MiB compressed and expanded body limits, 2 MiB Entry JSON limit, shared database budgets and atomic Entry/raw-batch storage."
+    ],
+    "retention_and_frontend": [
+      "Current organization/global audit retention policies, zero semantics, bounded cleanup, shared advisory lock and failure before deletion on malformed policy.",
+      "Glory/Sapid global settings, telemetry receiver management and beneficiary renewal consent; receiver revocation refreshes list and editor state.",
+      "Pool settings are persisted but explicitly reported as unapplied; no false live reconfiguration claim."
+    ],
+    "import_hardening": [
+      "Reject masked Casdoor MFA preferences, including unknown and whitespace-only preferences, Radius/Push enabled flags and malformed types instead of creating password-only accounts.",
+      "A rejected enrollment marker prevents every row in the import batch from being inserted; valid explicitly disabled MFA profiles still authenticate."
+    ]
+  },
+  "validation": {
+    "status": "Final full backend and browser regressions passed.",
+    "targeted": {
+      "renewal": 8,
+      "syncer": 9,
+      "telemetry": 12
+    },
+    "frontend": {
+      "native_tests": 7,
+      "wasm_check": "passed",
+      "trunk_release": "passed",
+      "browser_fixtures": "passed"
+    },
+    "browser": {
+      "checks": 20,
+      "passed": true,
+      "api_interception": false
+    },
+    "artifacts": [
+      "target/phase9/backend-tests-final.log",
+      "target/phase9/browser-e2e-final.log",
+      "target/phase9/browser-e2e/results.json",
+      "target/phase9/renewal-targeted.log",
+      "target/phase9/syncer-targeted.log",
+      "target/phase9/telemetry-targeted.log",
+      "web/target/phase9-native-tests-final.log",
+      "web/target/phase9-wasm-check-final.log",
+      "web/target/phase9-trunk-build-final.log",
+      "web/target/phase9-browser-fixtures-final.log",
+      "target/phase9/test-summary.json",
+      "target/phase9/final-migrations.log",
+      "target/phase9/browser-migrations-final.log",
+      "target/phase9/backend-build-crash.log",
+      "target/phase9/final-check.log",
+      "target/phase9/format-check-final.log"
+    ],
+    "fresh_migrations": "001-039 applied to independent final backend and browser databases; a separate PostgreSQL source database was used.",
+    "backend_command": "cargo test --offline --locked --workspace --tests --no-fail-fast --jobs 1 -- --include-ignored --test-threads=1",
+    "backend": {
+      "programs": 33,
+      "passed_executions": 492,
+      "failed": 0,
+      "ignored": 0,
+      "explicit_postgresql_functions_verified": 165,
+      "program_results": [
+        {
+          "program": "unittests src/lib.rs",
+          "passed": 38,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "unittests src/main.rs",
+          "passed": 38,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/api_parity_tests.rs",
+          "passed": 179,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/audit_records_tests.rs",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/auth_security_tests.rs",
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/authorization_tests.rs",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/commerce_checkout_tests.rs",
+          "passed": 25,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/commerce_renewal_tests.rs",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/import_password_tests.rs",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/key_credentials_tests.rs",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/legacy_crud_tests.rs",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/mfa_replay_tests.rs",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/parity_operations_tests.rs",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/parity_resources_tests.rs",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/parity_system_tests.rs",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/password_mfa_tests.rs",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/password_reset_tests.rs",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/primary_auth_tests.rs",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/protocol_gaps_tests.rs",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/runtime_settings_tests.rs",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/saml_signing_tests.rs",
+          "passed": 23,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/social_link_tests.rs",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/social_login_tests.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/social_mfa_tests.rs",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/social_state_tests.rs",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/spnego_tests.rs",
+          "passed": 16,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/storage_phase6_tests.rs",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/store_tests.rs",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/syncer_execution_tests.rs",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/system_gaps_tests.rs",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/telemetry_tests.rs",
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/verification_security_tests.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "tests/webauthn_tests.rs",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "verified_postgresql_functions": [
+        "api_parity_tests.rs::casdoor_flat_form_endpoints_db_parity",
+        "api_parity_tests.rs::full_login_flow",
+        "api_parity_tests.rs::crud_users_full_cycle",
+        "api_parity_tests.rs::oauth2_authorization_code_flow",
+        "audit_records_tests.rs::audit_filter_persists_long_service_actor_and_record_api_reads_real_timestamp",
+        "audit_records_tests.rs::audit_migration_preserves_legacy_actor_and_database_timezone_instant",
+        "authorization_tests.rs::rest_and_scim_enforce_actual_owner_lists_self_fields_and_foreign_keys",
+        "authorization_tests.rs::mcp_scopes_exact_applications_masks_secrets_and_rejects_nonadmins",
+        "authorization_tests.rs::messaging_validates_real_credentials_and_provider_tenant_before_delivery",
+        "authorization_tests.rs::impersonation_requires_live_original_admin_credentials_and_active_session",
+        "authorization_tests.rs::application_login_permissions_use_tenant_scoped_normalized_role_membership",
+        "auth_security_tests.rs::login_requires_valid_enrolled_totp_before_token_issuance",
+        "auth_security_tests.rs::repeated_invalid_mfa_locks_account_without_password_reset_bypass",
+        "auth_security_tests.rs::recovery_code_can_only_be_consumed_once_concurrently",
+        "auth_security_tests.rs::imported_bcrypt_password_change_updates_algorithm_metadata",
+        "auth_security_tests.rs::email_mfa_codes_are_bound_to_account_expiry_and_single_use",
+        "auth_security_tests.rs::mfa_http_enrollment_requires_proof_and_json_delete_removes_challenge",
+        "commerce_checkout_tests.rs::async_checkout_reserves_last_item_reuses_payment_and_releases_once",
+        "commerce_checkout_tests.rs::buy_product_manual_settlement_requires_tenant_admin_and_legacy_cannot_bypass",
+        "commerce_checkout_tests.rs::signed_notifications_validate_amount_currency_time_and_settle_once",
+        "commerce_checkout_tests.rs::failed_notification_releases_durable_stock_and_coupon_exactly_once",
+        "commerce_checkout_tests.rs::real_router_accepts_signed_public_webhooks_and_authenticates_manual_notifications",
+        "commerce_checkout_tests.rs::priced_plan_balance_purchase_and_concurrent_renewals_extend_one_subscription",
+        "commerce_checkout_tests.rs::plan_checkout_rejects_wrong_tenant_binding_pricing_and_subcent_prices_before_charging",
+        "commerce_checkout_tests.rs::plan_checkout_snapshots_role_and_price_and_only_paid_grants_access",
+        "commerce_checkout_tests.rs::recharge_configuration_rejects_invalid_amounts_and_signed_payment_credits_original_user_once",
+        "commerce_checkout_tests.rs::migration_backfills_aggregate_finite_and_unlimited_stock_preserving_terminal_history",
+        "commerce_checkout_tests.rs::migration_rejects_invalid_legacy_checkout_and_rolls_back_all_ddl_and_inventory",
+        "commerce_checkout_tests.rs::plan_and_recharge_flow_work_with_one_database_connection",
+        "commerce_checkout_tests.rs::paid_plan_authorizes_application_diesel_and_casbin_and_revokes_without_cached_grouping",
+        "commerce_checkout_tests.rs::zero_decimal_and_special_stripe_recharge_notifications_credit_exact_major_units",
+        "commerce_checkout_tests.rs::catalog_soft_delete_retains_pending_paid_purchase_history_and_settles_snapshots",
+        "commerce_checkout_tests.rs::durable_checkout_recovery_survives_crash_and_preserves_exact_idempotent_request",
+        "commerce_checkout_tests.rs::paypal_capture_retries_reuse_persistent_key_and_reconcile_a_lost_success_response",
+        "commerce_checkout_tests.rs::concurrent_instances_capture_once_and_pending_capture_never_grants_paid",
+        "commerce_checkout_tests.rs::stripe_cancellation_releases_only_after_remote_expiry_and_paid_race_stays_reserved",
+        "commerce_checkout_tests.rs::real_reconcile_routes_preserve_beneficiary_after_rename_and_deny_reused_username",
+        "commerce_checkout_tests.rs::ordinary_order_buyer_is_pinned_and_reused_username_cannot_read_pay_cancel_or_reconcile",
+        "commerce_checkout_tests.rs::buyer_migration_uses_uuid_evidence_and_never_guesses_reused_historical_names",
+        "commerce_renewal_tests.rs::balance_due_work_is_single_debit_single_period_across_pools_and_restart",
+        "commerce_renewal_tests.rs::insufficient_balance_retries_same_order_and_optout_stops_pending_work",
+        "commerce_renewal_tests.rs::current_catalog_and_consent_limits_block_debit_without_permanent_role_grants",
+        "commerce_renewal_tests.rs::renewal_consent_requires_beneficiary_and_finite_proven_purchase_legacy_flags_do_not_charge",
+        "commerce_renewal_tests.rs::external_renewal_is_one_explicit_action_order_and_never_background_offsession_charge",
+        "commerce_renewal_tests.rs::background_queue_recovers_unknown_checkout_reuses_key_and_rejects_wrong_money_before_paid",
+        "commerce_renewal_tests.rs::displayed_renewal_quote_cannot_authorize_a_concurrent_price_increase",
+        "commerce_renewal_tests.rs::disabled_or_deleted_organization_blocks_new_debits_and_restores_same_due_work",
+        "import_password_tests.rs::multipart_casdoor_xlsx_and_json_hash_import_login_and_upgrade_without_double_hashing",
+        "import_password_tests.rs::import_rejects_ordinary_users_cross_tenant_rows_and_invalid_batches_without_partial_writes",
+        "import_password_tests.rs::legacy_add_user_accepts_declared_hash_and_get_user_masked_update_preserves_credentials",
+        "import_password_tests.rs::ordinary_csv_plain_password_is_preserved_exactly_but_a_masked_backup_cannot_restore_it",
+        "import_password_tests.rs::csv_enabled_mfa_is_not_discarded_and_directory_bindings_preserve_real_legacy_ids",
+        "import_password_tests.rs::masked_casdoor_mfa_markers_never_become_password_only_accounts_or_partially_import",
+        "key_credentials_tests.rs::key_crud_generated_user_credentials_authenticate_real_protected_apis_and_mask_lists",
+        "key_credentials_tests.rs::key_state_expiry_deletion_and_current_subject_org_revocation_apply_across_instances",
+        "key_credentials_tests.rs::application_keys_static_provenance_inherits_only_tenant_admin_and_never_user_session",
+        "key_credentials_tests.rs::unverified_and_dynamic_applications_require_current_scoped_policy_and_cannot_upgrade_or_read_credentials",
+        "key_credentials_tests.rs::legacy_user_keys_client_basic_and_bad_explicit_sources_never_fall_back",
+        "legacy_crud_tests.rs::legacy_crud_filters_masks_and_enforces_tenant_and_self_access",
+        "mfa_replay_tests.rs::totp_step_is_atomic_across_pools_and_transaction_rollback_preserves_proof",
+        "mfa_replay_tests.rs::enrollment_step_cannot_be_reused_by_legacy_login_and_recovery_remains_available",
+        "mfa_replay_tests.rs::password_and_social_challenges_compete_for_the_same_totp_step",
+        "mfa_replay_tests.rs::faceid_nonce_is_atomic_and_enrolled_mfa_uses_the_common_browser_challenge",
+        "mfa_replay_tests.rs::faceid_without_mfa_preserves_receipt_and_failed_embedding_consumes_nonce",
+        "mfa_replay_tests.rs::faceid_rechecks_tenant_application_account_and_enrollment_before_authentication",
+        "mfa_replay_tests.rs::faceid_email_only_mfa_requires_the_same_browser_bound_delivery_proof",
+        "parity_operations_tests.rs::coupons_checkout_settle_once_and_failed_payment_releases_reservation",
+        "parity_operations_tests.rs::dashboard_subscription_contact_and_atomic_permissions_respect_tenants",
+        "parity_operations_tests.rs::webhook_replay_records_real_http_failure_success_and_tenant_scope",
+        "parity_resources_tests.rs::resource_crud_persists_secrets_preserves_identity_and_enforces_tenants",
+        "parity_resources_tests.rs::marketplace_install_uninstall_is_atomic_and_links_real_resources",
+        "parity_resources_tests.rs::mcp_access_token_is_app_bound_read_only_short_lived_and_denies_disabled_user",
+        "parity_resources_tests.rs::mcp_access_token_rechecks_logout_epoch_after_waiting_for_account_lock",
+        "parity_system_tests.rs::duplicate_session_is_exact_and_does_not_disclose_another_users_session",
+        "parity_system_tests.rs::global_forms_returns_persisted_schemas_only_to_global_admin",
+        "parity_system_tests.rs::discovery_requires_configured_tenant_issuer_and_checks_document_issuer",
+        "parity_system_tests.rs::first_administrator_password_is_atomic_and_cannot_be_reset_through_bootstrap",
+        "password_mfa_tests.rs::password_proof_is_required_before_delivery_and_email_is_browser_bound_single_use",
+        "password_mfa_tests.rs::password_mfa_rejects_generic_and_other_browser_codes_and_caps_attempts",
+        "password_mfa_tests.rs::password_mfa_sms_checks_current_contact_expiry_origin_and_cancel",
+        "password_mfa_tests.rs::password_mfa_revalidates_password_logout_organization_and_application",
+        "password_mfa_tests.rs::password_mfa_oauth_code_is_atomic_and_revalidates_redirect_grant_and_public_pkce",
+        "password_mfa_tests.rs::password_mfa_totp_and_recovery_require_a_separate_atomic_browser_completion",
+        "password_mfa_tests.rs::password_challenge_creation_and_delivery_are_rate_and_application_scoped",
+        "password_reset_tests.rs::reset_dispatch_policy_hash_and_atomic_session_revocation",
+        "password_reset_tests.rs::reset_rejects_wrong_tenant_email_application_and_expired_codes",
+        "password_reset_tests.rs::reset_limits_guessing_and_resends_and_hides_unknown_users",
+        "password_reset_tests.rs::reset_concurrent_consume_has_exactly_one_winner",
+        "primary_auth_tests.rs::email_first_factor_is_browser_bound_single_use_and_oauth_context_is_immutable",
+        "primary_auth_tests.rs::sms_delivery_and_application_channel_rules_are_enforced_before_and_after_proof",
+        "primary_auth_tests.rs::code_error_budget_persists_across_new_browser_proofs_and_resends_are_rate_limited",
+        "primary_auth_tests.rs::generic_recovery_and_mfa_codes_cannot_replace_the_first_factor",
+        "primary_auth_tests.rs::code_first_factor_requires_an_independent_mfa_and_email_only_mfa_fails_closed",
+        "primary_auth_tests.rs::directory_first_factor_uses_real_bind_and_never_falls_back_to_local_password",
+        "primary_auth_tests.rs::code_proof_rechecks_expiry_session_epoch_organization_and_account_before_jwt",
+        "primary_auth_tests.rs::directory_wrong_credentials_lock_persistently_before_another_bind",
+        "primary_auth_tests.rs::directory_login_rechecks_local_tenant_account_application_and_provider_during_mfa",
+        "protocol_gaps_tests.rs::device_pending_poll_throttle_cancel_and_expiry_are_durable",
+        "protocol_gaps_tests.rs::device_cross_instance_grant_and_browser_completion_are_consumed_once",
+        "protocol_gaps_tests.rs::device_approval_enforces_tenant_client_and_enabled_grant",
+        "protocol_gaps_tests.rs::device_approval_rechecks_selective_revocation_global_logout_and_password_changes",
+        "protocol_gaps_tests.rs::transcript_reads_real_storage_bounds_preview_and_rejects_tenant_or_path_escape",
+        "protocol_gaps_tests.rs::mcp_sync_negotiates_http_session_sse_pagination_and_preserves_denials",
+        "protocol_gaps_tests.rs::transcript_http_upload_and_preview_use_provider_entry_and_resource_apis",
+        "protocol_gaps_tests.rs::ordinary_upload_download_delete_preserves_legacy_references_and_denies_other_tenants",
+        "protocol_gaps_tests.rs::implicit_local_upload_is_resolved_from_resource_owner_for_global_and_ordinary_actors",
+        "runtime_settings_tests.rs::settings_api_validates_real_global_admin_and_reports_retention_separately_from_unapplied_pool_settings",
+        "runtime_settings_tests.rs::record_retention_applies_native_and_legacy_org_overrides_global_defaults_and_builtin_orphan_policy",
+        "runtime_settings_tests.rs::cleanup_uses_shared_policy_and_advisory_lock_and_rejects_malformed_policy_without_deleting",
+        "social_link_tests.rs::authenticated_link_callback_then_social_signin_returns_the_original_account",
+        "social_link_tests.rs::linking_rejects_identity_theft_cross_tenant_stale_session_and_conflicting_rebind",
+        "social_link_tests.rs::competing_bindings_have_one_winner_and_imported_duplicates_fail_closed",
+        "social_link_tests.rs::unlink_requires_policy_recent_session_and_another_usable_signin_method",
+        "social_link_tests.rs::linking_rechecks_logout_epoch_and_requires_recent_session",
+        "social_link_tests.rs::binding_lock_wait_cannot_extend_oauth_or_session_lifetime",
+        "social_login_tests.rs::social_browser_flow_is_scoped_single_use_and_does_not_link_claimed_email",
+        "social_mfa_tests.rs::social_totp_challenge_issues_no_jwt_until_proof_and_is_single_use",
+        "social_mfa_tests.rs::social_recovery_consumption_is_atomic_across_instances",
+        "social_mfa_tests.rs::social_pending_factor_rechecks_expiry_account_tenant_identity_and_credential_epochs",
+        "social_mfa_tests.rs::social_mfa_attempt_limit_survives_instance_switch",
+        "social_mfa_tests.rs::social_email_factor_rejects_other_completion_and_generic_codes",
+        "social_mfa_tests.rs::social_mfa_sender_uses_enrolled_contact_and_scoped_provider",
+        "social_mfa_tests.rs::social_sms_factor_origin_cancel_and_method_changes",
+        "social_mfa_tests.rs::social_pending_factor_rechecks_organization_provider_and_application_permission",
+        "social_mfa_tests.rs::social_enabled_but_unusable_mfa_never_degrades_to_no_factor",
+        "social_mfa_tests.rs::enrollment_and_social_completion_use_the_same_account_factor_lock_order",
+        "social_state_tests.rs::oauth_flow_survives_instance_restart_and_is_bound_to_browser_provider",
+        "social_state_tests.rs::oauth_flow_concurrent_callback_has_one_winner_and_expired_flow_is_rejected",
+        "social_state_tests.rs::shared_completion_consumption_expiry_and_failed_attempt_budget",
+        "social_state_tests.rs::completion_proof_updates_and_consumption_follow_caller_transaction",
+        "social_state_tests.rs::shared_capacity_limit_cannot_be_bypassed_by_another_instance",
+        "social_state_tests.rs::logout_waits_for_user_lock_then_commits_revocation_and_epoch_together",
+        "storage_phase6_tests.rs::transcript_s3_normal_upload_preview_and_resource_apis_persist_only_successful_objects",
+        "storage_phase6_tests.rs::transcript_s3_api_rechecks_tenant_provider_owner_keys_and_private_dns_on_every_read_write",
+        "store_tests.rs::store_catalog_is_tenant_scoped_paginated_and_never_exposes_provider_secrets",
+        "store_tests.rs::store_purchases_show_only_current_buyer_and_keep_paid_benefits_after_account_rename",
+        "store_tests.rs::compatibility_commerce_lists_accept_current_names_or_ids_and_keep_uuid_ownership_after_rename",
+        "syncer_execution_tests.rs::normal_syncer_crud_uses_real_schema_masks_credentials_and_imports_external_postgres",
+        "syncer_execution_tests.rs::password_mapping_is_explicit_idempotent_and_failed_batches_roll_back_without_leaking_secrets",
+        "syncer_execution_tests.rs::shared_scheduler_fences_simultaneous_runs_recovers_expired_leases_and_persists_due_disabled_state",
+        "syncer_execution_tests.rs::real_ldap_bind_search_uses_mapping_preserves_password_and_tenant_and_rejects_bad_bind",
+        "syncer_execution_tests.rs::complete_snapshot_deletions_only_forbid_managed_accounts_and_values_affiliation_are_applied",
+        "syncer_execution_tests.rs::postgres_bidirectional_sync_uses_persisted_three_way_baselines_and_normal_user_crud",
+        "syncer_execution_tests.rs::queued_writeback_compares_source_under_lock_and_recovers_after_remote_commit_without_reapplying",
+        "syncer_execution_tests.rs::writable_credentials_preserve_source_encoding_reject_algorithm_changes_and_block_iam_as_source",
+        "syncer_execution_tests.rs::postgres_writeback_reverses_affiliation_and_boolean_values_with_typed_numeric_keys",
+        "system_gaps_tests.rs::upgrades_require_pinned_manifest_verify_package_and_restore_failed_restart",
+        "system_gaps_tests.rs::security_scan_probes_fingerprints_persists_metadata_and_blocks_tenant_private_urls",
+        "system_gaps_tests.rs::intranet_discovery_initializes_real_mcp_and_rejects_public_or_oversized_ranges",
+        "system_gaps_tests.rs::identity_verification_uses_configured_provider_and_updates_only_verified_subject",
+        "system_gaps_tests.rs::rest_provider_configuration_persists_scan_fields_and_preserves_omitted_values",
+        "telemetry_tests.rs::actual_http_protobuf_and_gzip_all_signals_commit_tenant_bound_entries_and_raw_bytes",
+        "telemetry_tests.rs::receiver_admin_scope_masking_token_preservation_rotation_and_revocation_work_across_pools",
+        "telemetry_tests.rs::source_ip_requires_explicit_unique_rules_ignores_forwarded_and_never_falls_back_on_bad_token",
+        "telemetry_tests.rs::malformed_and_semantic_failures_never_create_entries_and_persist_the_error_budget",
+        "telemetry_tests.rs::receiver_rate_budget_is_atomic_across_concurrent_instance_pools",
+        "telemetry_tests.rs::provider_application_and_organization_changes_revoke_live_approval",
+        "telemetry_tests.rs::storage_failure_returns_retryable_error_and_rolls_back_both_raw_batch_and_entry",
+        "telemetry_tests.rs::upstream_agent_crud_masks_tokens_in_detail_and_list_and_preserves_masked_updates",
+        "verification_security_tests.rs::contact_change_rejects_other_user_tenant_purpose_expired_and_replayed_proofs",
+        "webauthn_tests.rs::registration_state_is_shared_session_bound_and_consumed_once",
+        "webauthn_tests.rs::concurrent_registration_completions_consume_one_proof_across_instances",
+        "webauthn_tests.rs::registration_rejects_expired_revoked_and_impersonated_sessions",
+        "webauthn_tests.rs::unrelated_account_cannot_consume_registration_and_pending_state_is_bounded",
+        "webauthn_tests.rs::registration_finish_rejects_cross_origin_without_consuming_state"
+      ]
+    },
+    "build_recovery": "An earlier final rebuild aborted on rustc memory allocation failure. Preserved backend-build-crash.log; single-job rebuild and complete suite passed.",
+    "final_checks": {
+      "backend_check": "cargo check --offline --locked -p casdog --tests --jobs 1: passed",
+      "rust_format": "passed",
+      "git_whitespace": "passed"
+    }
+  },
+  "remaining_priorities": [
+    "Fix currently exposed Keycloak credential Base64/algorithm/salt semantics and add real credential-table login regressions; current PostgreSQL/LDAP Syncer tests do not cover Keycloak.",
+    "Implement actual main SQLx/Diesel pool limit/lifetime application with safe request and worker handover; do not map maximum idle to minimum connections or alter external Syncer pools.",
+    "Marketplace theme installation, complete application styling backup/uninstall recovery and actual safe Glory authentication-page rendering.",
+    "Dedicated trusted MFA enrollment restore, preserving factor and one-use recovery-code semantics; current generic import deliberately rejects enrollment.",
+    "Refunds, benefit reversals, external off-session renewal mandates and real production gateway acceptance.",
+    "Additional verified Syncer sources and directory pagination; LDAP/Keycloak writeback is explicitly unsupported and empty source fields currently preserve local values.",
+    "Kerberos ticket validation, SAML/protocol interoperability, remaining dedicated UI and real provider/cluster/hardware deployment acceptance."
+  ],
+  "corrections": [
+    "The pinned upstream Agent exposes management CRUD only; an invented Agent execution protocol is not an upstream parity requirement.",
+    "Telemetry suite actually contains 12 tests (4 unit and 8 PostgreSQL), not the earlier verbal count of 13."
+  ]
+}

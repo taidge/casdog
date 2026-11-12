@@ -161,6 +161,20 @@ pub async fn upload_users(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<BulkUploadResponse>, AppError> {
+    upload_users_mode(depot, req, false).await
+}
+#[endpoint(tags("Resources"), summary = "Restore users from a trusted MFA backup")]
+pub async fn upload_users_with_mfa(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> Result<Json<BulkUploadResponse>, AppError> {
+    upload_users_mode(depot, req, true).await
+}
+async fn upload_users_mode(
+    depot: &mut Depot,
+    req: &mut Request,
+    restore: bool,
+) -> Result<Json<BulkUploadResponse>, AppError> {
     let principal = crate::hoops::authz::Principal::from_depot(depot)?;
     if !principal.admin || principal.is_application() {
         return Err(AppError::Authorization(
@@ -175,13 +189,16 @@ pub async fn upload_users(
     let (bytes, filename, owner) = if content_type.split(';').next() == Some("application/json") {
         let owner = req.query::<String>("owner");
         let bytes = req
-            .payload()
+            .payload_with_max_size(crate::services::user_import_service::MAX_UPLOAD)
             .await
             .map_err(|_| AppError::Validation("Invalid upload body".into()))?
             .to_vec();
         (bytes, "users.json".to_owned(), owner)
     } else if content_type.starts_with("multipart/form-data") {
-        let owner = req.form::<String>("owner").await;
+        req.set_secure_max_size(crate::services::user_import_service::MAX_UPLOAD + 64 * 1024);
+        let owner = req
+            .query::<String>("owner")
+            .or(req.form::<String>("owner").await);
         let file = req
             .file("file")
             .await
@@ -200,6 +217,17 @@ pub async fn upload_users(
         ));
     };
     let records = crate::services::user_import_service::parse_upload(&bytes, &filename)?;
+    if restore {
+        return Ok(Json(
+            crate::services::user_import_service::import_users_with_mfa(
+                &pg_pool,
+                &principal,
+                owner.as_deref(),
+                records,
+            )
+            .await?,
+        ));
+    }
     Ok(Json(
         crate::services::user_import_service::import_users(
             &pg_pool,

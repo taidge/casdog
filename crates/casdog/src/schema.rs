@@ -225,6 +225,9 @@ diesel::table! {
         // 011 logout
         logout_url -> Nullable<VarChar>,
         logout_redirect_uris -> Nullable<Text>,
+        theme_data -> Nullable<Jsonb>,
+        footer_html -> Nullable<Text>,
+        form_background_url_mobile -> Nullable<VarChar>,
     }
 }
 
@@ -500,8 +503,8 @@ diesel::table! {
         host -> VarChar,
         port -> Integer,
         #[sql_name = "user"]
-        user_name -> VarChar,
-        password -> VarChar,
+        user_name -> Text,
+        password -> Text,
         #[sql_name = "database"]
         database_name -> Nullable<VarChar>,
         #[sql_name = "table"]

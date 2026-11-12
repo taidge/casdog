@@ -227,6 +227,22 @@ struct Fixture {
     app: String,
 }
 impl Fixture {
+    async fn restore(&self, rows: Value) -> Value {
+        let mut response = TestClient::post(format!(
+            "http://localhost/api/upload-users-with-mfa?owner={}",
+            self.owner
+        ))
+        .add_header(
+            "Authorization",
+            format!("Bearer {}", self.token(true)),
+            true,
+        )
+        .json(&rows)
+        .send(&self.service)
+        .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        response.take_json().await.unwrap()
+    }
     async fn new() -> Self {
         AppConfig::load().unwrap();
         let url = std::env::var("CASDOG_TEST_DATABASE_URL").unwrap();
@@ -326,6 +342,262 @@ impl Fixture {
         drop(self.service);
         self.pool.close().await;
     }
+}
+
+fn restore_row(f: &Fixture, name: &str, secret: &str, codes: &[String]) -> Value {
+    json!({"owner":f.owner,"name":name,"password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"app","totpSecret":secret,"recoveryCodes":codes,"mfaPhoneEnabled":false,"mfaEmailEnabled":false})
+}
+fn restore_cookie(response: &Response) -> String {
+    response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find_map(|v| {
+            v.split(';')
+                .next()
+                .filter(|v| v.starts_with("casdog_password_mfa="))
+                .map(str::to_owned)
+        })
+        .unwrap()
+}
+
+#[test]
+fn trusted_mfa_backup_parser_validates_real_totp_and_keeps_uuid_recovery_codes_exact() {
+    use casdog::services::mfa_restore_service::prepare;
+    let mut row=json!({"preferred_mfa_type":"app","totp_secret":"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ","recovery_codes":["7e313cbb-b090-47db-b207-d097c15d4c28"]}).as_object().unwrap().clone();
+    assert!(prepare(&mut row).unwrap().is_some());
+    assert!(!row.contains_key("totp_secret"));
+    let secret = totp_rs::Secret::Encoded("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into())
+        .to_bytes()
+        .unwrap();
+    let totp = totp_rs::TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        secret,
+        None,
+        "vector".into(),
+    )
+    .unwrap();
+    assert_eq!(totp.generate(59), "287082");
+    for v in [
+        json!({"preferred_mfa_type":"app"}),
+        json!({"preferred_mfa_type":"radius","mfa_radius_enabled":true}),
+        json!({"preferred_mfa_type":"app","totp_secret":"***"}),
+        json!({"mfa_push_enabled":true}),
+        json!({"preferred_mfa_type":"unknown"}),
+        json!({"preferred_mfa_type":"app","totp_secret":"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ","recovery_codes":["duplicate","duplicate"]}),
+    ] {
+        assert!(prepare(&mut v.as_object().unwrap().clone()).is_err());
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires migrated disposable PostgreSQL including 041"]
+async fn trusted_raw_backup_restores_totp_and_uuid_recovery_into_the_normal_browser_mfa_pipeline() {
+    use casdog::services::mfa_service::MfaService;
+    let f = Fixture::new().await;
+    let (secret, _) = MfaService::initiate_totp_setup("restore", "Casdoor").unwrap();
+    let codes = vec![
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    ];
+    let row = restore_row(&f, "restored", &secret, &codes);
+    let mut ordinary = f.json_upload(json!([row.clone()]), true).await;
+    let rejected: Value = ordinary.take_json().await.unwrap();
+    assert_eq!(rejected["created"], 0);
+    let report = f.restore(json!({"users":[row]})).await;
+    assert_eq!(report["created"], 1);
+    assert!(!report.to_string().contains(&secret));
+    assert!(!report.to_string().contains(&codes[0]));
+    let (id,enabled,kind,stored,codes_text):(String,bool,String,String,String)=sqlx::query_as("SELECT u.id,u.mfa_enabled,m.mfa_type,m.secret,m.recovery_codes FROM users u JOIN user_mfa m ON m.user_id=u.id WHERE u.owner=$1 AND u.name='restored'").bind(&f.owner).fetch_one(&f.pool).await.unwrap();
+    assert!(enabled);
+    assert_eq!(kind, "totp");
+    assert_eq!(stored, secret);
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&codes_text).unwrap(),
+        codes
+    );
+    let (cutoff,step):(bool,i64)=sqlx::query_as("SELECT EXISTS(SELECT 1 FROM user_session_epochs WHERE user_id=$1),last_step FROM user_totp_steps WHERE user_id=$1").bind(&id).fetch_one(&f.pool).await.unwrap();
+    assert!(cutoff);
+    let db_step: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp())/30)::bigint")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert!(step >= db_step);
+    let mut pending = f.login("restored", "correctbatteryhorsestapler").await;
+    let cookie = restore_cookie(&pending);
+    let value: Value = pending.take_json().await.unwrap();
+    assert_eq!(value["mfa_required"], true);
+    assert_eq!(value["token"].as_str(), Some(""));
+    let mut response = TestClient::post("http://localhost/api/auth/password/session")
+        .add_header("Origin", "http://127.0.0.1:8000", true)
+        .add_header("Cookie", cookie, true)
+        .json(&json!({"mfaType":"recovery","passcode":codes[0]}))
+        .send(&f.service)
+        .await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let signed_in: Value = response.take_json().await.unwrap();
+    assert!(
+        signed_in["token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(
+        !MfaService::verify_recovery_code(&f.pool, &id, &codes[0])
+            .await
+            .unwrap()
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated disposable PostgreSQL including 041"]
+async fn restored_credentials_are_atomic_across_pools_and_cannot_be_reimported_after_user_deletion()
+{
+    use casdog::services::mfa_service::MfaService;
+    let f = Fixture::new().await;
+    let (secret, _) = MfaService::initiate_totp_setup("restore", "Casdoor").unwrap();
+    let code = uuid::Uuid::new_v4().to_string();
+    let codes = vec![code.clone()];
+    assert_eq!(
+        f.restore(json!([restore_row(&f, "first", &secret, &codes)]))
+            .await["created"],
+        1
+    );
+    let id: String = sqlx::query_scalar("SELECT id FROM users WHERE owner=$1 AND name='first'")
+        .bind(&f.owner)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&std::env::var("CASDOG_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        MfaService::verify_recovery_code(&f.pool, &id, &code),
+        MfaService::verify_recovery_code(&pool, &id, &code)
+    );
+    assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(&id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let report = f
+        .restore(json!([restore_row(
+            &f,
+            "new-name",
+            &secret,
+            &[uuid::Uuid::new_v4().to_string()]
+        )]))
+        .await;
+    assert_eq!(report["created"], 0);
+    let (fresh, _) = MfaService::initiate_totp_setup("restore", "Casdoor").unwrap();
+    let report = f
+        .restore(json!([restore_row(&f, "new-code", &fresh, &codes)]))
+        .await;
+    assert_eq!(report["created"], 0);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM users WHERE owner=$1 AND name IN ('new-name','new-code')",
+    )
+    .bind(&f.owner)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated disposable PostgreSQL including 041"]
+async fn masked_unsupported_cross_tenant_or_bad_binding_enrollments_reject_the_entire_restore_batch()
+ {
+    let f = Fixture::new().await;
+    let (seed, _) =
+        casdog::services::mfa_service::MfaService::initiate_totp_setup("r", "Casdoor").unwrap();
+    for bad in [
+        json!({"preferredMfaType":"app","totpSecret":""}),
+        json!({"preferredMfaType":"push","mfaPushEnabled":true}),
+        json!({"preferredMfaType":"email","mfaEmailEnabled":true,"email":"restore@example.org","emailVerified":true,"signupApplication":f.app}),
+        json!({"webauthnCredentials":[{}]}),
+        json!({"mfaAccounts":[{"secretKey":"***"}]}),
+    ] {
+        let mut badrow =
+            json!({"owner":f.owner,"name":"bad-restore","password":BCRYPT,"passwordType":"bcrypt"});
+        badrow
+            .as_object_mut()
+            .unwrap()
+            .extend(bad.as_object().unwrap().clone());
+        let report = f
+            .restore(json!([restore_row(&f, "good-restore", &seed, &[]), badrow]))
+            .await;
+        assert_eq!(report["created"], 0);
+        assert_eq!(report["failed"], 2);
+    }
+    let mut cross = restore_row(&f, "cross", &seed, &[]);
+    cross["owner"] = json!(f.other);
+    let response = TestClient::post(format!(
+        "http://localhost/api/upload-users-with-mfa?owner={}",
+        f.owner
+    ))
+    .add_header("Authorization", format!("Bearer {}", f.token(true)), true)
+    .json(&json!([cross]))
+    .send(&f.service)
+    .await;
+    assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+    let response = TestClient::post("http://localhost/api/upload-users-with-mfa")
+        .add_header("Authorization", format!("Bearer {}", f.token(false)), true)
+        .json(&json!([restore_row(&f, "ordinary", &seed, &[])]))
+        .send(&f.service)
+        .await;
+    assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated disposable PostgreSQL including 041"]
+async fn email_sms_restore_requires_real_application_delivery_bindings_and_persists_one_global_recovery_set()
+ {
+    let f = Fixture::new().await;
+    for (name, category) in [("restore-email", "Email"), ("restore-sms", "SMS")] {
+        sqlx::query("INSERT INTO providers(id,owner,name,display_name,category,type,endpoint,client_secret) VALUES($1,$2,$3,$3,$4,'Custom HTTP','http://127.0.0.1:9/not-sent','test-secret')").bind(uuid::Uuid::new_v4().to_string()).bind(&f.owner).bind(name).bind(category).execute(&f.pool).await.unwrap();
+    }
+    sqlx::query("UPDATE applications SET providers=$2 WHERE id=$1").bind(&f.app).bind(json!([{"name":format!("{}/restore-email",f.owner),"rule":"MFA"},{"name":format!("{}/restore-sms",f.owner),"rule":"MFA"}])).execute(&f.pool).await.unwrap();
+    let codes = vec![uuid::Uuid::new_v4().to_string()];
+    sqlx::query("UPDATE providers SET endpoint=NULL WHERE owner=$1 AND name='restore-email'")
+        .bind(&f.owner)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let invalid=f.restore(json!([{"owner":f.owner,"name":"bad-endpoint","password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"email","mfaEmailEnabled":true,"email":"backup@example.org","emailVerified":true,"signupApplication":f.app}])).await;
+    assert_eq!(invalid["created"], 0);
+    sqlx::query("UPDATE providers SET endpoint='http://127.0.0.1:9/not-sent' WHERE owner=$1 AND name='restore-email'").bind(&f.owner).execute(&f.pool).await.unwrap();
+    let report=f.restore(json!({"users":[{"owner":f.owner,"name":"contacts","password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"email","mfaEmailEnabled":true,"email":"backup@example.org","emailVerified":true,"mfaPhoneEnabled":true,"phone":"+15551234567","countryCode":"US","signupApplication":f.app,"recoveryCodes":codes}]})).await;
+    assert_eq!(report["created"], 1);
+    let user: casdog::models::User =
+        sqlx::query_as("SELECT * FROM users WHERE owner=$1 AND name='contacts'")
+            .bind(&f.owner)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    let methods = casdog::services::mfa_service::MfaService::login_methods(&f.pool, &user)
+        .await
+        .unwrap();
+    assert!(methods.contains(&"email".to_owned()));
+    assert!(methods.contains(&"sms".to_owned()));
+    assert!(methods.contains(&"recovery".to_owned()));
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM user_mfa WHERE user_id=$1")
+        .bind(&user.id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    f.cleanup().await;
 }
 
 #[tokio::test]
@@ -497,7 +769,13 @@ async fn ordinary_csv_plain_password_is_preserved_exactly_but_a_masked_backup_ca
 #[ignore = "requires migrated disposable PostgreSQL"]
 async fn csv_enabled_mfa_is_not_discarded_and_directory_bindings_preserve_real_legacy_ids() {
     let f = Fixture::new().await;
-    for flag in ["mfaEnabled", "mfaPhoneEnabled", "mfaEmailEnabled"] {
+    for flag in [
+        "mfaEnabled",
+        "mfaPhoneEnabled",
+        "mfaEmailEnabled",
+        "mfaRadiusEnabled",
+        "mfaPushEnabled",
+    ] {
         let csv = format!("Name,Password,{flag}\nneeds-mfa,new-password,true\n");
         let mut response = f.multipart("users.csv", csv.as_bytes(), None).await;
         assert_eq!(response.status_code, Some(StatusCode::OK));
@@ -548,5 +826,59 @@ async fn csv_enabled_mfa_is_not_discarded_and_directory_bindings_preserve_real_l
     let report: Value = cross.take_json().await.unwrap();
     assert_eq!(report["created"], 0);
     assert_eq!(report["failed"], 1);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated disposable PostgreSQL"]
+async fn masked_casdoor_mfa_markers_never_become_password_only_accounts_or_partially_import() {
+    let f = Fixture::new().await;
+    for (index, marker) in [
+        json!({"preferredMfaType":"app","totpSecret":"","recoveryCodes":null}),
+        json!({"preferred_mfa_type":"app","totp_secret":"","recovery_codes":[]}),
+        json!({"preferredMfaType":"unknown-future-factor"}),
+        json!({"preferredMfaType":" "}),
+        json!({"preferredMfaType":true}),
+        json!({"mfaRadiusEnabled":true}),
+        json!({"mfa_push_enabled":true}),
+        json!({"mfaRadiusEnabled":"true"}),
+        json!({"mfaPushEnabled":1}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Ordinary get-users strips TOTP/recovery secrets. Even if an operator
+        // supplies a valid replacement password, its MFA marker must survive
+        // as a rejection, rather than disappearing from the inserted profile.
+        let mut blocked = json!({"owner":f.owner,"name":format!("blocked-mfa-{index}"),"password":BCRYPT,"passwordType":"bcrypt"});
+        blocked
+            .as_object_mut()
+            .unwrap()
+            .extend(marker.as_object().unwrap().clone());
+        let mut response=f.json_upload(json!([
+            {"owner":f.owner,"name":format!("companion-mfa-{index}"),"password":BCRYPT,"passwordType":"bcrypt"},
+            blocked
+        ]),true).await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let report: Value = response.take_json().await.unwrap();
+        assert_eq!(report["created"], 0);
+        assert_eq!(report["failed"], 2);
+        assert!(report["errors"].to_string().contains("MFA"));
+        assert!(!report.to_string().contains(BCRYPT));
+    }
+    let count:i64=sqlx::query_scalar("SELECT count(*) FROM users WHERE owner=$1 AND (name LIKE 'blocked-mfa-%' OR name LIKE 'companion-mfa-%')").bind(&f.owner).fetch_one(&f.pool).await.unwrap();
+    assert_eq!(
+        count, 0,
+        "a blocked MFA row must roll back every row in the upload"
+    );
+    let mut response=f.json_upload(json!([{"owner":f.owner,"name":"actually-no-mfa","password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"","mfaEnabled":false,"mfaPhoneEnabled":false,"mfaEmailEnabled":false,"mfaRadiusEnabled":false,"mfaPushEnabled":false}]),true).await;
+    let report: Value = response.take_json().await.unwrap();
+    assert_eq!(report["created"], 1);
+    assert_eq!(
+        f.login("actually-no-mfa", "correctbatteryhorsestapler")
+            .await
+            .status_code,
+        Some(StatusCode::OK)
+    );
     f.cleanup().await;
 }
