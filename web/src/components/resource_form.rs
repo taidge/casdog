@@ -2139,6 +2139,18 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 required: false,
             },
             FieldDef {
+                key: "is_invite_only",
+                label: "Invite-only pricing",
+                kind: FieldKind::Toggle,
+                required: false,
+            },
+            FieldDef {
+                key: "users",
+                label: "Invited usernames (empty allows the whole tenant)",
+                kind: FieldKind::Tags,
+                required: false,
+            },
+            FieldDef {
                 key: "trial_duration",
                 label: "Trial duration (days)",
                 kind: FieldKind::Number,

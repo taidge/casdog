@@ -231,6 +231,7 @@ impl PaymentFlowService {
         let payment_name = format!("payment_{}", &payment_id[..12]);
         let return_url = Self::build_return_url(&order, external_origin, Some(&payment_id));
         let payer = Self::load_order_user_for_update(&mut tx, &order).await.ok();
+        Self::validate_current_pricing(&mut tx, &order).await?;
         let payer_email = payer.as_ref().and_then(|u| u.email.clone());
         let payment = sqlx::query_as::<_, Payment>(
             r#"INSERT INTO payments (
@@ -1152,6 +1153,7 @@ impl PaymentFlowService {
     ) -> AppResult<PaymentStartResult> {
         Self::reserve_product_stock(&mut tx, &order).await?;
         let user = Self::load_order_user_for_update(&mut tx, &order).await?;
+        Self::validate_current_pricing(&mut tx, &order).await?;
         Self::validate_balance_currency(
             &json!({"balance_currency":user.balance_currency,"currency":user.currency}),
             order.currency.as_deref().unwrap_or("USD"),
@@ -1373,11 +1375,51 @@ impl PaymentFlowService {
         Ok(())
     }
 
+    async fn validate_current_pricing(
+        tx: &mut Transaction<'_, Postgres>,
+        order: &Order,
+    ) -> AppResult<()> {
+        let invitations: Vec<(String,String,String,Option<String>)> = sqlx::query_as("SELECT DISTINCT pricing_id,user_id,plan_id,role_id FROM purchase_benefits WHERE order_id=$1 AND kind='plan' AND pricing_id IS NOT NULL AND plan_id IS NOT NULL ORDER BY pricing_id,user_id,plan_id,role_id")
+            .bind(&order.id).fetch_all(&mut **tx).await?;
+        // Call only after all stock locks and the buyer UPDATE lock. Taking a
+        // user SHARE lock first would deadlock concurrent Balance purchases.
+        for (pricing_id, user_id, plan_id, role_id) in invitations {
+            super::pricing_access_service::PricingAccessService::ensure_allowed_conn(
+                tx,
+                &pricing_id,
+                &user_id,
+                &order.owner,
+            )
+            .await?;
+            let active_plan:Option<String> = sqlx::query_scalar("SELECT id FROM plans WHERE id=$1 AND owner=$2 AND NOT is_deleted AND is_enabled FOR SHARE")
+                .bind(&plan_id).bind(&order.owner).fetch_optional(&mut **tx).await?;
+            if active_plan.is_none() {
+                return Err(AppError::Conflict(
+                    "The purchased plan is no longer available for a new payment".into(),
+                ));
+            }
+            if let Some(role_id) = role_id {
+                let active_role:Option<String> = sqlx::query_scalar("SELECT id FROM roles WHERE id=$1 AND owner=$2 AND NOT is_deleted AND is_enabled FOR SHARE")
+                    .bind(role_id).bind(&order.owner).fetch_optional(&mut **tx).await?;
+                if active_role.is_none() {
+                    return Err(AppError::Conflict(
+                        "The purchased plan role is no longer available for a new payment".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn validate_benefit_checkout(
         tx: &mut Transaction<'_, Postgres>,
         order: &Order,
         provider: &Provider,
     ) -> AppResult<()> {
+        if super::cart_service::CartService::validate_checkout(tx, order, provider).await? {
+            return Ok(());
+        }
+
         let benefit =
             sqlx::query_as::<_, PurchaseBenefit>("SELECT * FROM order_benefits WHERE order_id=$1")
                 .bind(&order.id)
@@ -1438,12 +1480,66 @@ impl PaymentFlowService {
         payment: &Payment,
         provider: &Provider,
     ) -> AppResult<Value> {
-        let benefit = sqlx::query_as::<_, PurchaseBenefit>(
-            "SELECT * FROM order_benefits WHERE order_id=$1 FOR UPDATE",
-        )
-        .bind(&order.id)
-        .fetch_optional(&mut **tx)
-        .await?;
+        let lines = super::cart_service::CartService::lines(tx, &order.id).await?;
+        if lines.is_empty() {
+            return Self::fulfill_purchase_benefit(tx, order, payment, provider, None).await;
+        }
+        super::cart_service::CartService::verify_lines(tx, order, &lines).await?;
+        let mut result = Vec::new();
+        for line in lines {
+            if line.kind == "product" {
+                sqlx::query(
+                    "UPDATE order_lines SET fulfilled_at=COALESCE(fulfilled_at,NOW()) WHERE id=$1",
+                )
+                .bind(&line.id)
+                .execute(&mut **tx)
+                .await?;
+                result.push(json!({"lineId":line.id,"kind":"product"}));
+                continue;
+            }
+            let mut item_order = order.clone();
+            item_order.price = line.amount_cents as f64 / 100.0;
+            item_order.quantity = line.quantity;
+            item_order.product_name = Some(line.product_name);
+            item_order.product_display_name = Some(line.display_name);
+            let mut item_payment = payment.clone();
+            item_payment.amount = item_order.price;
+            let benefit = Self::fulfill_purchase_benefit(
+                tx,
+                &item_order,
+                &item_payment,
+                provider,
+                Some(&line.id),
+            )
+            .await?;
+            result.push(json!({"lineId":line.id,"benefit":benefit}));
+        }
+        Ok(json!({"kind":"cart","items":result}))
+    }
+
+    async fn fulfill_purchase_benefit(
+        tx: &mut Transaction<'_, Postgres>,
+        order: &Order,
+        payment: &Payment,
+        provider: &Provider,
+        line_id: Option<&str>,
+    ) -> AppResult<Value> {
+        let benefit = if let Some(line_id) = line_id {
+            sqlx::query_as::<_, PurchaseBenefit>(
+                "SELECT * FROM order_lines WHERE id=$1 AND order_id=$2 FOR UPDATE",
+            )
+            .bind(line_id)
+            .bind(&order.id)
+            .fetch_optional(&mut **tx)
+            .await?
+        } else {
+            sqlx::query_as::<_, PurchaseBenefit>(
+                "SELECT * FROM order_benefits WHERE order_id=$1 FOR UPDATE",
+            )
+            .bind(&order.id)
+            .fetch_optional(&mut **tx)
+            .await?
+        };
         let Some(benefit) = benefit else {
             return Ok(Value::Null);
         };
@@ -1501,14 +1597,21 @@ impl PaymentFlowService {
                 .bind(&order.owner)
                 .execute(&mut **tx)
                 .await?;
-            let product_id: Option<String> = sqlx::query_scalar(
-                "SELECT product_id FROM order_stock_reservations WHERE order_id=$1",
-            )
-            .bind(&order.id)
-            .fetch_optional(&mut **tx)
-            .await?;
+            let product_id: Option<String> = if let Some(line_id) = line_id {
+                sqlx::query_scalar("SELECT product_id FROM order_lines WHERE id=$1")
+                    .bind(line_id)
+                    .fetch_optional(&mut **tx)
+                    .await?
+            } else {
+                sqlx::query_scalar(
+                    "SELECT product_id FROM order_stock_reservations WHERE order_id=$1",
+                )
+                .bind(&order.id)
+                .fetch_optional(&mut **tx)
+                .await?
+            };
             sqlx::query("INSERT INTO transactions(id,owner,name,display_name,provider_id,category,transaction_type,product_id,user_id,application,amount,currency,balance,state) VALUES($1,$2,$3,'Account recharge',$4,'recharge',$5,$6,$7,$8,$9,$10,$11,'paid')")
-                .bind(Uuid::new_v4().to_string()).bind(&order.owner).bind(format!("recharge_{}",payment.name))
+                .bind(Uuid::new_v4().to_string()).bind(&order.owner).bind(if let Some(line_id)=line_id {format!("recharge_{}_{}",payment.name,line_id)}else{format!("recharge_{}",payment.name)})
                 .bind(&provider.id).bind(Self::normalize_provider_type(&provider.provider_type))
                 .bind(product_id).bind(&user.id).bind(&user.signup_application)
                 .bind(benefit.amount_cents as f64/100.0).bind(currency).bind(balance)
@@ -1578,6 +1681,15 @@ impl PaymentFlowService {
                     ));
                 }
             };
+            let months: u32 = months;
+            let months = months
+                .checked_mul(if line_id.is_some() {
+                    u32::try_from(order.quantity)
+                        .map_err(|_| AppError::Validation("Invalid cart plan quantity".into()))?
+                } else {
+                    1
+                })
+                .ok_or_else(|| AppError::Validation("Cart plan period overflow".into()))?;
             let end = start
                 .checked_add_months(Months::new(months))
                 .ok_or_else(|| {
@@ -1593,14 +1705,17 @@ impl PaymentFlowService {
                     .bind(&user.id).bind(plan_id).bind(pricing_id).bind(start).bind(end).bind(period)
                     .execute(&mut **tx).await?;
             }
-            sqlx::query("INSERT INTO subscription_grants(id,subscription_id,order_id,owner,user_id,role_id,starts_at,ends_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+            sqlx::query("INSERT INTO subscription_grants(id,subscription_id,order_id,owner,user_id,role_id,starts_at,ends_at,order_line_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
                 .bind(Uuid::new_v4().to_string()).bind(&id).bind(&order.id).bind(&order.owner)
-                .bind(&user.id).bind(&benefit.role_id).bind(start).bind(end).execute(&mut **tx).await?;
+                .bind(&user.id).bind(&benefit.role_id).bind(start).bind(end).bind(line_id).execute(&mut **tx).await?;
             subscription_id = Some(id.clone());
             json!({"kind":"plan","subscriptionId":id,"period":period,"startsAt":start,"endsAt":end})
         };
-        sqlx::query("UPDATE order_benefits SET fulfilled_at=NOW(),subscription_id=$2 WHERE order_id=$1 AND fulfilled_at IS NULL")
-            .bind(&order.id).bind(subscription_id).execute(&mut **tx).await?;
+        if let Some(line_id) = line_id {
+            sqlx::query("UPDATE order_lines SET fulfilled_at=NOW(),subscription_id=$2 WHERE id=$1 AND fulfilled_at IS NULL").bind(line_id).bind(subscription_id).execute(&mut **tx).await?;
+        } else {
+            sqlx::query("UPDATE order_benefits SET fulfilled_at=NOW(),subscription_id=$2 WHERE order_id=$1 AND fulfilled_at IS NULL").bind(&order.id).bind(subscription_id).execute(&mut **tx).await?;
+        }
         Ok(result)
     }
 
@@ -1658,6 +1773,10 @@ impl PaymentFlowService {
         tx: &mut Transaction<'_, Postgres>,
         order: &Order,
     ) -> AppResult<()> {
+        if super::cart_service::CartService::reserve_stock(tx, order).await? {
+            return Ok(());
+        }
+
         let Some(name) = order.product_name.as_deref().filter(|s| !s.is_empty()) else {
             return Ok(());
         };
@@ -1716,6 +1835,10 @@ impl PaymentFlowService {
         tx: &mut Transaction<'_, Postgres>,
         order: &Order,
     ) -> AppResult<()> {
+        if super::cart_service::CartService::release_stock(tx, order).await? {
+            return Ok(());
+        }
+
         let reservation = sqlx::query("UPDATE order_stock_reservations SET state='released',updated_at=NOW() WHERE order_id=$1 AND state='reserved' RETURNING product_id,quantity,finite_stock")
             .bind(&order.id).fetch_optional(&mut **tx).await?;
         if let Some(row) = reservation {
@@ -1736,6 +1859,10 @@ impl PaymentFlowService {
         tx: &mut Transaction<'_, Postgres>,
         order: &Order,
     ) -> AppResult<()> {
+        if super::cart_service::CartService::consume_stock(tx, order).await? {
+            return Ok(());
+        }
+
         if order.product_name.as_deref().is_none_or(str::is_empty) {
             return Ok(());
         }

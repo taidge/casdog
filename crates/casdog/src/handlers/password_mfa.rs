@@ -150,7 +150,7 @@ async fn policy(
         let app = application_conn(conn, id).await?;
         if app.organization != user.owner
             || (match c.context["primary_factor"].as_str() {
-                Some("webauthn" | "face") => false,
+                Some("webauthn" | "face" | "kerberos") => false,
                 Some(method @ ("ldap" | "code_email" | "code_sms")) => {
                     !PrimaryAuthService::method_enabled(&app, method)
                 }
@@ -192,6 +192,17 @@ async fn policy(
         return Err(denied());
     }
     match c.context["primary_factor"].as_str() {
+        Some("kerberos") => {
+            if c.context["kerberos_stamp"].as_str()
+                != Some(
+                    crate::services::kerberos_service::KerberosService::configuration_stamp(&org)
+                        .as_str(),
+                )
+                || c.context["kerberos_username"].as_str() != Some(user.name.as_str())
+            {
+                return Err(denied());
+            }
+        }
         Some("code_email" | "code_sms") => {
             let receiver = if c.context["primary_factor"] == "code_email" {
                 user.email.as_deref()

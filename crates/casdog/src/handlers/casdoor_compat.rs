@@ -94,6 +94,25 @@ async fn authorize_legacy_object(
     if principal.admin {
         return Ok(false);
     }
+    if action == "get" && !crate::hoops::authz::Principal::from_depot(depot)?.is_application() {
+        if resource.table == "orders" && object["buyer_id"].as_str() == Some(principal.id.as_str())
+        {
+            return Ok(false);
+        }
+        if resource.table == "payments" {
+            let mut query =
+                QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM payments WHERE id = ");
+            query.push_bind(object["id"].as_str().unwrap_or_default().to_string());
+            append_self_commerce(&mut query, resource, &principal);
+            let allowed: i64 = query
+                .build_query_scalar()
+                .fetch_one(&pg_pool(depot)?)
+                .await?;
+            if allowed == 1 {
+                return Ok(false);
+            }
+        }
+    }
     if resource.table == "users"
         && matches!(action, "get" | "update")
         && principal.owns_user(object)
@@ -539,7 +558,7 @@ pub fn routes() -> Router {
         .push(Router::with_path("verify-invitation").get(verify_invitation_query))
         .push(Router::with_path("send-invitation").post(send_invitation_compat))
         .push(Router::with_path("get-user-orders").get(get_user_orders))
-        .push(Router::with_path("place-order").post(add_order))
+        .push(Router::with_path("place-order").post(crate::handlers::cart::place_order))
         .push(Router::with_path("get-user-payments").get(get_user_payments))
         .push(
             Router::with_path("run-syncer")
@@ -672,6 +691,29 @@ fn is_user_secret(column: &str) -> bool {
 }
 
 fn resource_response(resource: LegacyResource, mut value: Value) -> Value {
+    if resource.table == "organizations" {
+        fn mask_organization(value: &mut Value) {
+            match value {
+                Value::Array(values) => values.iter_mut().for_each(mask_organization),
+                Value::Object(object) => {
+                    for field in [
+                        "master_password",
+                        "default_password",
+                        "master_verification_code",
+                        "kerberos_keytab",
+                    ] {
+                        if let Some(secret) = object.get_mut(field) {
+                            if secret.as_str().is_some_and(|value| !value.is_empty()) {
+                                *secret = json!("***");
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        mask_organization(&mut value);
+    }
     if resource.table == "users" {
         fn mask(value: &mut Value) {
             match value {
@@ -721,6 +763,19 @@ fn resource_response(resource: LegacyResource, mut value: Value) -> Value {
         mask(&mut value);
     }
     to_casdoor_value(value)
+}
+
+async fn attach_order_products(pool: &Pool<Postgres>, order: &mut Value) -> AppResult<()> {
+    let Some(id) = order["id"].as_str() else {
+        return Ok(());
+    };
+    if let Some(projection) =
+        crate::services::cart_service::CartService::legacy_order_projection(pool, id).await?
+        && let (Some(object), Some(fields)) = (order.as_object_mut(), projection.as_object())
+    {
+        object.extend(fields.clone());
+    }
+    Ok(())
 }
 
 async fn legacy_list_with_extra_filters(
@@ -797,7 +852,14 @@ async fn legacy_list_with_extra_filters(
     }
     query.push(") AS t");
 
-    let data: Value = query.build_query_scalar().fetch_one(&pool).await?;
+    let mut data: Value = query.build_query_scalar().fetch_one(&pool).await?;
+    if resource.table == "orders"
+        && let Some(orders) = data.as_array_mut()
+    {
+        for order in orders {
+            attach_order_products(&pool, order).await?;
+        }
+    }
     let data = resource_response(resource, data);
     Ok(Json(json!({
         "status": "ok",
@@ -843,11 +905,30 @@ async fn legacy_get(
     append_lookup_filter(&mut query, &columns, &lookup, true)?;
     query.push(" LIMIT 1) AS t");
 
-    let data: Option<Value> = query.build_query_scalar().fetch_optional(&pool).await?;
+    let mut data: Option<Value> = query.build_query_scalar().fetch_optional(&pool).await?;
     if let Some(object) = &data {
         authorize_legacy_object(depot, req, resource, object, "get").await?;
     } else {
         LegacyPrincipal::from_depot(depot)?;
+    }
+    if resource.table == "orders"
+        && let Some(order) = data.as_mut()
+    {
+        attach_order_products(&pool, order).await?;
+    }
+    if resource.table == "users" {
+        let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+        if let Some(object) = data.as_mut()
+            && object["id"].as_str() == Some(principal.id.as_str())
+            && object["owner"].as_str() == Some(principal.owner.as_str())
+            && !principal.is_application()
+        {
+            let cart = crate::services::cart_service::CartService::get(&pool, &principal).await?;
+            let projection =
+                crate::services::cart_service::CartService::legacy_projection(&principal, &cart);
+            object["cart"] = projection["cart"].clone();
+            object["cart_revision"] = projection["cartRevision"].clone();
+        }
     }
     Ok(Json(json!({
         "status": "ok",
@@ -916,6 +997,11 @@ async fn legacy_add(
 
     let mut tx = pool.begin().await?;
     let data: Value = query.build_query_scalar().fetch_one(&mut *tx).await?;
+    if resource.table == "organizations" {
+        let organization = serde_json::from_value::<crate::models::Organization>(data.clone())
+            .map_err(|_| AppError::Internal("Invalid organization database row".into()))?;
+        crate::services::kerberos_service::KerberosService::validate_configuration(&organization)?;
+    }
     if resource.table == "applications" {
         crate::services::key_credentials_service::mark_static_application_conn(
             &mut tx,
@@ -946,11 +1032,65 @@ async fn legacy_update(
     let body = read_required_body(req).await?;
     let lookup = lookup_from(req, Some(&body))?;
     let existing = lookup_legacy_object(&pool, resource, &columns, &lookup).await?;
+    if resource.table == "users" && body.get("cart").is_some() {
+        let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+        if principal.is_application()
+            || existing["id"].as_str() != Some(principal.id.as_str())
+            || existing["owner"].as_str() != Some(principal.owner.as_str())
+        {
+            return Err(AppError::Authorization(
+                "Only the current user can update this cart".into(),
+            ));
+        }
+        // Upstream CartControls sends the complete masked user returned by
+        // get-user. Permit its unchanged fields, but never silently discard a
+        // simultaneous profile edit or commit it outside the cart transaction.
+        let expected = normalize_body(resource_response(resource, existing.clone()));
+        if body.as_object().into_iter().flatten().any(|(key, value)| {
+            !matches!(key.as_str(), "cart" | "cart_revision") && expected.get(key) != Some(value)
+        }) {
+            return Err(AppError::Validation(
+                "Save profile changes separately before updating the cart".into(),
+            ));
+        }
+        let revision = body["cart_revision"].as_i64().ok_or_else(|| {
+            AppError::Validation(
+                "Reload the user with cartRevision before updating the cart".into(),
+            )
+        })?;
+        let cart = crate::services::cart_service::CartService::replace_legacy(
+            &pool,
+            &principal,
+            revision,
+            &body["cart"],
+        )
+        .await?;
+        let projection =
+            crate::services::cart_service::CartService::legacy_projection(&principal, &cart);
+        let mut object = resource_response(resource, existing);
+        object["cart"] = projection["cart"].clone();
+        object["cartRevision"] = projection["cartRevision"].clone();
+        return Ok(Json(
+            json!({"status":"ok","data":true,"data2":object,"object":object}),
+        ));
+    }
     if authorize_legacy_object(depot, req, resource, &existing, "update").await? {
         validate_self_update(&body)?;
     }
     let lookup = exact_lookup(&existing)?;
-    let object = prepare_body(resource, body, &columns)?;
+    let mut object = prepare_body(resource, body, &columns)?;
+    if resource.table == "organizations" {
+        for field in [
+            "master_password",
+            "default_password",
+            "master_verification_code",
+            "kerberos_keytab",
+        ] {
+            if object.get(field).and_then(Value::as_str) == Some("***") {
+                object.remove(field);
+            }
+        }
+    }
     let principal = crate::hoops::authz::Principal::from_depot(depot)?;
     let mut references = object.clone();
     if resource.table == "organizations" {
@@ -1003,7 +1143,18 @@ async fn legacy_update(
     query.push(resource.table);
     query.push(")");
 
-    let data: Option<Value> = query.build_query_scalar().fetch_optional(&pool).await?;
+    let mut tx = pool.begin().await?;
+    let data: Option<Value> = query.build_query_scalar().fetch_optional(&mut *tx).await?;
+    if resource.table == "organizations" {
+        if let Some(value) = &data {
+            let organization = serde_json::from_value::<crate::models::Organization>(value.clone())
+                .map_err(|_| AppError::Internal("Invalid organization database row".into()))?;
+            crate::services::kerberos_service::KerberosService::validate_configuration(
+                &organization,
+            )?;
+        }
+    }
+    tx.commit().await?;
     let object = data.map(|value| resource_response(resource, value));
     Ok(Json(json!({
         "status": "ok",
@@ -1047,7 +1198,7 @@ async fn legacy_delete(
     })))
 }
 
-fn pg_pool(depot: &mut Depot) -> AppResult<Pool<Postgres>> {
+fn pg_pool(depot: &Depot) -> AppResult<Pool<Postgres>> {
     depot
         .obtain::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))
@@ -1228,6 +1379,9 @@ fn prepare_body(
         }
     }
 
+    if resource.table == "pricings" {
+        crate::services::pricing_access_service::PricingAccessService::validate_fields(&object)?;
+    }
     if resource.table == "users" && columns.contains("password_hash") {
         PasswordService::normalize_import_fields(&mut object, true)?;
     }

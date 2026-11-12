@@ -79,6 +79,10 @@ pub struct Organization {
     pub updated_at: DateTime<Utc>,
     #[serde(alias = "recordRetentionDays")]
     pub record_retention_days: i32,
+    pub kerberos_realm: Option<String>,
+    pub kerberos_kdc_host: Option<String>,
+    pub kerberos_keytab: Option<String>,
+    pub kerberos_service_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -104,6 +108,14 @@ pub struct CreateOrganizationRequest {
     pub mfa_items: Option<serde_json::Value>,
     #[serde(alias = "recordRetentionDays")]
     pub record_retention_days: Option<i32>,
+    #[serde(alias = "kerberosRealm")]
+    pub kerberos_realm: Option<String>,
+    #[serde(alias = "kerberosKdcHost")]
+    pub kerberos_kdc_host: Option<String>,
+    #[serde(alias = "kerberosKeytab")]
+    pub kerberos_keytab: Option<String>,
+    #[serde(alias = "kerberosServiceName")]
+    pub kerberos_service_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -145,6 +157,14 @@ pub struct UpdateOrganizationRequest {
     pub balance_currency: Option<String>,
     #[serde(alias = "recordRetentionDays")]
     pub record_retention_days: Option<i32>,
+    #[serde(alias = "kerberosRealm")]
+    pub kerberos_realm: Option<String>,
+    #[serde(alias = "kerberosKdcHost")]
+    pub kerberos_kdc_host: Option<String>,
+    #[serde(alias = "kerberosKeytab")]
+    pub kerberos_keytab: Option<String>,
+    #[serde(alias = "kerberosServiceName")]
+    pub kerberos_service_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -188,6 +208,10 @@ pub struct OrganizationResponse {
     pub updated_at: DateTime<Utc>,
     #[serde(alias = "recordRetentionDays")]
     pub record_retention_days: i32,
+    pub kerberos_realm: Option<String>,
+    pub kerberos_kdc_host: Option<String>,
+    pub kerberos_keytab: Option<String>,
+    pub kerberos_service_name: Option<String>,
 }
 
 impl From<Organization> for OrganizationResponse {
@@ -205,7 +229,7 @@ impl From<Organization> for OrganizationResponse {
             password_type: o.password_type,
             password_options: o.password_options,
             password_expire_days: o.password_expire_days,
-            default_password: o.default_password,
+            default_password: o.default_password.filter(|v| !v.is_empty()).map(|_| "***".into()),
             user_types: o.user_types,
             tags: o.tags,
             country_codes: o.country_codes,
@@ -231,6 +255,10 @@ impl From<Organization> for OrganizationResponse {
             created_at: o.created_at,
             updated_at: o.updated_at,
             record_retention_days: o.record_retention_days,
+            kerberos_realm: o.kerberos_realm,
+            kerberos_kdc_host: o.kerberos_kdc_host,
+            kerberos_keytab: o.kerberos_keytab.filter(|v| !v.is_empty()).map(|_| "***".into()),
+            kerberos_service_name: o.kerberos_service_name,
         }
     }
 }

@@ -71,6 +71,8 @@ impl Fixture {
     async fn new(quantity: i32) -> Self {
         let pool = database().await;
         let owner = format!("checkout-{}", uuid::Uuid::new_v4());
+        sqlx::query("INSERT INTO organizations(id,owner,name,display_name,is_deleted,disable_signin) VALUES($1,$2,$2,'Checkout',false,false)")
+            .bind(uuid::Uuid::new_v4().to_string()).bind(&owner).execute(&pool).await.unwrap();
         let buyer = Identity {
             id: uuid::Uuid::new_v4().to_string(),
             owner: owner.clone(),
@@ -187,6 +189,11 @@ impl Fixture {
                 .await
                 .unwrap();
         }
+        sqlx::query("DELETE FROM organizations WHERE name=$1")
+            .bind(&self.owner)
+            .execute(&self.pool)
+            .await
+            .unwrap();
     }
 }
 

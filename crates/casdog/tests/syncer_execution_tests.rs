@@ -661,6 +661,34 @@ async fn ldap_reply(socket: &mut TcpStream, id: &[u8], tag: u8, payload: &[u8]) 
     body.extend(tlv(tag, payload));
     socket.write_all(&tlv(0x30, &body)).await.unwrap();
 }
+async fn ldap_paged_done(
+    socket: &mut TcpStream,
+    id: &[u8],
+    rc: u8,
+    cookie: &[u8],
+    malformed: bool,
+    missing: bool,
+) {
+    let mut done = tlv(0x0a, &[rc]);
+    done.extend(tlv(4, b""));
+    done.extend(tlv(4, b""));
+    let mut body = tlv(2, id);
+    body.extend(tlv(0x65, &done));
+    if !missing {
+        // The size is an estimate, deliberately larger than the real fixture.
+        let mut payload = tlv(2, &[0x40, 0x00]);
+        payload.extend(tlv(4, cookie));
+        let value = if malformed {
+            vec![0x30, 0x80, 0xff]
+        } else {
+            tlv(0x30, &payload)
+        };
+        let mut control = tlv(4, b"1.2.840.113556.1.4.319");
+        control.extend(tlv(4, &value));
+        body.extend(tlv(0xa0, &tlv(0x30, &control)));
+    }
+    socket.write_all(&tlv(0x30, &body)).await.unwrap();
+}
 async fn directory() -> (
     String,
     Arc<Mutex<String>>,
@@ -708,10 +736,7 @@ async fn directory() -> (
                             }
                             entry.extend(tlv(0x30, &attributes));
                             ldap_reply(&mut socket, id, 0x64, &entry).await;
-                            let mut done = tlv(0x0a, &[0]);
-                            done.extend(tlv(4, b""));
-                            done.extend(tlv(4, b""));
-                            ldap_reply(&mut socket, id, 0x65, &done).await;
+                            ldap_paged_done(&mut socket, id, 0, b"", false, false).await;
                         }
                         0x42 => break,
                         _ => panic!("unexpected LDAP operation {tag}"),
@@ -1885,4 +1910,557 @@ async fn keycloak_native_argon_raw_credentials_sync_login_defaults_rehash_and_ba
             .unwrap();
     assert_eq!(foreign, "foreign-hash");
     keycloak_cleanup(f, &app).await;
+}
+
+#[derive(Clone)]
+struct PagedDirectoryState {
+    ad: bool,
+    uac: String,
+    dn_suffix: String,
+    username: String,
+    mode: String,
+    ids: Vec<usize>,
+    display: String,
+}
+async fn paged_directory() -> (
+    String,
+    Arc<Mutex<PagedDirectoryState>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ldap://{}", listener.local_addr().unwrap());
+    let state = Arc::new(Mutex::new(PagedDirectoryState {
+        ad: false,
+        uac: "512".into(),
+        dn_suffix: "ou=initial,dc=test".into(),
+        username: "ad-alice".into(),
+        mode: "normal".into(),
+        ids: vec![0, 1, 2],
+        display: "Paged source".into(),
+    }));
+    let shared = state.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut page = 0;
+                while let Some(message) = packet(&mut socket).await {
+                    let (_, id, rest) = item(&message);
+                    let (tag, body, controls) = item(rest);
+                    match tag {
+                        0x60 => {
+                            let (_, _, rest) = item(body);
+                            let (_, dn, rest) = item(rest);
+                            let (_, password, _) = item(rest);
+                            let rc = if dn == b"cn=sync,dc=test" && password == b"directory-secret"
+                            {
+                                0
+                            } else {
+                                49
+                            };
+                            let mut done = tlv(10, &[rc]);
+                            done.extend(tlv(4, b""));
+                            done.extend(tlv(4, b""));
+                            ldap_reply(&mut socket, id, 0x61, &done).await;
+                        }
+                        0x63 => {
+                            let (tag, control, _) = item(controls);
+                            assert_eq!(tag, 0xa0);
+                            let (_, control, _) = item(control);
+                            let (_, oid, rest) = item(control);
+                            assert_eq!(oid, b"1.2.840.113556.1.4.319");
+                            let (tag, value, _) = item(rest);
+                            assert_eq!(tag, 4, "paging request must be non-critical and ignorable");
+                            let (_, value, _) = item(value);
+                            let (_, size, rest) = item(value);
+                            assert_eq!(size, &[1, 244]);
+                            let (_, cookie, _) = item(rest);
+                            assert_eq!(
+                                cookie,
+                                if page == 0 {
+                                    b"".as_slice()
+                                } else {
+                                    b"page\0\xfftwo".as_slice()
+                                }
+                            );
+                            let state = shared.lock().unwrap().clone();
+                            let start = if state.mode == "empty-middle" && page >= 2 {
+                                (page - 1) * 2
+                            } else {
+                                page * 2
+                            };
+                            let mut ids = if state.mode.starts_with("unpaged") {
+                                state.ids.clone()
+                            } else {
+                                state
+                                    .ids
+                                    .iter()
+                                    .skip(start)
+                                    .take(2)
+                                    .copied()
+                                    .collect::<Vec<_>>()
+                            };
+                            if state.mode == "empty-loop"
+                                || state.mode == "empty-middle" && page == 1
+                            {
+                                ids.clear();
+                            }
+                            if matches!(state.mode.as_str(), "duplicate" | "loop") && page == 1 {
+                                ids = vec![0];
+                            }
+                            for n in &ids {
+                                let dn = if state.ad {
+                                    format!("cn=user-{n},{}", state.dn_suffix)
+                                } else {
+                                    format!("uid={n},dc=test")
+                                };
+                                let mut entry = tlv(4, dn.as_bytes());
+                                let mut attributes = Vec::new();
+                                for (name, value) in [
+                                    ("uid", format!("paged-{n}")),
+                                    ("cn", format!("{} {n}", state.display)),
+                                    ("mail", format!("paged{n}@example.test")),
+                                ] {
+                                    let mut attr = tlv(4, name.as_bytes());
+                                    attr.extend(tlv(0x31, &tlv(4, value.as_bytes())));
+                                    attributes.extend(tlv(0x30, &attr));
+                                }
+                                if state.ad {
+                                    let mut guid = if *n == 2 {
+                                        b"abcdefghijklmnop".to_vec()
+                                    } else {
+                                        vec![
+                                            0x33, 0x22, 0x11, 0, 0x55, 0x44, 0x77, 0x66, 0x88,
+                                            0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+                                        ]
+                                    };
+                                    if *n == 1 {
+                                        guid[15] = 0xfe;
+                                    }
+                                    if *n == 1 && state.mode == "bad-ad-guid" {
+                                        guid.pop();
+                                    }
+                                    let values = vec![
+                                        ("OBJECTguid", guid),
+                                        (
+                                            "SAMACCOUNTNAME",
+                                            if *n == 0 {
+                                                state.username.clone()
+                                            } else {
+                                                format!("ad-user-{n}")
+                                            }
+                                            .into_bytes(),
+                                        ),
+                                        ("givenName", b"Directory".to_vec()),
+                                        ("sn", b"Person".to_vec()),
+                                        (
+                                            "userPrincipalName",
+                                            format!("ad{n}@directory.test").into_bytes(),
+                                        ),
+                                        ("telephoneNumber", b"123456789".to_vec()),
+                                        ("title", b"Engineer".to_vec()),
+                                        ("department", b"R&D".to_vec()),
+                                        ("company", b"Directory Company".to_vec()),
+                                        ("streetAddress", b"1 Main Street".to_vec()),
+                                        ("l", b"Shanghai".to_vec()),
+                                        ("st", b"Shanghai".to_vec()),
+                                        ("postalCode", b"200000".to_vec()),
+                                        ("co", b"China".to_vec()),
+                                        ("whenCreated", b"20231010120000.0Z".to_vec()),
+                                        (
+                                            "userAccountControl",
+                                            if *n == 1 && state.mode == "bad-ad-uac" {
+                                                b"invalid".to_vec()
+                                            } else {
+                                                state.uac.as_bytes().to_vec()
+                                            },
+                                        ),
+                                    ];
+                                    // Remove generic mail so AD's UPN fallback is exercised.
+                                    attributes.clear();
+                                    for (name, value) in values {
+                                        if *n == 3
+                                            && state.mode == "missing-ad-guid"
+                                            && name == "OBJECTguid"
+                                        {
+                                            continue;
+                                        }
+                                        let mut attr = tlv(4, name.as_bytes());
+                                        attr.extend(tlv(0x31, &tlv(4, &value)));
+                                        attributes.extend(tlv(0x30, &attr));
+                                    }
+                                }
+                                entry.extend(tlv(0x30, &attributes));
+                                ldap_reply(&mut socket, id, 0x64, &entry).await;
+                            }
+                            let oversized = vec![b'x'; 4097];
+                            let next = if page == 1 && state.mode == "oversized-cookie" {
+                                oversized.as_slice()
+                            } else if start + ids.len() < state.ids.len()
+                                || state.mode == "empty-loop"
+                                || (page == 1 && state.mode == "empty-middle")
+                            {
+                                b"page\0\xfftwo".as_slice()
+                            } else {
+                                b"".as_slice()
+                            };
+                            let rc = if state.mode == "unpaged-truncated"
+                                || page == 1 && state.mode == "truncated"
+                            {
+                                4
+                            } else if page == 1 && state.mode == "error" {
+                                80
+                            } else {
+                                0
+                            };
+                            ldap_paged_done(
+                                &mut socket,
+                                id,
+                                rc,
+                                next,
+                                page == 1 && state.mode == "malformed",
+                                page == 1 && state.mode == "missing"
+                                    || state.mode.starts_with("unpaged"),
+                            )
+                            .await;
+                            page += 1;
+                        }
+                        0x42 => break,
+                        _ => panic!("unexpected paged LDAP operation {tag}"),
+                    }
+                }
+            });
+        }
+    });
+    (endpoint, state, server)
+}
+async fn paged_ldap_syncer(f: &Fixture, endpoint: &str) -> String {
+    sqlx::query(
+        "UPDATE users SET ldap='uid=0,dc=test' WHERE (owner=$1 OR owner=$2) AND name='alice'",
+    )
+    .bind(&f.owner)
+    .bind(&f.foreign)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let mapping = json!([{"name":"dn","type":"String","casdoorName":"Id","isKey":true},{"name":"uid","type":"String","casdoorName":"Name"},{"name":"cn","type":"String","casdoorName":"DisplayName"},{"name":"mail","type":"String","casdoorName":"Email"}]);
+    f.json("POST","/api/syncers",Some(json!({"owner":f.owner,"name":"paged-directory","organization":f.owner,"type":"LDAP","host":endpoint,"port":389,"user":"cn=sync,dc=test","password":"directory-secret","database":"dc=test","table":"(objectClass=person)","tableColumns":mapping,"isReadOnly":true}))).await["id"].as_str().unwrap().into()
+}
+#[tokio::test]
+#[ignore = "requires migrated PostgreSQL main and source fixture databases"]
+async fn ldap_complete_paged_snapshot_imports_all_users_and_only_then_reconciles_source_deletions()
+{
+    let f = Fixture::new().await;
+    let before = f.user().await;
+    let (endpoint, state, server) = paged_directory().await;
+    let id = paged_ldap_syncer(&f, &endpoint).await;
+    assert_eq!(f.run(&id).await["recordsSynced"], 3);
+    let imported = f.user().await;
+    assert_eq!(imported.id, before.id);
+    assert_eq!(imported.password_hash, before.password_hash);
+    assert_eq!(imported.display_name, "Paged source 0");
+    // A server may ignore a non-critical paging request and return a
+    // complete unpaged result larger than the requested 500 entries.
+    let prefix = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+    sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash,password_type,ldap) SELECT $1||n::text,$2,'paged-'||n::text,'Preexisting '||n::text,$3,'argon2','uid='||n::text||',dc=test' FROM generate_series(1,500) n WHERE NOT EXISTS(SELECT 1 FROM users WHERE owner=$2 AND name='paged-'||n::text)")
+        .bind(prefix).bind(&f.owner).bind(&before.password_hash).execute(&f.pool).await.unwrap();
+    {
+        let mut state = state.lock().unwrap();
+        state.mode = "unpaged".into();
+        state.ids = (0..501).collect();
+    }
+    assert_eq!(
+        f.run(&id).await["recordsSynced"],
+        501,
+        "successful unpaged fallback may exceed the requested page size"
+    );
+    {
+        let mut state = state.lock().unwrap();
+        state.mode = "unpaged-truncated".into();
+        state.display = "No partial fallback".into();
+    }
+    assert_eq!(
+        f.request("POST", &format!("/api/syncers/{id}/run"), None)
+            .await
+            .status_code,
+        Some(StatusCode::INTERNAL_SERVER_ERROR)
+    );
+    assert_eq!(f.user().await.display_name, "Paged source 0");
+    {
+        let mut state = state.lock().unwrap();
+        state.mode = "normal".into();
+        state.ids = vec![0, 1, 2];
+        state.display = "Paged source".into();
+    }
+    assert_eq!(f.run(&id).await["recordsForbidden"], 498);
+    // RFC 2696 cookies are opaque cursor handles: two non-final
+    // responses may legally reuse the same bytes while the cursor advances.
+    state.lock().unwrap().ids = vec![0, 1, 2, 3, 4];
+    assert_eq!(
+        f.run(&id).await["recordsSynced"],
+        5,
+        "three pages with a repeated opaque cookie must complete"
+    );
+    assert_eq!(f.user().await.id, before.id);
+    state.lock().unwrap().ids = vec![0, 1, 2];
+    assert_eq!(f.run(&id).await["recordsForbidden"], 2);
+    state.lock().unwrap().mode = "empty-middle".into();
+    assert_eq!(
+        f.run(&id).await["recordsSynced"],
+        3,
+        "a legal empty intermediate page must not truncate the traversal"
+    );
+    state.lock().unwrap().mode = "normal".into();
+    let removed: String = sqlx::query_scalar(
+        "SELECT user_id FROM syncer_user_links WHERE syncer_id=$1 AND source_key='uid=1,dc=test'",
+    )
+    .bind(&id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    {
+        let mut state = state.lock().unwrap();
+        state.ids = vec![0, 2];
+        state.display = "Updated source".into();
+    }
+    let run = f.run(&id).await;
+    assert_eq!(run["recordsSynced"], 2);
+    assert_eq!(run["recordsForbidden"], 1);
+    assert_eq!(f.user().await.display_name, "Updated source 0");
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT is_forbidden FROM users WHERE id=$1")
+            .bind(removed)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap()
+    );
+    state.lock().unwrap().ids.clear();
+    assert_eq!(f.run(&id).await["recordsForbidden"], 2);
+    let foreign: (String, bool) = sqlx::query_as(
+        "SELECT password_hash,is_forbidden FROM users WHERE owner=$1 AND name='alice'",
+    )
+    .bind(&f.foreign)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(foreign, ("foreign-hash".into(), false));
+    server.abort();
+    f.cleanup().await;
+}
+#[tokio::test]
+#[ignore = "requires migrated PostgreSQL main and source fixture databases"]
+async fn ldap_later_page_errors_truncation_bad_cookies_or_controls_never_partially_write_or_forbid()
+{
+    let f = Fixture::new().await;
+    let (endpoint, state, server) = paged_directory().await;
+    let id = paged_ldap_syncer(&f, &endpoint).await;
+    f.run(&id).await;
+    let before = f.user().await;
+    for mode in [
+        "error",
+        "truncated",
+        "malformed",
+        "missing",
+        "loop",
+        "empty-loop",
+        "duplicate",
+        "oversized-cookie",
+    ] {
+        {
+            let mut state = state.lock().unwrap();
+            state.mode = mode.into();
+            state.display = "Must not partially write".into();
+        }
+        assert_eq!(
+            f.request("POST", &format!("/api/syncers/{id}/run"), None)
+                .await
+                .status_code,
+            Some(StatusCode::INTERNAL_SERVER_ERROR),
+            "accepted {mode}"
+        );
+        let after = f.user().await;
+        assert_eq!(
+            after.display_name, before.display_name,
+            "partial profile on {mode}"
+        );
+        assert_eq!(after.password_hash, before.password_hash);
+        assert!(!after.is_forbidden);
+        let active:i64=sqlx::query_scalar("SELECT count(*) FROM users u JOIN syncer_user_links l ON l.user_id=u.id WHERE l.syncer_id=$1 AND NOT u.is_forbidden").bind(&id).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(active, 3, "false deletion on {mode}");
+    }
+    {
+        let mut state = state.lock().unwrap();
+        state.mode = "normal".into();
+        state.display = "Recovered".into();
+    }
+    assert_eq!(f.run(&id).await["status"], "ok");
+    assert_eq!(f.user().await.display_name, "Recovered 0");
+    server.abort();
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated PostgreSQL main and source fixture databases"]
+async fn active_directory_guid_identity_profile_defaults_and_uac_survive_dn_and_username_changes() {
+    let f = Fixture::new().await;
+    let before = f.user().await;
+    let (endpoint, state, server) = paged_directory().await;
+    state.lock().unwrap().ad = true;
+    let guid = "00112233-4455-6677-8899-aabbccddeeff";
+    sqlx::query("UPDATE users SET external_id=$1,ldap='directory-provider-reference',properties='{\"keep\":\"existing\"}' WHERE id=$2").bind(guid).bind(&f.user).execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE users SET external_id=$1 WHERE owner=$2 AND name='alice'")
+        .bind(guid)
+        .bind(&f.foreign)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let body = json!({"owner":f.owner,"name":"active-directory","organization":f.owner,"type":"Active Directory","host":endpoint,"port":389,"user":"cn=sync,dc=test","password":"directory-secret","database":"dc=test","isReadOnly":true});
+    let id = f.json("POST", "/api/syncers", Some(body)).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(f.run(&id).await["recordsSynced"], 3);
+    let first = f.user().await;
+    assert_eq!(first.id, before.id);
+    assert_eq!(first.external_id.as_deref(), Some(guid));
+    assert_eq!(first.ldap.as_deref(), Some("directory-provider-reference"));
+    assert_eq!(first.password_hash, before.password_hash);
+    assert_eq!(first.name, "ad-alice");
+    assert_eq!(first.display_name, "Directory Person");
+    assert_eq!(first.email.as_deref(), Some("ad0@directory.test"));
+    assert_eq!(first.phone.as_deref(), Some("123456789"));
+    assert_eq!(first.title.as_deref(), Some("Engineer"));
+    assert_eq!(first.affiliation.as_deref(), Some("R&D"));
+    assert_eq!(first.location.as_deref(), Some("Shanghai, Shanghai, China"));
+    assert_eq!(
+        first.address,
+        Some(json!(["1 Main Street, Shanghai, Shanghai, 200000, China"]))
+    );
+    assert_eq!(
+        first.properties.as_ref().unwrap()["company"],
+        "Directory Company"
+    );
+    assert_eq!(
+        first.properties.as_ref().unwrap()["userPrincipalName"],
+        "ad0@directory.test"
+    );
+    assert_eq!(first.properties.as_ref().unwrap()["keep"], "existing");
+    assert_eq!(first.created_at.to_rfc3339(), "2023-10-10T12:00:00+00:00");
+    let ascii:i64=sqlx::query_scalar("SELECT count(*) FROM users WHERE owner=$1 AND external_id='64636261-6665-6867-696a-6b6c6d6e6f70'").bind(&f.owner).fetch_one(&f.pool).await.unwrap();
+    assert_eq!(
+        ascii, 1,
+        "GUID bytes that happen to be UTF8 still need AD byte ordering"
+    );
+    {
+        let mut state = state.lock().unwrap();
+        state.dn_suffix = "ou=moved,dc=test".into();
+        state.username = "renamed-ad-alice".into();
+    }
+    f.run(&id).await;
+    let renamed = f.user().await;
+    assert_eq!(renamed.id, first.id);
+    assert_eq!(renamed.name, "renamed-ad-alice");
+    assert_eq!(renamed.password_hash, first.password_hash);
+    assert_eq!(renamed.ldap, first.ldap);
+    let links: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM syncer_user_links WHERE syncer_id=$1")
+            .bind(&id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(links, 3);
+    {
+        let mut state = state.lock().unwrap();
+        state.mode = "missing-ad-guid".into();
+        state.ids = vec![0, 1, 2, 3];
+    }
+    assert_eq!(f.run(&id).await["recordsSynced"], 4);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM users WHERE owner=$1 AND external_id='ad-user-3'"
+        )
+        .bind(&f.owner)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap(),
+        1,
+        "absent GUID uses upstream's explicit sAMAccountName fallback"
+    );
+    {
+        let mut state = state.lock().unwrap();
+        state.mode = "normal".into();
+        state.ids = vec![0, 1, 2];
+    }
+    assert_eq!(f.run(&id).await["recordsForbidden"], 1);
+    for (uac, disabled) in [
+        ("512", false),
+        ("514", true),
+        ("66048", false),
+        ("66050", true),
+    ] {
+        state.lock().unwrap().uac = uac.into();
+        f.run(&id).await;
+        assert_eq!(
+            f.user().await.is_forbidden,
+            disabled,
+            "wrong ACCOUNTDISABLE bit for {uac}"
+        );
+    }
+    state.lock().unwrap().uac = "512".into();
+    f.run(&id).await;
+    let stable = f.user().await;
+    for mode in [
+        "bad-ad-guid",
+        "bad-ad-uac",
+        "error",
+        "truncated",
+        "malformed",
+        "missing",
+    ] {
+        {
+            let mut state = state.lock().unwrap();
+            state.mode = mode.into();
+            state.username = "must-not-partially-rename".into();
+        }
+        assert_eq!(
+            f.request("POST", &format!("/api/syncers/{id}/run"), None)
+                .await
+                .status_code,
+            Some(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+        let current = f.user().await;
+        assert_eq!(current.name, stable.name);
+        assert_eq!(current.password_hash, stable.password_hash);
+        assert!(!current.is_forbidden);
+    }
+    let foreign: (String, bool) = sqlx::query_as(
+        "SELECT password_hash,is_forbidden FROM users WHERE owner=$1 AND external_id=$2",
+    )
+    .bind(&f.foreign)
+    .bind(guid)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(foreign, ("foreign-hash".into(), false));
+    {
+        let mut state = state.lock().unwrap();
+        state.mode = "normal".into();
+        state.username = "renamed-ad-alice".into();
+    }
+    f.json("PUT",&format!("/api/syncers/{id}"),Some(json!({"tableColumns":[{"name":"sn+givenName","type":"String","casdoorName":"DisplayName"}]}))).await;
+    f.run(&id).await;
+    assert_eq!(f.user().await.display_name, "Person Directory");
+    let rejected = f
+        .request(
+            "PUT",
+            &format!("/api/syncers/{id}"),
+            Some(
+                json!({"tableColumns":[{"name":"title","type":"String","casdoorName":"IsAdmin"}]}),
+            ),
+        )
+        .await;
+    assert_ne!(rejected.status_code, Some(StatusCode::OK));
+    server.abort();
+    f.cleanup().await;
 }

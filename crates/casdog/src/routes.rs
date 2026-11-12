@@ -191,6 +191,8 @@ fn protected_routes() -> Router {
         .hoop(AuthzFilter)
         .push(Router::with_path("trust-application-credentials").post(application::trust_credentials))
         .push(Router::with_path("store/catalog").get(crate::handlers::commerce_store::catalog))
+        .push(Router::with_path("store/cart").get(crate::handlers::cart::get_cart).put(crate::handlers::cart::replace_cart))
+        .push(Router::with_path("store/cart/checkout").post(crate::handlers::cart::checkout_cart))
         .push(Router::with_path("telemetry/receivers").get(crate::handlers::telemetry::list_receivers).post(crate::handlers::telemetry::save_receiver))
         .push(Router::with_path("telemetry/receivers/{id}").delete(crate::handlers::telemetry::delete_receiver))
         .push(Router::with_path("store/purchases").get(crate::handlers::commerce_store::purchases))

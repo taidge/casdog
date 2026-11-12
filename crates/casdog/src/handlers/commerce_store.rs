@@ -62,11 +62,20 @@ pub async fn catalog(depot: &mut Depot, req: &Request) -> AppResult<Json<Value>>
         .collect();
     let plans: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(p)-'is_deleted' FROM plans p WHERE owner=$1 AND id=ANY($2) AND NOT is_deleted AND is_enabled ORDER BY name")
         .bind(&principal.owner).bind(&plan_ids).fetch_all(pool).await?;
-    let pricing_rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'display_name',display_name,'plans',plans) FROM pricings WHERE owner=$1 AND NOT is_deleted AND is_enabled ORDER BY name")
+    let current_user: Value = sqlx::query_scalar("SELECT to_jsonb(u) FROM users u JOIN organizations o ON o.name=u.owner WHERE u.id=$1 AND u.owner=$2 AND NOT u.is_deleted AND NOT u.is_forbidden AND NOT o.is_deleted AND NOT o.disable_signin")
+        .bind(&principal.id).bind(&principal.owner).fetch_optional(pool).await?
+        .ok_or_else(||AppError::Authorization("The store requires a current user in an active tenant".into()))?;
+    let pricing_rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'owner',owner,'name',name,'display_name',display_name,'plans',plans,'is_invite_only',is_invite_only,'users',users) FROM pricings WHERE owner=$1 AND NOT is_deleted AND is_enabled ORDER BY name")
         .bind(&principal.owner).fetch_all(pool).await?;
     let pricings: Vec<Value> = pricing_rows
         .into_iter()
         .filter(|pricing| {
+            if !crate::services::pricing_access_service::PricingAccessService::allows_json(
+                pricing,
+                Some(&current_user),
+            ) {
+                return false;
+            }
             let references: Vec<String> =
                 serde_json::from_str(pricing["plans"].as_str().unwrap_or("[]")).unwrap_or_default();
             plans.iter().any(|plan| {
@@ -81,6 +90,12 @@ pub async fn catalog(depot: &mut Depot, req: &Request) -> AppResult<Json<Value>>
                             )
                 })
             })
+        })
+        .map(|mut pricing| {
+            if let Some(object) = pricing.as_object_mut() {
+                object.remove("users");
+            }
+            pricing
         })
         .collect();
     let providers: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'display_name',display_name,'type',type) FROM providers WHERE owner=$1 AND category='Payment' ORDER BY name")
@@ -102,7 +117,7 @@ pub async fn purchases(depot: &mut Depot, req: &Request) -> AppResult<Json<Value
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders o LEFT JOIN order_benefits b ON b.order_id=o.id WHERE o.owner=$1 AND NOT o.is_deleted AND o.buyer_id=$2")
         .bind(&principal.owner).bind(&principal.id).fetch_one(pool).await?;
     let orders: Vec<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('id',o.id,'name',o.name,'display_name',o.display_name,'state',o.state,'price',o.price,'currency',o.currency,'quantity',o.quantity,'created_at',o.created_at,'product_name',o.product_name,'plan_name',o.plan_name,'pricing_name',o.pricing_name,'payment_id',p.id,'payment_state',p.state,'pay_url',p.pay_url,'kind',b.kind) FROM orders o LEFT JOIN order_benefits b ON b.order_id=o.id LEFT JOIN payments p ON p.id=o.payment_id AND p.owner=o.owner AND NOT p.is_deleted WHERE o.owner=$1 AND NOT o.is_deleted AND o.buyer_id=$2 ORDER BY o.created_at DESC,o.id LIMIT $3 OFFSET $4",
+        "SELECT jsonb_build_object('id',o.id,'name',o.name,'display_name',o.display_name,'state',o.state,'price',o.price,'currency',o.currency,'quantity',o.quantity,'created_at',o.created_at,'product_name',o.product_name,'plan_name',o.plan_name,'pricing_name',o.pricing_name,'payment_id',p.id,'payment_state',p.state,'pay_url',p.pay_url,'kind',COALESCE(b.kind,CASE WHEN EXISTS(SELECT 1 FROM order_lines WHERE order_id=o.id) THEN 'cart' END),'lines',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',l.id,'product_name',l.product_name,'display_name',l.display_name,'kind',l.kind,'quantity',l.quantity,'unit_amount_cents',l.unit_amount_cents,'amount_cents',l.amount_cents,'currency',l.currency) ORDER BY l.position) FROM order_lines l WHERE l.order_id=o.id),'[]'::jsonb)) FROM orders o LEFT JOIN order_benefits b ON b.order_id=o.id LEFT JOIN payments p ON p.id=o.payment_id AND p.owner=o.owner AND NOT p.is_deleted WHERE o.owner=$1 AND NOT o.is_deleted AND o.buyer_id=$2 ORDER BY o.created_at DESC,o.id LIMIT $3 OFFSET $4",
     ).bind(&principal.owner).bind(&principal.id).bind(size).bind((page-1)*size).fetch_all(pool).await?;
     let subscriptions: Vec<Value> = sqlx::query_scalar(
         "SELECT jsonb_build_object('id',s.id,'name',s.name,'display_name',s.display_name,'plan',p.display_name,'state',CASE WHEN lower(s.state) IN ('active','upcoming','expired') THEN CASE WHEN s.end_date<=clock_timestamp() THEN 'expired' WHEN s.start_date>clock_timestamp() THEN 'upcoming' ELSE 'active' END ELSE s.state END,'period',s.period,'start_date',s.start_date,'end_date',s.end_date,'auto_renew',s.auto_renew,'renewal_quote',jsonb_build_object('amount',CASE WHEN lower(s.period)='yearly' THEN p.price_per_year ELSE p.price_per_month END,'currency',COALESCE(p.currency,'USD')),'renewal',jsonb_build_object('enabled',COALESCE(a.enabled AND s.auto_renew,false),'mode',a.mode,'currency',a.currency,'max_amount_cents',a.max_amount_cents,'state',w.state,'order_id',w.order_id,'last_error',w.last_error),'active',lower(s.state)='active' AND s.start_date<=clock_timestamp() AND (s.end_date IS NULL OR s.end_date>clock_timestamp())) FROM subscriptions s LEFT JOIN plans p ON p.id=s.plan_id AND p.owner=s.owner LEFT JOIN subscription_renewal_authorizations a ON a.subscription_id=s.id LEFT JOIN LATERAL(SELECT state,order_id,last_error FROM subscription_renewal_work WHERE subscription_id=s.id ORDER BY due_at DESC LIMIT 1) w ON true WHERE s.owner=$1 AND s.user_id=$2 AND NOT s.is_deleted ORDER BY s.created_at DESC,s.id",

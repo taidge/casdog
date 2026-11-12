@@ -36,6 +36,53 @@ fn flag(row: &Map<String, Value>, name: &str) -> AppResult<bool> {
 fn nonempty(value: Option<&Value>) -> bool {
     value.is_some_and(|v| !v.is_null() && v != &json!("") && v != &json!([]))
 }
+fn normalized_phone(row: &Map<String, Value>) -> AppResult<(String, String)> {
+    let raw = row
+        .get("phone")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    if raw.is_empty()
+        || raw.len() > 128
+        || !raw
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '+' | ' ' | '-' | '.' | '(' | ')' | '/'))
+    {
+        return Err(invalid());
+    }
+    let country = match row.get("country_code") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(value)) => value.trim(),
+        _ => return Err(invalid()),
+    }
+    .to_ascii_uppercase();
+    let region = if country.is_empty() {
+        None
+    } else {
+        Some(
+            country
+                .parse::<phonenumber::country::Id>()
+                .map_err(|_| invalid())?,
+        )
+    };
+    if region.is_none() && !raw.trim_start().starts_with('+') {
+        return Err(invalid());
+    }
+    let number = phonenumber::parse(region, raw).map_err(|_| invalid())?;
+    if !number.is_valid() || number.extension().is_some() {
+        return Err(invalid());
+    }
+    let actual = number.country().id().ok_or_else(invalid)?;
+    if region.is_some_and(|region| region != actual) {
+        return Err(invalid());
+    }
+    // Unlike Casdoor's national-number storage, local MFA delivery sends the
+    // stored phone directly. Persist E.164, retaining the ISO region used by
+    // application countryCodes rules rather than inventing a calling-code map.
+    Ok((
+        number.format().mode(phonenumber::Mode::E164).to_string(),
+        actual.as_ref().to_owned(),
+    ))
+}
 pub fn prepare(row: &mut Map<String, Value>) -> AppResult<Option<Enrollment>> {
     for field in ["mfa_items", "mfa_accounts", "webauthn_credentials"] {
         if nonempty(row.get(field)) {
@@ -142,12 +189,9 @@ pub fn prepare(row: &mut Map<String, Value>) -> AppResult<Option<Enrollment>> {
         }
     }
     if sms {
-        let phone = row.get("phone").and_then(Value::as_str).unwrap_or_default();
-        if !phone.strip_prefix('+').is_some_and(|digits| {
-            (7..=15).contains(&digits.len()) && digits.bytes().all(|c| c.is_ascii_digit())
-        }) {
-            return Err(invalid());
-        }
+        let (phone, country) = normalized_phone(row)?;
+        row.insert("phone".into(), json!(phone));
+        row.insert("country_code".into(), json!(country));
     }
     for field in [
         "totp_secret",

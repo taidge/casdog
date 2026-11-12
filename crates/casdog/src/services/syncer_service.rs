@@ -85,13 +85,13 @@ impl SyncerService {
         }
         if !matches!(
             s.syncer_type.as_str(),
-            "Database" | "LDAP" | "Keycloak" | "SCIM"
+            "Database" | "LDAP" | "Active Directory" | "Keycloak" | "SCIM"
         ) {
             return Err(AppError::Validation("Unsupported syncer type".into()));
         }
         if !s.is_read_only && s.syncer_type != "Database" {
             return Err(AppError::Validation(
-                "LDAP, Keycloak and SCIM writeback are unsupported; enable read-only synchronization"
+                "LDAP, Active Directory, Keycloak and SCIM writeback are unsupported; enable read-only synchronization"
                     .into(),
             ));
         }
@@ -108,7 +108,9 @@ impl SyncerService {
                 "Invalid syncer source database, table or credentials".into(),
             ));
         }
-        if s.syncer_type != "LDAP" {
+        if s.syncer_type == "Active Directory" {
+            crate::services::syncer_executor::SyncerExecutor::ad_columns(s)?;
+        } else if s.syncer_type != "LDAP" {
             if !matches!(
                 s.database_type
                     .as_deref()

@@ -48,9 +48,10 @@ pub fn password(name: &str, value: Cage<String>) -> glory::ui::View {
     stack((label(name), control))
 }
 pub fn select(scope: &Scope, name: &str, value: Cage<String>, options: Vec<(String, String)>) -> sapid::NativeSelect {
+    let known_keys: Vec<String> = options.iter().map(|(key,_)|key.clone()).collect();
     sapid::native_select(name.to_ascii_lowercase().replace(' ', "-"))
         .name(name.to_string())
-        .value(scope.bond(move || Some(value.get())))
+        .value(scope.bond(move || {let current=value.get();known_keys.contains(&current).then_some(current)}))
         .options(options.into_iter().map(|(key, label)| sapid::select_option(key, label)))
         .on_value_change(move |next| value.set(next.unwrap_or_default()))
 }

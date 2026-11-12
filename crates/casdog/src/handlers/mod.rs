@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod app_extra;
 pub mod application;
 pub mod auth;
+pub mod cart;
 pub mod cas;
 pub mod casbin_cli;
 pub mod casdoor_compat;

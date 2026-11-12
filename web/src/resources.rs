@@ -224,7 +224,7 @@ pub const RESOURCES: &[ResourceConfig] = &[
         group: "Commerce",
         endpoint: "/api/pricings",
         description: "Published collections of subscription plans.",
-        template: r#"{"owner":"admin","name":"starter_usd","display_name":"Starter USD","plans":"[\"admin/starter_monthly\"]","is_enabled":true}"#,
+        template: r#"{"owner":"admin","name":"starter_usd","display_name":"Starter USD","plans":"[\"admin/starter_monthly\"]","is_enabled":true,"is_invite_only":false,"users":[]}"#,
     },
     ResourceConfig {
         slug: "subscriptions",

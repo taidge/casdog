@@ -15,7 +15,7 @@ const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--f
   encoding: 'utf8',
   windowsHide: true,
 }));
-const artifacts = path.join(metadata.target_directory, 'phase11', 'browser-e2e');
+const artifacts = path.join(metadata.target_directory, 'phase12', 'browser-e2e');
 const origin = process.env.CASDOG_E2E_BASE_URL || 'http://localhost:18085';
 const database = process.env.CASDOG_TEST_DATABASE_URL;
 assert.ok(database, 'CASDOG_TEST_DATABASE_URL must identify a migrated disposable database');
@@ -410,6 +410,25 @@ async function main() {
     owned=await api('GET','/api/store/purchases',undefined,token);assert.equal(owned.subscriptions[0].renewal.enabled,false);
     checks.push('Store renewal requires explicit beneficiary consent at the displayed price cap and persists enable/disable without authorizing an administrator to spend for another user');
 
+    await api('PUT',`/api/pricings/${billingPricing.id}`,{is_invite_only:true,users:['another-invited-user']},admin.token);
+    let blockedPurchaseRequests=0;
+    const countBlockedPurchase=request=>{if(new URL(request.url()).pathname==='/api/buy-product')blockedPurchaseRequests++;};
+    page.on('request',countBlockedPurchase);
+    await page.getByRole('button',{name:'Refresh store',exact:true}).click();
+    await page.getByRole('button',{name:'Select Browser premium plan',exact:true}).click();
+    assert.equal(await page.getByRole('combobox',{name:'Plan pricing',exact:true}).locator('option').count(),0);
+    await page.getByRole('button',{name:'Confirm purchase',exact:true}).click();
+    await page.getByText('No enabled pricing is available for this plan.',{exact:true}).waitFor();
+    assert.equal(blockedPurchaseRequests,0);page.off('request',countBlockedPurchase);
+    await api('PUT',`/api/pricings/${billingPricing.id}`,{users:[username]},admin.token);
+    await page.getByRole('button',{name:'Refresh store',exact:true}).click();
+    await page.getByRole('button',{name:'Select Browser premium plan',exact:true}).click();
+    assert.equal(await page.getByRole('combobox',{name:'Plan pricing',exact:true}).inputValue(),billingPricing.id);
+    const invitedCatalog=await api('GET','/api/store/catalog',undefined,token);
+    assert.ok(invitedCatalog.pricings.some(pricing=>pricing.id===billingPricing.id));
+    assert.ok(invitedCatalog.pricings.every(pricing=>!Object.hasOwn(pricing,'users')));
+    checks.push('Invite-only pricing disappears for an uninvited user, prevents checkout without a request, reappears after invitation and never exposes its username whitelist');
+
     const developmentGateway=await api('POST','/api/providers',{owner:'built-in',name:`browser-development-payment-${suffix}`,display_name:'Development gateway',category:'Payment',type:'Dummy'},admin.token);
     await api('POST','/api/products',{owner:'built-in',name:`browser-recharge-${suffix}`,display_name:'Browser wallet recharge',is_recharge:true,recharge_options:[5,10],disable_custom_recharge:true,price:0,currency:'USD',quantity:-1,state:'Active'},admin.token);
     await page.getByRole('button',{name:'Refresh store',exact:true}).click();
@@ -423,6 +442,9 @@ async function main() {
     owned=await api('GET','/api/store/purchases',undefined,token);
     const pending=owned.data.find(order=>order.kind==='recharge');assert.ok(pending);
     assert.ok(pending.payment_id);
+    // The post-checkout purchase reload must render its pending state before a
+    // separate client settles it; otherwise that reload can already show Paid.
+    await page.getByRole('button',{name:`Refresh payment ${pending.id}`,exact:true}).waitFor();
     await api('POST','/api/notify-payment',{id:pending.payment_id,state:'Paid'},admin.token);
     await page.getByRole('button',{name:`Refresh payment ${pending.id}`,exact:true}).click();
     await page.getByText('Payment refreshed.',{exact:true}).waitFor();
@@ -434,6 +456,39 @@ async function main() {
     await page.screenshot({path:path.join(artifacts,'store-mobile.png'),fullPage:true});
     await page.setViewportSize({width:1440,height:1000});
     checks.push('Store recharge excludes self-funding wallet, restricts configured amounts and reflects an administrator-settled development payment exactly once');
+    const cartA=await api('POST','/api/products',{owner:'built-in',name:`browser-cart-a-${suffix}`,display_name:'Browser cart item A',price:2,currency:'USD',quantity:5,state:'Active'},admin.token);
+    const cartB=await api('POST','/api/products',{owner:'built-in',name:`browser-cart-b-${suffix}`,display_name:'Browser cart item B',price:3,currency:'USD',quantity:5,state:'Active'},admin.token);
+    await page.getByRole('button',{name:'Refresh store',exact:true}).click();
+    await page.getByRole('button',{name:'Select Browser cart item A',exact:true}).click();
+    await fill('Cart quantity','2');await page.getByRole('button',{name:'Add to cart',exact:true}).click();
+    await page.getByText('Added to your cart. Open Shopping cart to review and place one order.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Select Browser cart item B',exact:true}).click();
+    await page.getByRole('button',{name:'Add to cart',exact:true}).click();
+    await page.getByText('Added to your cart. Open Shopping cart to review and place one order.',{exact:true}).waitFor();
+    await navigate('Shopping cart','Shopping cart');
+    await page.getByText('Cart total: 7.00 USD',{exact:true}).waitFor();
+    await fill('Quantity for Browser cart item A','3');
+    await page.getByRole('button',{name:'Update quantity for Browser cart item A',exact:true}).click();
+    await page.getByText('Cart total: 9.00 USD',{exact:true}).waitFor();
+    await page.reload();await navigate('Shopping cart','Shopping cart');
+    await page.getByText('Cart total: 9.00 USD',{exact:true}).waitFor();
+    const cartBefore=(await api('GET','/api/store/cart',undefined,token)).data;
+    assert.equal(cartBefore.items.length,2);
+    await page.getByRole('combobox',{name:'Cart payment provider',exact:true}).selectOption(wallet.id);
+    await page.evaluate(()=>new Promise(requestAnimationFrame));
+    await page.getByRole('button',{name:'Place cart order',exact:true}).click();
+    await page.getByText('Cart order paid. Open Store to view your purchase and benefits.',{exact:true}).waitFor();
+    await page.getByText('Your cart is empty.',{exact:true}).waitFor();
+    owned=await api('GET','/api/store/purchases',undefined,token);
+    const cartOrder=owned.data.find(order=>order.kind==='cart');
+    assert.ok(cartOrder);assert.equal(cartOrder.state,'Paid');assert.equal(cartOrder.price,9);
+    assert.equal(cartOrder.lines.length,2);assert.equal(owned.data.length,3);assert.equal(owned.wallet.balance,16.5);
+    await api('POST',`/api/pay-order?id=${cartOrder.id}`,undefined,token);
+    assert.equal((await api('GET','/api/store/purchases',undefined,token)).wallet.balance,16.5);
+    assert.equal((await api('GET',`/api/products/${cartA.id}`,undefined,admin.token)).quantity,2);
+    assert.equal((await api('GET',`/api/products/${cartB.id}`,undefined,admin.token)).quantity,4);
+    await page.screenshot({path:path.join(artifacts,'cart-paid.png'),fullPage:true});
+    checks.push('Persistent multi-SKU cart survives browser reload, edits quantity, creates one paid order and debits the wallet and finite stock exactly once');
     await navigate('Account','Account settings');
 
     const loginApplication=await api('POST','/api/applications',{
@@ -660,14 +715,18 @@ async function main() {
     assert.ok(!(await page.evaluate(()=>JSON.stringify({...localStorage,...sessionStorage}))).includes(restoreSeed));
     await page.screenshot({path:path.join(artifacts,'mfa-restored.png'),fullPage:true});
     await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
-    const signInRestored=async()=>{await fill('Username',restoredName);await fill('Password',restorePassword,true);await page.getByRole('button',{name:'Sign in',exact:true}).last().click();await page.getByRole('combobox',{name:'Verification method'}).waitFor();assert.equal(await page.evaluate(()=>localStorage.getItem('casdog.auth.token')),null);await page.getByRole('combobox',{name:'Verification method'}).selectOption('recovery');await fill('Verification code',restoreRecovery);};
+    const signInRestored=async(selectRecovery=true)=>{await fill('Username',restoredName);await fill('Password',restorePassword,true);await page.getByRole('button',{name:'Sign in',exact:true}).last().click();await page.getByRole('combobox',{name:'Verification method'}).waitFor();assert.equal(await page.evaluate(()=>localStorage.getItem('casdog.auth.token')),null);if(selectRecovery){await page.getByRole('combobox',{name:'Verification method'}).selectOption('recovery');await fill('Verification code',restoreRecovery);}};
     await signInRestored();await page.getByRole('button',{name:'Sign in',exact:true}).last().click();await page.getByRole('heading',{name:'Identity and access management'}).waitFor();
     const restoredToken=await page.evaluate(()=>JSON.parse(localStorage.getItem('casdog.auth.token')));
     assert.equal((await api('GET','/api/get-account',undefined,restoredToken)).id,restoredId);
     await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
-    await signInRestored();
-    const reusedRecovery=page.waitForResponse(response=>response.url().endsWith('/api/auth/password/session')&&response.request().postData()?.includes(restoreRecovery));
-    await page.getByRole('button',{name:'Sign in',exact:true}).last().click();assert.equal((await reusedRecovery).ok(),false);
+    await signInRestored(false);
+    // The only recovery code has been consumed, so the UI correctly stops
+    // offering that factor. A forged retry using the same browser challenge
+    // must also fail at the server.
+    assert.equal(await page.getByRole('combobox',{name:'Verification method'}).locator('option').evaluateAll(options=>options.some(option=>option.value==='recovery')),false);
+    const reusedRecovery=await context.request.post(`${origin}/api/auth/password/session`,{headers:{Origin:origin},data:{mfa_type:'recovery',passcode:restoreRecovery}});
+    assert.equal(reusedRecovery.ok(),false);
     assert.equal(await page.evaluate(()=>localStorage.getItem('casdog.auth.token')),null);
     checks.push('Trusted local JSON MFA backup restores through the admin UI, keeps secrets out of browser storage, enforces password MFA and consumes the original recovery code once');
     assert.deepEqual(runtimeErrors, []);

@@ -331,7 +331,7 @@ pub async fn delete_coupon(depot: &mut Depot, req: &mut Request) -> AppResult<Js
     }
     Ok(ok(json!(true)))
 }
-async fn coupon_discount(
+pub(crate) async fn coupon_discount(
     tx: &mut Transaction<'_, Postgres>,
     owner: &str,
     code: &str,
@@ -535,6 +535,13 @@ pub async fn buy_product(depot: &mut Depot, req: &mut Request) -> AppResult<Json
         if plan["is_enabled"] != true || pricing["is_enabled"] != true {
             return Err(invalid("Plan or pricing is disabled"));
         }
+        crate::services::pricing_access_service::PricingAccessService::ensure_allowed_conn(
+            &mut tx,
+            &required(&pricing, "id")?,
+            &required(&user, "id")?,
+            &owner,
+        )
+        .await?;
         let pid = required(&plan, "id")?;
         let pname = required(&plan, "name")?;
         if string(&product, "plan_id") != Some(pid.as_str()) {

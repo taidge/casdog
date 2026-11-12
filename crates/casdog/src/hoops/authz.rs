@@ -211,7 +211,17 @@ pub async fn validate_resource_references(
     body: &Value,
     table: &str,
 ) -> AppResult<()> {
-    validate_references(pool, principal, body).await?;
+    if table == "pricings" {
+        // Invitations name future or current users; they are not foreign-key
+        // identities. Preserve the other tenant and resource checks.
+        let mut references = body.clone();
+        if let Some(object) = references.as_object_mut() {
+            object.remove("users");
+        }
+        validate_references(pool, principal, &references).await?;
+    } else {
+        validate_references(pool, principal, body).await?;
+    }
     if !principal.global_admin()
         && matches!(
             table,
@@ -432,6 +442,9 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
     if matches!(
         path.as_str(),
         "store/catalog"
+            | "store/cart"
+            | "store/cart/checkout"
+            | "place-order"
             | "store/purchases"
             | "get-agents"
             | "upload-resource"

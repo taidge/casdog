@@ -63,6 +63,10 @@ diesel::table! {
         balance_credit -> Double,
         balance_currency -> Nullable<VarChar>,
         record_retention_days -> Integer,
+        kerberos_realm -> Nullable<VarChar>,
+        kerberos_kdc_host -> Nullable<VarChar>,
+        kerberos_keytab -> Nullable<Text>,
+        kerberos_service_name -> Nullable<VarChar>,
     }
 }
 
@@ -742,6 +746,8 @@ diesel::table! {
         trial_duration -> Nullable<Integer>,
         application -> Nullable<VarChar>,
         is_enabled -> Bool,
+        is_invite_only -> Bool,
+        users -> Jsonb,
         is_deleted -> Bool,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,

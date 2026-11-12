@@ -26,13 +26,14 @@ async function main() {
     const context = await browser.newContext({viewport:{width:1440,height:1000}});
     page = await context.newPage();
     const errors = [], calls = [];
+    let expectedCartConflict=false;
     // Glory dispatches input through animation frames. Observe the committed
     // input before issuing the next interaction in these fast scripted flows.
     const fill = async (control, value) => {
       await control.fill(value);
       await page.evaluate(() => new Promise(requestAnimationFrame));
     };
-    page.on('console',event=>{if(event.type()==='error'){errors.push(event.text());console.error('Browser console',event.text());}});
+    page.on('console',event=>{if(event.type()==='error'){if(expectedCartConflict&&event.text().includes('the server responded with a status of 409'))return;errors.push(event.text());console.error('Browser console',event.text());}});
     page.on('pageerror',error=>{errors.push(error.message);console.error('Browser runtime error',error.message);});
     let users=[{id:'user-1',owner:'built-in',name:'alice',display_name:'Alice',is_admin:true,custom:{retained:'value'}}];
     const user={...users[0],email:'alice@example.test',phone:'+15555550123'};
@@ -46,6 +47,8 @@ async function main() {
     let siteSettings={dbMaxOpenConns:0,dbMaxIdleConns:0,dbConnMaxLifetime:0,recordRetentionDays:0};
     let receivers=[],receiverToken=0;
     let storeOrders=[],storeSubscriptions=[],walletBalance=100;
+    let cartRevision=0,cartItems=[],rejectCartQuote=false;
+    const cart=()=>({revision:cartRevision,items:cartItems,total_amount_cents:cartItems.reduce((sum,item)=>sum+item.total_amount_cents,0),currency:'USD',valid:true});
     const storeCatalog={status:'ok',total:2,data:[
       {id:'store-plan-product',name:'premium',display_name:'Fixture premium',plan_id:'store-plan',price:5,currency:'USD',quantity:-1},
       {id:'store-recharge',name:'recharge',display_name:'Fixture recharge',is_recharge:true,recharge_options:[5,10],disable_custom_recharge:true,price:0,currency:'USD',quantity:-1},
@@ -78,6 +81,19 @@ async function main() {
       }
 
       if(endpoint==='/api/store/catalog')return reply(route,storeCatalog);
+      if(endpoint==='/api/store/cart'&&req.method()==='GET')return reply(route,{status:'ok',data:cart()});
+      if(endpoint==='/api/store/cart'&&req.method()==='PUT'){
+        assert.equal(body.revision,cartRevision);
+        cartItems=body.items.map((item,index)=>{const product=storeCatalog.data.find(product=>product.id===item.productId),price=product.is_recharge?item.customPrice:5;return {id:`cart-${index}`,product_id:product.id,name:product.name,display_name:product.display_name,quantity:item.quantity,pricing_name:item.pricingName,plan_name:item.planName,period:item.period,custom_price:product.is_recharge?item.customPrice:null,unit_amount_cents:price*100,total_amount_cents:price*100*item.quantity,currency:'USD',valid:true};});
+        cartRevision++;return reply(route,{status:'ok',data:cart()});
+      }
+      if(endpoint==='/api/store/cart/checkout'){
+        assert.equal(body.revision,cartRevision);assert.equal(body.expectedTotalCents,cart().total_amount_cents);
+        if(rejectCartQuote){rejectCartQuote=false;return route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({status:'error',msg:'Cart quote changed. Refresh and review current prices.'})});}
+        const order={id:'cart-order',name:'cart-purchase',display_name:'Cart purchase',state:'Created',price:cart().total_amount_cents/100,currency:'USD'};
+        storeOrders.unshift(order);cartItems=[];cartRevision++;return reply(route,{status:'ok',data:{order,cart_revision:cartRevision}});
+      }
+      if(endpoint==='/api/pay-order'){storeOrders.find(order=>order.id===url.searchParams.get('id')).state='Paid';return reply(route,{status:'ok',autoPaid:true});}
       if(endpoint==='/api/store/purchases')return reply(route,{status:'ok',data:storeOrders,subscriptions:storeSubscriptions,wallet:{balance:walletBalance,currency:'USD'},total:storeOrders.length});
       if(endpoint==='/api/buy-product'){
         const recharge=url.searchParams.get('id')==='store-recharge';
@@ -302,6 +318,40 @@ async function main() {
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
     await page.screenshot({path:path.join(artifacts,'store-mobile.png'),fullPage:true});
     await page.setViewportSize({width:1440,height:1000});
+    await page.getByRole('button',{name:'Select Fixture premium',exact:true}).click();
+    await fill(page.getByRole('textbox',{name:'Cart quantity',exact:true}),'2');
+    await page.getByRole('button',{name:'Add to cart',exact:true}).click();
+    await page.getByText('Added to your cart. Open Shopping cart to review and place one order.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Open shopping cart',exact:true}).click();
+    await page.getByText('Cart total: 10.00 USD',{exact:true}).waitFor();
+    await fill(page.getByRole('textbox',{name:'Quantity for Fixture premium',exact:true}),'3');
+    await page.getByRole('button',{name:'Update quantity for Fixture premium',exact:true}).click();
+    await page.getByText('Cart total: 15.00 USD',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Store',exact:true}).click();
+    await page.getByRole('button',{name:'Select Fixture recharge',exact:true}).click();
+    await page.getByRole('combobox',{name:'Recharge option',exact:true}).selectOption('10');
+    await page.getByRole('button',{name:'Add to cart',exact:true}).click();
+    await page.getByText('Added to your cart. Open Shopping cart to review and place one order.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Shopping cart',exact:true}).click();
+    await page.getByText('Cart total: 25.00 USD',{exact:true}).waitFor();
+    assert.equal(await page.getByRole('combobox',{name:'Cart payment provider',exact:true}).locator('option[value="wallet"]').count(),0);
+    await page.getByRole('button',{name:'Remove Fixture recharge',exact:true}).click();
+    await page.getByText('Cart total: 15.00 USD',{exact:true}).waitFor();
+    rejectCartQuote=true;expectedCartConflict=true;
+    await page.getByRole('button',{name:'Place cart order',exact:true}).click();
+    await page.getByText('409: Cart quote changed. Refresh and review current prices.',{exact:true}).waitFor();
+    expectedCartConflict=false;
+    assert.equal(calls.filter(call=>call.endpoint==='/api/pay-order').length,0);
+    await page.getByRole('button',{name:'Refresh cart',exact:true}).click();
+    await page.getByText('Cart total: 15.00 USD',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Place cart order',exact:true}).click();
+    await page.getByText('Cart order paid. Open Store to view your purchase and benefits.',{exact:true}).waitFor();
+    await page.getByText('Your cart is empty.',{exact:true}).waitFor();
+    assert.equal(calls.filter(call=>call.endpoint==='/api/pay-order').length,1);
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
+    await page.screenshot({path:path.join(artifacts,'cart-mobile.png'),fullPage:true});
+    await page.setViewportSize({width:1440,height:1000});
     await page.getByRole('button',{name:'Site settings',exact:true}).click();
     await page.getByRole('button',{name:'Save site settings',exact:true}).click();
     await page.getByText('Load current settings before editing.',{exact:true}).waitFor();
@@ -439,6 +489,16 @@ async function main() {
     assert.equal(providerWrite.type,'MCP Scan');
     assert.equal(providerWrite.scopes,'127.0.0.1/32');
     assert.equal(providerWrite.content,'8080');
+
+    await page.getByRole('button',{name:'Pricings',exact:true}).click();
+    await fill(page.getByRole('textbox',{name:'Owner',exact:true}),'built-in');
+    await fill(page.getByRole('textbox',{name:'Name',exact:true}),'invited-pricing');
+    await page.getByRole('checkbox',{name:'Invite-only pricing',exact:true}).check();
+    await fill(page.getByRole('textbox',{name:'Invited usernames (empty allows the whole tenant)',exact:true}),'alice, future-user');
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();
+    await page.getByText('Resource saved.',{exact:true}).waitFor();
+    const pricingWrite=calls.filter(call=>call.endpoint==='/api/pricings'&&call.method==='POST').at(-1).body;
+    assert.equal(pricingWrite.is_invite_only,true);assert.deepEqual(pricingWrite.users,['alice','future-user']);
 
     delayProfile=true;
     const delayedProfile=page.waitForRequest(request=>new URL(request.url()).pathname==='/api/get-account');

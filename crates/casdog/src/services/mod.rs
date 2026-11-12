@@ -1,6 +1,7 @@
 pub mod adapter_service;
 pub mod app_service;
 pub mod auth_service;
+pub mod cart_service;
 pub mod cas_service;
 pub mod casbin_service;
 pub mod cert_service;
@@ -66,6 +67,7 @@ pub mod form_service;
 pub mod order_service;
 pub mod payment_service;
 pub mod plan_service;
+pub mod pricing_access_service;
 pub mod pricing_service;
 pub mod product_service;
 pub mod subscription_service;
@@ -96,6 +98,7 @@ pub use webhook_executor::{WebhookExecutor, WebhookPayload};
 pub mod password_reset_service;
 
 pub mod key_credentials_service;
+pub mod kerberos_service;
 pub mod primary_auth_service;
 pub mod protocol_gap_service;
 pub mod social_state_service;

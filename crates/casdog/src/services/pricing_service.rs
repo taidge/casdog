@@ -19,7 +19,7 @@ impl PricingService {
             sqlx::query_as(
                 r#"
                 SELECT id, owner, name, display_name, description, plans, trial_duration,
-                       application, is_enabled, is_deleted, created_at, updated_at
+                       application, is_enabled, is_deleted, created_at, updated_at, is_invite_only, users
                 FROM pricings
                 WHERE owner = $1 AND is_deleted = false
                 ORDER BY created_at DESC
@@ -35,7 +35,7 @@ impl PricingService {
             sqlx::query_as(
                 r#"
                 SELECT id, owner, name, display_name, description, plans, trial_duration,
-                       application, is_enabled, is_deleted, created_at, updated_at
+                       application, is_enabled, is_deleted, created_at, updated_at, is_invite_only, users
                 FROM pricings
                 WHERE is_deleted = false
                 ORDER BY created_at DESC
@@ -68,7 +68,7 @@ impl PricingService {
         let pricing: Pricing = sqlx::query_as(
             r#"
             SELECT id, owner, name, display_name, description, plans, trial_duration,
-                   application, is_enabled, is_deleted, created_at, updated_at
+                   application, is_enabled, is_deleted, created_at, updated_at, is_invite_only, users
             FROM pricings
             WHERE id = $1 AND is_deleted = false
             "#,
@@ -82,6 +82,8 @@ impl PricingService {
     }
 
     pub async fn create(pool: &PgPool, req: CreatePricingRequest) -> AppResult<PricingResponse> {
+        let users = req.users.unwrap_or_default();
+        super::pricing_access_service::PricingAccessService::validate_users(&users)?;
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
@@ -89,8 +91,8 @@ impl PricingService {
             r#"
             INSERT INTO pricings (id, owner, name, display_name, description, plans,
                                   trial_duration, application, is_enabled, is_deleted,
-                                  created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, $10, $11)
+                                  created_at, updated_at, is_invite_only, users)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, $10, $11, $12, $13)
             "#,
         )
         .bind(&id)
@@ -104,6 +106,8 @@ impl PricingService {
         .bind(req.is_enabled.unwrap_or(true))
         .bind(now)
         .bind(now)
+        .bind(req.is_invite_only.unwrap_or(false))
+        .bind(serde_json::json!(users))
         .execute(pool)
         .await?;
 
@@ -115,6 +119,9 @@ impl PricingService {
         id: &str,
         req: UpdatePricingRequest,
     ) -> AppResult<PricingResponse> {
+        if let Some(users) = &req.users {
+            super::pricing_access_service::PricingAccessService::validate_users(users)?;
+        }
         let now = chrono::Utc::now();
 
         sqlx::query(
@@ -126,7 +133,9 @@ impl PricingService {
                 trial_duration = COALESCE($4, trial_duration),
                 application = COALESCE($5, application),
                 is_enabled = COALESCE($6, is_enabled),
-                updated_at = $7
+                updated_at = $7,
+                is_invite_only = COALESCE($9,is_invite_only),
+                users = COALESCE($10,users)
             WHERE id = $8 AND is_deleted = false
             "#,
         )
@@ -138,6 +147,8 @@ impl PricingService {
         .bind(req.is_enabled)
         .bind(now)
         .bind(id)
+        .bind(req.is_invite_only)
+        .bind(req.users.map(|users| serde_json::json!(users)))
         .execute(pool)
         .await?;
 

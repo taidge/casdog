@@ -72,6 +72,11 @@ opentelemetry-proto = { version = "0.33.1", default-features = false, features =
 prost-reflect = "0.16"
 html5ever = "0.40.1"
 markup5ever_rcdom = "0.40.1"
+phonenumber = "0.3.10"
+sspi = { version = "0.23.1", default-features = false }
+picky-krb = "0.13.1"
+picky-asn1-der = "0.5"
+picky-asn1 = { version = "0.10", features = ["time_conversion"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

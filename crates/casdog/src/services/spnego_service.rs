@@ -50,7 +50,172 @@ impl SpnegoIdentity {
 
 pub struct SpnegoService;
 
+/// A bounded, structurally checked mechanism token. This is NOT an identity.
+pub(crate) struct AuthenticationToken {
+    pub ap_req: Vec<u8>,
+    pub spnego_mechanism: Option<Vec<u8>>,
+}
+
+const MS_KRB5_OID: &[u8] = &[
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01, 0x02, 0x02,
+];
+
+fn protocol_error() -> AppError {
+    AppError::Authentication("Invalid Kerberos negotiation token".into())
+}
+
+fn exact_tlv(data: &[u8], tag: u8) -> AppResult<&[u8]> {
+    if data.first() != Some(&tag) {
+        return Err(protocol_error());
+    }
+    let (len, value) = SpnegoService::read_tlv(data)?;
+    if len != data.len() {
+        return Err(protocol_error());
+    }
+    Ok(value)
+}
+
+pub(crate) fn der(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut value = vec![tag];
+    if content.len() < 128 {
+        value.push(content.len() as u8);
+    } else {
+        let bytes = content.len().to_be_bytes();
+        let start = bytes.iter().position(|b| *b != 0).unwrap();
+        value.push(0x80 | (bytes.len() - start) as u8);
+        value.extend_from_slice(&bytes[start..]);
+    }
+    value.extend_from_slice(content);
+    value
+}
+
+pub(crate) fn kerberos_gss(ap_req: &[u8]) -> Vec<u8> {
+    let mut inner = KRB5_OID.to_vec();
+    inner.extend_from_slice(&[1, 0]);
+    inner.extend_from_slice(ap_req);
+    der(0x60, &inner)
+}
+
+pub(crate) fn kerberos_reply(ap_rep: &[u8]) -> Vec<u8> {
+    let mut inner = KRB5_OID.to_vec();
+    inner.extend_from_slice(&[2, 0]);
+    inner.extend_from_slice(ap_rep);
+    der(0x60, &inner)
+}
+
+impl AuthenticationToken {
+    pub fn response(&self, kerberos_reply: &[u8]) -> Vec<u8> {
+        if let Some(mechanism) = &self.spnego_mechanism {
+            // NegTokenResp: accept-completed, chosen mechanism, optional AP-REP.
+            let mut fields = der(0xa0, &[0x0a, 1, 0]);
+            fields.extend(der(0xa1, mechanism));
+            if !kerberos_reply.is_empty() {
+                fields.extend(der(0xa2, &der(0x04, kerberos_reply)));
+            }
+            der(0xa1, &der(0x30, &fields))
+        } else {
+            kerberos_reply.to_vec()
+        }
+    }
+}
+
 impl SpnegoService {
+    pub(crate) fn authentication_token(token_b64: &str) -> AppResult<AuthenticationToken> {
+        if token_b64.is_empty() || token_b64.len() > 128 * 1024 {
+            return Err(protocol_error());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(token_b64)
+            .map_err(|_| protocol_error())?;
+        let mut token = bytes.as_slice();
+        let mut mechanism = None;
+        if token.first() == Some(&0x60) {
+            let content = exact_tlv(token, 0x60)?;
+            let (n, _) = Self::read_tlv(content)?;
+            let oid = &content[..n];
+            if oid == SPNEGO_OID {
+                token = &content[n..];
+            } else if oid == KRB5_OID || oid == MS_KRB5_OID {
+                let raw = content[n..]
+                    .strip_prefix(&[1, 0])
+                    .ok_or_else(protocol_error)?;
+                exact_tlv(raw, 0x6e)?;
+                return Ok(AuthenticationToken {
+                    ap_req: raw.to_vec(),
+                    spnego_mechanism: None,
+                });
+            } else {
+                return Err(protocol_error());
+            }
+        }
+        if token.first() != Some(&0xa0) {
+            return Err(protocol_error());
+        }
+        let fields = exact_tlv(exact_tlv(token, 0xa0)?, 0x30)?;
+        let mut position = 0;
+        let mut previous = 0x9f;
+        let mut mech_token = None;
+        while position < fields.len() {
+            let field = &fields[position..];
+            let tag = field[0];
+            let (n, content) = Self::read_tlv(field)?;
+            if tag <= previous || !(0xa0..=0xa3).contains(&tag) {
+                return Err(protocol_error());
+            }
+            previous = tag;
+            match tag {
+                0xa0 => {
+                    let mechs = exact_tlv(content, 0x30)?;
+                    let (first, _) = Self::read_tlv(mechs)?;
+                    let preferred = &mechs[..first];
+                    // Never select a fallback mechanism: that would require a
+                    // mechListMIC exchange. NTLM is never an authentication path.
+                    if preferred != KRB5_OID && preferred != MS_KRB5_OID {
+                        return Err(protocol_error());
+                    }
+                    let mut i = first;
+                    let mut count = 1;
+                    while i < mechs.len() {
+                        if mechs[i] != 6 || count >= 16 {
+                            return Err(protocol_error());
+                        }
+                        i += Self::read_tlv(&mechs[i..])?.0;
+                        count += 1;
+                    }
+                    mechanism = Some(preferred.to_vec());
+                }
+                0xa1 => {
+                    exact_tlv(content, 0x03)?;
+                }
+                0xa2 => {
+                    mech_token = Some(exact_tlv(content, 0x04)?);
+                }
+                _ => return Err(protocol_error()), // no unauthenticated MIC claims
+            }
+            position += n;
+        }
+        let inner = mech_token.ok_or_else(protocol_error)?;
+        if mechanism.is_none() {
+            return Err(protocol_error());
+        }
+        let ap_req = if inner.first() == Some(&0x60) {
+            let wrapped = exact_tlv(inner, 0x60)?;
+            let (n, _) = Self::read_tlv(wrapped)?;
+            if &wrapped[..n] != KRB5_OID && &wrapped[..n] != MS_KRB5_OID {
+                return Err(protocol_error());
+            }
+            wrapped[n..]
+                .strip_prefix(&[1, 0])
+                .ok_or_else(protocol_error)?
+        } else {
+            inner
+        };
+        exact_tlv(ap_req, 0x6e)?;
+        Ok(AuthenticationToken {
+            ap_req: ap_req.to_vec(),
+            spnego_mechanism: mechanism,
+        })
+    }
     /// Parse a base64-encoded Negotiate token into an [`SpnegoIdentity`].
     ///
     /// Handles the full GSSAPI → SPNEGO → Kerberos AP-REQ decode chain.
@@ -317,5 +482,45 @@ mod tests {
             SpnegoService::extract_identity(None, Some("alice@EXAMPLE.COM"), Some("admin"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn authentication_decoder_rejects_ntlm_fallback_trailing_bytes_and_unsolicited_mic() {
+        let ntlm_oid = [6, 10, 0x2b, 6, 1, 4, 1, 0x82, 0x37, 2, 2, 10];
+        let init = |first: &[u8], mic: bool| {
+            let mut list = first.to_vec();
+            list.extend_from_slice(KRB5_OID);
+            let mut fields = der(0xa0, &der(0x30, &list));
+            fields.extend(der(0xa2, &der(4, &der(0x6e, &der(0x30, &[])))));
+            if mic {
+                fields.extend(der(0xa3, &der(4, b"unverified")));
+            }
+            let mut outer = SPNEGO_OID.to_vec();
+            outer.extend(der(0xa0, &der(0x30, &fields)));
+            der(0x60, &outer)
+        };
+        for token in [init(&ntlm_oid, false), init(KRB5_OID, true)] {
+            assert!(
+                SpnegoService::authentication_token(
+                    &base64::engine::general_purpose::STANDARD.encode(token)
+                )
+                .is_err()
+            );
+        }
+        let mut valid = init(KRB5_OID, false);
+        assert!(
+            SpnegoService::authentication_token(
+                &base64::engine::general_purpose::STANDARD.encode(&valid)
+            )
+            .is_ok()
+        );
+        valid.push(0);
+        assert!(
+            SpnegoService::authentication_token(
+                &base64::engine::general_purpose::STANDARD.encode(valid)
+            )
+            .is_err()
+        );
+        assert!(SpnegoService::authentication_token(&"A".repeat(128 * 1024 + 1)).is_err());
     }
 }

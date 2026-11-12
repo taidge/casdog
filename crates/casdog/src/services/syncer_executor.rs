@@ -4,7 +4,7 @@ use hmac::{Hmac, Mac};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgConnection, PgPool};
 use tokio::time::{self, Duration};
 use uuid::Uuid;
 
@@ -54,6 +54,8 @@ struct SyncedUserRecord {
     password_salt: Option<String>,
     is_forbidden: Option<bool>,
     score: Option<i32>,
+    properties: Option<Value>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -144,7 +146,7 @@ impl SyncerExecutor {
                 .bind(&syncer.organization).fetch_optional(&mut *tx).await?.ok_or_else(||AppError::Validation("Syncer organization is unavailable".into()))?;
             let mut run = match syncer.syncer_type.as_str() {
                 "Database" | "Keycloak" => Self::execute_database_sync(&mut tx, &syncer).await?,
-                "LDAP" => Self::execute_ldap_sync(&mut tx, &syncer).await?,
+                "LDAP" | "Active Directory" => Self::execute_ldap_sync(&mut tx, &syncer).await?,
                 "SCIM" => Self::execute_scim_sync(&mut tx, &syncer).await?,
                 _ => return Err(AppError::Validation("Unsupported syncer type".into())),
             };
@@ -351,7 +353,11 @@ impl SyncerExecutor {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("(objectClass=person)");
+            .unwrap_or(if syncer.syncer_type == "Active Directory" {
+                "(&(objectClass=user)(objectCategory=person))"
+            } else {
+                "(objectClass=person)"
+            });
         let url = if syncer.host.starts_with("ldap://") || syncer.host.starts_with("ldaps://") {
             syncer.host.clone()
         } else {
@@ -392,7 +398,9 @@ impl SyncerExecutor {
                 .success()
                 .map_err(|_| AppError::Internal("LDAP syncer bind rejected".into()))?;
         }
-        let columns = if syncer
+        let columns = if syncer.syncer_type == "Active Directory" {
+            Self::ad_columns(syncer)?
+        } else if syncer
             .table_columns
             .as_deref()
             .is_some_and(|v| !v.is_empty())
@@ -426,39 +434,140 @@ impl SyncerExecutor {
             "sAMAccountName".into(),
             "userPrincipalName".into(),
         ];
+        if syncer.syncer_type == "Active Directory" {
+            attrs.extend(
+                [
+                    "sAMAccountName",
+                    "userPrincipalName",
+                    "displayName",
+                    "givenName",
+                    "sn",
+                    "mail",
+                    "telephoneNumber",
+                    "mobile",
+                    "title",
+                    "department",
+                    "company",
+                    "streetAddress",
+                    "l",
+                    "st",
+                    "postalCode",
+                    "co",
+                    "objectGUID",
+                    "whenCreated",
+                    "userAccountControl",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            );
+        }
         for column in &columns {
             for name in column.name.split('+').map(str::trim) {
-                if name != "dn" {
+                if name != "dn" && !name.starts_with("$ad") {
                     attrs.push(name.into());
                 }
             }
         }
         attrs.sort();
         attrs.dedup();
-        let (entries, result) = ldap
-            .with_timeout(Duration::from_secs(10))
-            .with_search_options(ldap3::SearchOptions::new().sizelimit(10001).timelimit(10))
-            .search(base_dn, ldap3::Scope::Subtree, filter, attrs)
-            .await
-            .map_err(|_| AppError::Internal("LDAP syncer search failed".into()))?
-            .success()
-            .map_err(|_| {
-                AppError::Internal("LDAP syncer search rejected or exceeded limits".into())
+        use ldap3::controls::PagedResults;
+        let mut entries = Vec::new();
+        let mut cookie = Vec::new();
+        let mut snapshot_bytes = 0usize;
+        let mut complete = false;
+        for page_index in 0..100 {
+            let mut stream = ldap
+                .with_timeout(Duration::from_secs(10))
+                .with_controls(PagedResults {
+                    size: 500,
+                    cookie: cookie.clone(),
+                })
+                .with_search_options(ldap3::SearchOptions::new().sizelimit(10001).timelimit(10))
+                .streaming_search(base_dn, ldap3::Scope::Subtree, filter, attrs.clone())
+                .await
+                .map_err(|_| {
+                    AppError::Internal("LDAP paged search failed; no accounts were imported".into())
+                })?;
+            let mut page_count = 0usize;
+            while let Some(item) = stream.next().await.map_err(|_| {
+                AppError::Internal("LDAP page stream failed; no accounts were imported".into())
+            })? {
+                if item.is_ref() || item.is_intermediate() {
+                    return Err(AppError::Validation(
+                        "LDAP referrals/intermediate responses cannot complete the source snapshot"
+                            .into(),
+                    ));
+                }
+                page_count += 1;
+                if (page_index > 0 && page_count > 500) || entries.len() >= 10000 {
+                    return Err(AppError::Validation(
+                        "LDAP snapshot exceeds its page or 10000 user limit".into(),
+                    ));
+                }
+                let entry = ldap3::SearchEntry::construct(item);
+                snapshot_bytes = snapshot_bytes.saturating_add(entry.dn.len());
+                for (name, values) in &entry.attrs {
+                    snapshot_bytes = snapshot_bytes.saturating_add(name.len());
+                    for v in values {
+                        snapshot_bytes = snapshot_bytes.saturating_add(v.len());
+                    }
+                }
+                for (name, values) in &entry.bin_attrs {
+                    snapshot_bytes = snapshot_bytes.saturating_add(name.len());
+                    for v in values {
+                        snapshot_bytes = snapshot_bytes.saturating_add(v.len());
+                    }
+                }
+                if snapshot_bytes > 32 * 1024 * 1024 {
+                    return Err(AppError::Validation("LDAP snapshot exceeds 32 MiB".into()));
+                }
+                entries.push(entry);
+            }
+            let result = stream.finish().await.success().map_err(|_| {
+                AppError::Internal(
+                    "LDAP paged search rejected or truncated; no accounts were imported".into(),
+                )
             })?;
-        if !result.refs.is_empty()
-            || result
+            drop(stream);
+            if !result.refs.is_empty() {
+                return Err(AppError::Validation(
+                    "LDAP referrals do not form a complete source snapshot".into(),
+                ));
+            }
+            let controls: Vec<_> = result
                 .ctrls
                 .iter()
-                .any(|c| c.1.ctype == "1.2.840.113556.1.4.319")
-        {
-            return Err(AppError::Validation(
-                "Paged LDAP responses require complete paging; this snapshot was not imported"
-                    .into(),
-            ));
+                .filter(|c| c.1.ctype == "1.2.840.113556.1.4.319")
+                .collect();
+            // RFC2696 permits an unsupported non-critical request to be
+            // ignored. Only an initial successful unpaged search may finish
+            // without a paging response; a later missing control is truncated.
+            if page_index == 0 && controls.is_empty() {
+                complete = true;
+                break;
+            }
+            if controls.len() != 1 {
+                return Err(AppError::Validation(
+                    "LDAP server must return exactly one paging response control".into(),
+                ));
+            }
+            let (_estimate, next) =
+                Self::ldap_page_control(controls[0].1.val.as_deref().unwrap_or_default())?;
+            if page_count > 500 {
+                return Err(AppError::Validation(
+                    "LDAP snapshot exceeds its page or 10000 user limit".into(),
+                ));
+            }
+            if next.is_empty() {
+                complete = true;
+                break;
+            }
+            // Cookies are opaque: the same handle may advance a server cursor.
+            cookie = next;
         }
-        if entries.len() > 10000 {
+        if !complete {
             return Err(AppError::Validation(
-                "Syncer source exceeds 10000 users per run".into(),
+                "LDAP snapshot exceeds the 100 page limit".into(),
             ));
         }
         let _ = ldap.with_timeout(Duration::from_secs(5)).unbind().await;
@@ -466,18 +575,22 @@ impl SyncerExecutor {
         let mut total_bytes = 0usize;
         let mut seen = std::collections::HashSet::new();
         for entry in entries {
-            let entry = ldap3::SearchEntry::construct(entry);
-            let mut row: Map<String, Value> = entry
-                .attrs
-                .into_iter()
-                .map(|(name, values)| {
-                    (
-                        name,
-                        Value::String(values.first().cloned().unwrap_or_default()),
-                    )
-                })
-                .collect();
-            row.insert("dn".into(), Value::String(entry.dn));
+            let mut row: Map<String, Value> = if syncer.syncer_type == "Active Directory" {
+                Self::normalize_ad_entry(entry)?
+            } else {
+                let mut row: Map<String, Value> = entry
+                    .attrs
+                    .into_iter()
+                    .map(|(name, values)| {
+                        (
+                            name,
+                            Value::String(values.first().cloned().unwrap_or_default()),
+                        )
+                    })
+                    .collect();
+                row.insert("dn".into(), Value::String(entry.dn));
+                row
+            };
             total_bytes += serde_json::to_vec(&row)
                 .map_err(|_| AppError::Internal("Invalid LDAP snapshot".into()))?
                 .len();
@@ -513,6 +626,47 @@ impl SyncerExecutor {
         }
 
         Self::reconcile_rows(conn, syncer, &columns, prepared, &HashMap::new()).await
+    }
+
+    fn ldap_page_control(bytes: &[u8]) -> AppResult<(u32, Vec<u8>)> {
+        let invalid = || AppError::Validation("Malformed LDAP paging response control".into());
+        fn tlv(input: &[u8], tag: u8) -> Option<(&[u8], &[u8])> {
+            if input.len() < 2 || input[0] != tag {
+                return None;
+            }
+            let mut offset = 2;
+            let mut len = usize::from(input[1]);
+            if len & 128 != 0 {
+                let count = len & 127;
+                if count == 0 || count > 4 || input.len() < 2 + count {
+                    return None;
+                }
+                len = 0;
+                for b in &input[2..2 + count] {
+                    len = len.checked_mul(256)?.checked_add(usize::from(*b))?;
+                }
+                offset += count;
+            }
+            let end = offset.checked_add(len)?;
+            Some((input.get(offset..end)?, input.get(end..)?))
+        }
+        if bytes.len() > 4128 {
+            return Err(invalid());
+        }
+        let (sequence, rest) = tlv(bytes, 0x30).ok_or_else(invalid)?;
+        if !rest.is_empty() {
+            return Err(invalid());
+        }
+        let (size, rest) = tlv(sequence, 2).ok_or_else(invalid)?;
+        if size.is_empty() || size.len() > 4 || size[0] & 128 != 0 {
+            return Err(invalid());
+        }
+        let estimate = size.iter().fold(0u32, |n, b| (n << 8) | u32::from(*b));
+        let (cookie, rest) = tlv(rest, 4).ok_or_else(invalid)?;
+        if !rest.is_empty() || cookie.len() > 4096 {
+            return Err(invalid());
+        }
+        Ok((estimate, cookie.to_vec()))
     }
 
     async fn execute_scim_sync(
@@ -558,6 +712,243 @@ impl SyncerExecutor {
         Ok(columns)
     }
 
+    pub(crate) fn ad_columns(syncer: &Syncer) -> AppResult<Vec<TableColumn>> {
+        let defaults = [
+            ("objectGUID", "Id"),
+            ("$adName", "Name"),
+            ("$adDisplay", "DisplayName"),
+            ("givenName", "FirstName"),
+            ("sn", "LastName"),
+            ("$adEmail", "Email"),
+            ("$adPhone", "Phone"),
+            ("title", "Title"),
+            ("department", "Affiliation"),
+            ("$adLocation", "Location"),
+            ("$adAddress", "Address"),
+            ("$adProperties", "Properties"),
+            ("$adCreated", "CreatedTime"),
+            ("$adForbidden", "IsForbidden"),
+        ];
+        let mut columns = defaults
+            .into_iter()
+            .map(|(name, target)| TableColumn {
+                name: name.into(),
+                casdoor_name: target.into(),
+                column_type: "String".into(),
+                is_key: target == "Id",
+                is_hashed: false,
+                values: None,
+            })
+            .collect::<Vec<_>>();
+        if syncer
+            .table_columns
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            let custom: Vec<TableColumn> =
+                serde_json::from_str(syncer.table_columns.as_deref().unwrap_or_default())
+                    .map_err(|_| AppError::Validation("Invalid AD field mappings".into()))?;
+            let mut targets = std::collections::HashSet::new();
+            for mut column in custom {
+                let target = Self::normalize_casdoor_field(&column.casdoor_name);
+                if !targets.insert(target.clone())
+                    || matches!(
+                        target.as_str(),
+                        "ldap"
+                            | "password"
+                            | "passwordtype"
+                            | "passwordsalt"
+                            | "properties"
+                            | "externalid"
+                    )
+                {
+                    return Err(AppError::Validation("AD mappings cannot replace provider bindings, credentials or managed identity/properties".into()));
+                }
+                if target == "id" {
+                    if !column.name.eq_ignore_ascii_case("objectGUID") {
+                        return Err(AppError::Validation(
+                            "AD stable identity must be objectGUID".into(),
+                        ));
+                    }
+                    column.is_key = true;
+                } else if column.is_key {
+                    return Err(AppError::Validation(
+                        "AD stable identity must be objectGUID".into(),
+                    ));
+                }
+                if column.name.eq_ignore_ascii_case("userAccountControl") && target == "isforbidden"
+                {
+                    column.name = "$adForbidden".into();
+                }
+                if let Some(existing) = columns
+                    .iter_mut()
+                    .find(|c| Self::normalize_casdoor_field(&c.casdoor_name) == target)
+                {
+                    *existing = column;
+                } else {
+                    columns.push(column);
+                }
+            }
+        }
+        let mut validated = syncer.clone();
+        validated.table_columns = Some(
+            serde_json::to_string(&columns)
+                .map_err(|_| AppError::Internal("Cannot validate AD columns".into()))?,
+        );
+        Self::validate_columns(&validated)?;
+        Ok(columns)
+    }
+
+    fn normalize_ad_entry(entry: ldap3::SearchEntry) -> AppResult<Map<String, Value>> {
+        let invalid = || {
+            AppError::Validation("Invalid Active Directory GUID, userAccountControl or timestamp; no accounts were imported".into())
+        };
+        let mut row: Map<String, Value> = entry
+            .attrs
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    Value::String(v.first().cloned().unwrap_or_default()),
+                )
+            })
+            .collect();
+        let text = |name: &str| {
+            row.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .and_then(|(_, v)| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let name = text("sAMAccountName");
+        let given = text("givenName");
+        let family = text("sn");
+        let choose =
+            |first: String, fallback: String| if first.is_empty() { fallback } else { first };
+        let mut guid: Option<Vec<u8>> = None;
+        for (k, values) in &entry.attrs {
+            if k.eq_ignore_ascii_case("objectGUID") {
+                if values.len() != 1 || guid.is_some() {
+                    return Err(invalid());
+                }
+                guid = Some(values[0].as_bytes().to_vec());
+            }
+        }
+        for (k, values) in &entry.bin_attrs {
+            if k.eq_ignore_ascii_case("objectGUID") {
+                if values.len() != 1 || guid.is_some() {
+                    return Err(invalid());
+                }
+                guid = Some(values[0].clone());
+            }
+        }
+        let id = match guid {
+            Some(bytes) => {
+                Uuid::from_bytes_le(bytes.try_into().map_err(|_| invalid())?).to_string()
+            }
+            None => name.clone(),
+        };
+        if id.is_empty() {
+            return Err(invalid());
+        }
+        let display = choose(
+            text("displayName"),
+            format!("{given} {family}").trim().to_string(),
+        );
+        let email = choose(text("mail"), text("userPrincipalName"));
+        let phone = choose(text("mobile"), text("telephoneNumber"));
+        let street = text("streetAddress");
+        let city = text("l");
+        let state = text("st");
+        let country = text("co");
+        let location = [city.clone(), state.clone(), country.clone()]
+            .into_iter()
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let address = if street.is_empty() {
+            json!([])
+        } else {
+            json!([([street, city, state, text("postalCode"), country]
+                .into_iter()
+                .filter(|v| !v.is_empty())
+                .collect::<Vec<_>>()
+                .join(", "))])
+        };
+        let mut properties = Map::new();
+        for (key, value) in [
+            ("company", text("company")),
+            ("userPrincipalName", text("userPrincipalName")),
+        ] {
+            if !value.is_empty() {
+                properties.insert(key.into(), Value::String(value));
+            }
+        }
+        let uac = text("userAccountControl");
+        if entry
+            .bin_attrs
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("userAccountControl"))
+            || (uac.is_empty()
+                && row
+                    .keys()
+                    .any(|k| k.eq_ignore_ascii_case("userAccountControl")))
+        {
+            return Err(invalid());
+        }
+        let forbidden = if uac.is_empty() {
+            String::new()
+        } else {
+            if !uac.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            (uac.parse::<u32>().map_err(|_| invalid())? & 2 != 0).to_string()
+        };
+        let mut created = String::new();
+        let mut times = Vec::new();
+        for attr in ["whenCreated", "whenChanged"] {
+            let raw = text(attr);
+            if raw.is_empty() {
+                continue;
+            }
+            let time = if let Some(utc) = raw.strip_suffix('Z') {
+                chrono::NaiveDateTime::parse_from_str(utc, "%Y%m%d%H%M%S%.f")
+                    .map(|t| t.and_utc())
+                    .map_err(|_| invalid())?
+            } else {
+                chrono::DateTime::parse_from_str(&raw, "%Y%m%d%H%M%S%.f%z")
+                    .map_err(|_| invalid())?
+                    .with_timezone(&chrono::Utc)
+            };
+            if attr == "whenCreated" {
+                created = time.to_rfc3339();
+            }
+            times.push((attr, time.to_rfc3339()));
+        }
+        // Canonicalize GUID even when its 16 binary bytes happen to be UTF-8.
+        row.retain(|k, _| !k.eq_ignore_ascii_case("objectGUID"));
+        for (key, value) in [
+            ("objectGUID", id),
+            ("$adName", name),
+            ("$adDisplay", display),
+            ("$adEmail", email),
+            ("$adPhone", phone),
+            ("$adLocation", location),
+            ("$adAddress", address.to_string()),
+            ("$adProperties", Value::Object(properties).to_string()),
+            ("$adCreated", created.clone()),
+            ("$adForbidden", forbidden),
+        ] {
+            row.insert(key.into(), Value::String(value));
+        }
+        for (attr, value) in times {
+            row.retain(|k, _| !k.eq_ignore_ascii_case(attr));
+            row.insert(attr.into(), Value::String(value));
+        }
+        row.insert("dn".into(), Value::String(entry.dn));
+        Ok(row)
+    }
+
     pub(crate) fn validate_columns(syncer: &Syncer) -> AppResult<()> {
         if !syncer.is_read_only && syncer.syncer_type != "Database" {
             return Err(AppError::Validation("Writeback is supported only for PostgreSQL Database syncers; LDAP and Keycloak require read-only mode".into()));
@@ -596,10 +987,19 @@ impl SyncerExecutor {
                     | "address"
                     | "location"
                     | "region"
+                    | "properties"
+                    | "createdtime"
             ) || !fields.insert(target.clone())
             {
                 return Err(AppError::Validation(
                     "Unsupported or duplicate syncer target mapping".into(),
+                ));
+            }
+            if matches!(target.as_str(), "properties" | "createdtime")
+                && syncer.syncer_type != "Active Directory"
+            {
+                return Err(AppError::Validation(
+                    "Directory metadata mappings require an AD source".into(),
                 ));
             }
             if column.is_key
@@ -657,7 +1057,10 @@ impl SyncerExecutor {
                 "Password metadata requires a password mapping".into(),
             ));
         }
-        if !matches!(syncer.syncer_type.as_str(), "LDAP" | "SCIM") {
+        if !matches!(
+            syncer.syncer_type.as_str(),
+            "LDAP" | "Active Directory" | "SCIM"
+        ) {
             Self::quote_identifier_path(syncer.table_name.as_deref().unwrap_or_default())?;
             if let Some(table) = syncer
                 .affiliation_table
@@ -839,7 +1242,7 @@ impl SyncerExecutor {
                 .eq_ignore_ascii_case("postgres");
 
         let lookup = |name: &str| {
-            if syncer.syncer_type == "LDAP" {
+            if matches!(syncer.syncer_type.as_str(), "LDAP" | "Active Directory") {
                 row.iter()
                     .find(|(key, _)| key.eq_ignore_ascii_case(name))
                     .map(|(_, value)| Self::json_value_to_string(value))
@@ -968,6 +1371,18 @@ impl SyncerExecutor {
                     })?;
                     Self::validate_address(&address)?;
                     user.address = Some(address);
+                }
+                "properties" if syncer.syncer_type == "Active Directory" => {
+                    let v: Value = serde_json::from_str(&value)
+                        .map_err(|_| AppError::Validation("Invalid AD properties".into()))?;
+                    user.properties = Some(v);
+                }
+                "createdtime" if syncer.syncer_type == "Active Directory" => {
+                    user.created_at = Some(
+                        chrono::DateTime::parse_from_rfc3339(&value)
+                            .map_err(|_| AppError::Validation("Invalid AD creation time".into()))?
+                            .with_timezone(&chrono::Utc),
+                    );
                 }
                 "score" => {
                     user.score = Some(value.parse().map_err(|_| {
@@ -1174,6 +1589,12 @@ impl SyncerExecutor {
             "language" => user.language.clone().unwrap_or_default(),
             "location" => user.location.clone().unwrap_or_default(),
             "region" => user.region.clone().unwrap_or_default(),
+            "properties" => user
+                .properties
+                .clone()
+                .unwrap_or_else(|| json!({}))
+                .to_string(),
+            "createdtime" => user.created_at.to_rfc3339(),
             "address" => user
                 .address
                 .clone()
@@ -2148,8 +2569,8 @@ impl SyncerExecutor {
                     .as_ref()
                     .is_some_and(|kind| Some(kind) != user.password_type.as_ref())
                 || incoming.password_hash.is_some() && incoming.password_salt != user.password_salt;
-            sqlx::query("UPDATE users SET name=$3,display_name=COALESCE($4,display_name),first_name=COALESCE($5,first_name),last_name=COALESCE($6,last_name),email=COALESCE($7,email),email_verified=COALESCE($8,email_verified),phone=COALESCE($9,phone),avatar=COALESCE($10,avatar),affiliation=COALESCE($11,affiliation),external_id=COALESCE($12,external_id),ldap=COALESCE($13,ldap),signup_application=COALESCE($14,signup_application),password_hash=COALESCE($15,password_hash),password_type=CASE WHEN $15::text IS NULL THEN password_type ELSE $16 END,password_salt=CASE WHEN $15::text IS NULL THEN password_salt ELSE $17 END,is_forbidden=COALESCE($18,is_forbidden),score=COALESCE($20,score),title=COALESCE($21,title),language=COALESCE($22,language),address=COALESCE($23,address),location=COALESCE($24,location),region=COALESCE($25,region),last_change_password_time=CASE WHEN $19 THEN to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') ELSE last_change_password_time END,updated_at=clock_timestamp() WHERE id=$1 AND owner=$2")
-                .bind(&user.id).bind(&syncer.organization).bind(&name).bind(&incoming.display_name).bind(&incoming.first_name).bind(&incoming.last_name).bind(&incoming.email).bind(incoming.email_verified).bind(&incoming.phone).bind(&incoming.avatar).bind(&incoming.affiliation).bind(&incoming.external_id).bind(&incoming.ldap_id).bind(&incoming.signup_application).bind(&incoming.password_hash).bind(&incoming.password_type).bind(&incoming.password_salt).bind(incoming.is_forbidden).bind(changed).bind(incoming.score).bind(&incoming.title).bind(&incoming.language).bind(&incoming.address).bind(&incoming.location).bind(&incoming.region).execute(&mut *conn).await?;
+            sqlx::query("UPDATE users SET name=$3,display_name=COALESCE($4,display_name),first_name=COALESCE($5,first_name),last_name=COALESCE($6,last_name),email=COALESCE($7,email),email_verified=COALESCE($8,email_verified),phone=COALESCE($9,phone),avatar=COALESCE($10,avatar),affiliation=COALESCE($11,affiliation),external_id=COALESCE($12,external_id),ldap=COALESCE($13,ldap),signup_application=COALESCE($14,signup_application),password_hash=COALESCE($15,password_hash),password_type=CASE WHEN $15::text IS NULL THEN password_type ELSE $16 END,password_salt=CASE WHEN $15::text IS NULL THEN password_salt ELSE $17 END,is_forbidden=COALESCE($18,is_forbidden),score=COALESCE($20,score),title=COALESCE($21,title),language=COALESCE($22,language),address=COALESCE($23,address),location=COALESCE($24,location),region=COALESCE($25,region),properties=CASE WHEN $26::jsonb IS NULL THEN properties ELSE COALESCE(properties,'{}'::jsonb)||$26 END,created_at=COALESCE($27,created_at),last_change_password_time=CASE WHEN $19 THEN to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') ELSE last_change_password_time END,updated_at=clock_timestamp() WHERE id=$1 AND owner=$2")
+                .bind(&user.id).bind(&syncer.organization).bind(&name).bind(&incoming.display_name).bind(&incoming.first_name).bind(&incoming.last_name).bind(&incoming.email).bind(incoming.email_verified).bind(&incoming.phone).bind(&incoming.avatar).bind(&incoming.affiliation).bind(&incoming.external_id).bind(&incoming.ldap_id).bind(&incoming.signup_application).bind(&incoming.password_hash).bind(&incoming.password_type).bind(&incoming.password_salt).bind(incoming.is_forbidden).bind(changed).bind(incoming.score).bind(&incoming.title).bind(&incoming.language).bind(&incoming.address).bind(&incoming.location).bind(&incoming.region).bind(&incoming.properties).bind(incoming.created_at).execute(&mut *conn).await?;
             sqlx::query("INSERT INTO syncer_user_links(syncer_id,source_key,user_id) VALUES($1,$2,$3) ON CONFLICT(syncer_id,source_key) DO NOTHING")
                 .bind(&syncer.id).bind(&incoming.source_key).bind(&user.id).execute(&mut *conn).await?;
         } else {
@@ -2162,8 +2583,8 @@ impl SyncerExecutor {
                 }
             };
             let display = incoming.display_name.unwrap_or_else(|| name.clone());
-            sqlx::query("INSERT INTO users(id,owner,name,password_hash,display_name,first_name,last_name,email,email_verified,phone,avatar,affiliation,external_id,ldap,signup_application,password_type,password_salt,is_forbidden,score,title,language,address,location,region) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)")
-                .bind(&id).bind(&syncer.organization).bind(&name).bind(hash).bind(display).bind(&incoming.first_name).bind(&incoming.last_name).bind(&incoming.email).bind(incoming.email_verified.unwrap_or(false)).bind(&incoming.phone).bind(&incoming.avatar).bind(&incoming.affiliation).bind(&incoming.external_id).bind(&incoming.ldap_id).bind(&incoming.signup_application).bind(if credential_present {incoming.password_type.as_deref().unwrap_or("argon2")} else {"argon2"}).bind(if credential_present {incoming.password_salt.as_deref()} else {None}).bind(incoming.is_forbidden.unwrap_or(false)).bind(incoming.score.unwrap_or(0)).bind(&incoming.title).bind(&incoming.language).bind(&incoming.address).bind(&incoming.location).bind(&incoming.region).execute(&mut *conn).await?;
+            sqlx::query("INSERT INTO users(id,owner,name,password_hash,display_name,first_name,last_name,email,email_verified,phone,avatar,affiliation,external_id,ldap,signup_application,password_type,password_salt,is_forbidden,score,title,language,address,location,region,properties,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,COALESCE($26,NOW()))")
+                .bind(&id).bind(&syncer.organization).bind(&name).bind(hash).bind(display).bind(&incoming.first_name).bind(&incoming.last_name).bind(&incoming.email).bind(incoming.email_verified.unwrap_or(false)).bind(&incoming.phone).bind(&incoming.avatar).bind(&incoming.affiliation).bind(&incoming.external_id).bind(&incoming.ldap_id).bind(&incoming.signup_application).bind(if credential_present {incoming.password_type.as_deref().unwrap_or("argon2")} else {"argon2"}).bind(if credential_present {incoming.password_salt.as_deref()} else {None}).bind(incoming.is_forbidden.unwrap_or(false)).bind(incoming.score.unwrap_or(0)).bind(&incoming.title).bind(&incoming.language).bind(&incoming.address).bind(&incoming.location).bind(&incoming.region).bind(&incoming.properties).bind(incoming.created_at).execute(&mut *conn).await?;
             sqlx::query(
                 "INSERT INTO syncer_user_links(syncer_id,source_key,user_id) VALUES($1,$2,$3)",
             )

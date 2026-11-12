@@ -131,7 +131,7 @@ impl SubscriptionRenewalService {
             ));
         }
         if enabled {
-            let source: Option<(String,String)>=sqlx::query_as("SELECT r.product_id,p.provider_id FROM order_benefits b JOIN orders o ON o.id=b.order_id AND o.owner=$2 AND o.buyer_id=$3 AND lower(o.state)='paid' JOIN order_stock_reservations r ON r.order_id=o.id JOIN payments p ON p.id=o.payment_id AND p.owner=o.owner AND lower(p.state)='paid' WHERE b.subscription_id=$1 AND b.user_id=$3 AND b.fulfilled_at IS NOT NULL ORDER BY b.fulfilled_at DESC LIMIT 1")
+            let source: Option<(String,String)>=sqlx::query_as("SELECT b.product_id,p.provider_id FROM purchase_benefits b JOIN orders o ON o.id=b.order_id AND o.owner=$2 AND o.buyer_id=$3 AND lower(o.state)='paid' JOIN payments p ON p.id=o.payment_id AND p.owner=o.owner AND lower(p.state)='paid' WHERE b.subscription_id=$1 AND b.user_id=$3 AND b.kind='plan' AND b.product_id IS NOT NULL AND b.fulfilled_at IS NOT NULL ORDER BY b.fulfilled_at DESC,b.order_id,b.line_id LIMIT 1")
                 .bind(id).bind(&sub.owner).bind(&sub.user_id).fetch_optional(&mut *tx).await?;
             let (product_id, provider_id) = source
                 .ok_or_else(|| conflict("Auto renewal requires a proven paid plan purchase"))?;
@@ -227,6 +227,11 @@ impl SubscriptionRenewalService {
                 .ok_or_else(|| conflict("Renewal product is unavailable"))?;
         let plan:Plan=sqlx::query_as("SELECT * FROM plans WHERE id=$1 AND owner=$2 AND is_deleted=false AND is_enabled=true FOR SHARE").bind(&sub.plan_id).bind(&sub.owner).fetch_optional(&mut *conn).await?.ok_or_else(|| conflict("Renewal plan is unavailable"))?;
         let pricing:Pricing=sqlx::query_as("SELECT * FROM pricings WHERE id=$1 AND owner=$2 AND is_deleted=false AND is_enabled=true FOR SHARE").bind(&sub.pricing_id).bind(&sub.owner).fetch_optional(&mut *conn).await?.ok_or_else(|| conflict("Renewal pricing is unavailable"))?;
+        if !super::pricing_access_service::PricingAccessService::allows(&pricing, Some(&user)) {
+            return Err(AppError::Authorization(
+                "The renewal beneficiary is not invited to this pricing".into(),
+            ));
+        }
         if product.plan_id.as_deref() != Some(&plan.id)
             || product.is_recharge
             || !matches!(

@@ -148,8 +148,16 @@ fn signed_in(app: AppState) -> Element {
                         order["price"],
                         order["currency"].as_str().unwrap_or("USD")
                     );
+                    let line_rows = each(scope.cage(values(&order,"lines")))
+                        .key(|line| line["id"].as_str().unwrap_or_default().to_string())
+                        .seed(|line| label(&format!("{} × {} · {:.2} {}",
+                            line["quantity"].as_i64().unwrap_or(1),
+                            line["display_name"].as_str().or(line["product_name"].as_str()).unwrap_or("Product"),
+                            line["amount_cents"].as_i64().unwrap_or_default() as f64/100.0,
+                            line["currency"].as_str().unwrap_or("USD"))));
                     stack((
                         label(&summary),
+                        line_rows,
                         label(&format!("Order {}", order["name"].as_str().unwrap_or(&id))),
                         when(scope.bond(move || pending), move || {
                             let refresh = refresh.clone();
@@ -381,6 +389,9 @@ fn checkout(
             .map(|p| format!("{:.2}", p["price_per_year"].as_f64().unwrap_or(0.0)))
             .unwrap_or_default();
         let currency = product["currency"].as_str().unwrap_or("USD").to_string();
+        let cart_product = product.clone();
+        let cart_plan = plan.clone();
+        let cart_quantity = scope.cage("1".to_string());
         stack((
             heading(&format!("Checkout: {title}")),
             select(scope,"Payment provider",provider,providers),
@@ -419,6 +430,25 @@ fn checkout(
                     }
                 }
             }),
+            field(scope,"Cart quantity",cart_quantity),
+            action(scope,"Add to cart",busy,message,move || {
+                let product=cart_product.clone();let plan=cart_plan.clone();async move {
+                    let quantity: i64 = cart_quantity.get().parse().map_err(|_|"Enter a whole quantity of at least 1.")?;
+                    if !(1..=1000).contains(&quantity) {return Err("Enter a whole quantity between 1 and 1000.".into());}
+                    let mut item=serde_json::json!({"productId":product["id"],"quantity":quantity,"period":period.get()});
+                    if let Some(plan)=plan {
+                        if pricing.get().is_empty() {return Err("No enabled pricing is available for this plan.".into());}
+                        item["planName"]=plan["id"].clone();item["pricingName"]=serde_json::json!(pricing.get());
+                    }
+                    if recharge {
+                        let price: f64=amount.get().parse().map_err(|_|"Select a valid recharge amount.")?;
+                        if !price.is_finite() || price<=0.0 {return Err("Select a valid recharge amount.".into());}
+                        item["customPrice"]=serde_json::json!(price);
+                    }
+                    crate::pages::cart::add(app,item).await
+                }
+            }),
+            action(scope,"Open shopping cart",busy,message,move ||async move {app.panel.set("cart-page".into());Ok(String::new())}),
         )).build(scope)
     }))
 }

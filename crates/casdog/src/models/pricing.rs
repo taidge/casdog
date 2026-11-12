@@ -2,6 +2,13 @@ use chrono::{DateTime, Utc};
 use salvo::oapi::ToSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+fn present_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
 pub struct Pricing {
@@ -14,6 +21,9 @@ pub struct Pricing {
     pub trial_duration: Option<i32>,
     pub application: Option<String>,
     pub is_enabled: bool,
+    pub is_invite_only: bool,
+    #[sqlx(json)]
+    pub users: Vec<String>,
     pub is_deleted: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -29,6 +39,10 @@ pub struct CreatePricingRequest {
     pub trial_duration: Option<i32>,
     pub application: Option<String>,
     pub is_enabled: Option<bool>,
+    #[serde(default, alias = "isInviteOnly", deserialize_with = "present_value")]
+    pub is_invite_only: Option<bool>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub users: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -39,6 +53,10 @@ pub struct UpdatePricingRequest {
     pub trial_duration: Option<i32>,
     pub application: Option<String>,
     pub is_enabled: Option<bool>,
+    #[serde(default, alias = "isInviteOnly", deserialize_with = "present_value")]
+    pub is_invite_only: Option<bool>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub users: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -52,6 +70,8 @@ pub struct PricingResponse {
     pub trial_duration: Option<i32>,
     pub application: Option<String>,
     pub is_enabled: bool,
+    pub is_invite_only: bool,
+    pub users: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -68,6 +88,8 @@ impl From<Pricing> for PricingResponse {
             trial_duration: p.trial_duration,
             application: p.application,
             is_enabled: p.is_enabled,
+            is_invite_only: p.is_invite_only,
+            users: p.users,
             created_at: p.created_at,
             updated_at: p.updated_at,
         }

@@ -392,6 +392,37 @@ fn trusted_mfa_backup_parser_validates_real_totp_and_keeps_uuid_recovery_codes_e
     ] {
         assert!(prepare(&mut v.as_object().unwrap().clone()).is_err());
     }
+    for (phone, country, expected) in [
+        ("13800138000", "CN", "+8613800138000"),
+        ("2025550123", "US", "+12025550123"),
+        ("666666666", "PL", "+48666666666"),
+        ("+48 666 666 666", "pl", "+48666666666"),
+        ("+1 (202) 555-0123", "", "+12025550123"),
+    ] {
+        let mut value=json!({"preferred_mfa_type":"sms","mfa_phone_enabled":true,"phone":phone,"country_code":country}).as_object().unwrap().clone();
+        assert!(prepare(&mut value).unwrap().is_some());
+        assert_eq!(value["phone"], expected);
+        assert_eq!(
+            value["country_code"],
+            if country.is_empty() {
+                "US".to_owned()
+            } else {
+                country.to_ascii_uppercase()
+            }
+        );
+    }
+    for (phone, country) in [
+        ("123", "CN"),
+        ("2025550123", "ZZ"),
+        ("2025550123", ""),
+        ("+12025550123", "CN"),
+        ("+15551234567", "US"),
+        ("2025550123 ext. 42", "US"),
+        ("+12025550123;ext=42", "US"),
+    ] {
+        let mut value=json!({"preferred_mfa_type":"sms","mfa_phone_enabled":true,"phone":phone,"country_code":country}).as_object().unwrap().clone();
+        assert!(prepare(&mut value).is_err());
+    }
 }
 
 #[tokio::test]
@@ -567,7 +598,7 @@ async fn email_sms_restore_requires_real_application_delivery_bindings_and_persi
     for (name, category) in [("restore-email", "Email"), ("restore-sms", "SMS")] {
         sqlx::query("INSERT INTO providers(id,owner,name,display_name,category,type,endpoint,client_secret) VALUES($1,$2,$3,$3,$4,'Custom HTTP','http://127.0.0.1:9/not-sent','test-secret')").bind(uuid::Uuid::new_v4().to_string()).bind(&f.owner).bind(name).bind(category).execute(&f.pool).await.unwrap();
     }
-    sqlx::query("UPDATE applications SET providers=$2 WHERE id=$1").bind(&f.app).bind(json!([{"name":format!("{}/restore-email",f.owner),"rule":"MFA"},{"name":format!("{}/restore-sms",f.owner),"rule":"MFA"}])).execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE applications SET providers=$2 WHERE id=$1").bind(&f.app).bind(json!([{"name":format!("{}/restore-email",f.owner),"rule":"MFA"},{"name":format!("{}/restore-sms",f.owner),"rule":"MFA","countryCodes":["CN","US","PL"]}])).execute(&f.pool).await.unwrap();
     let codes = vec![uuid::Uuid::new_v4().to_string()];
     sqlx::query("UPDATE providers SET endpoint=NULL WHERE owner=$1 AND name='restore-email'")
         .bind(&f.owner)
@@ -577,7 +608,7 @@ async fn email_sms_restore_requires_real_application_delivery_bindings_and_persi
     let invalid=f.restore(json!([{"owner":f.owner,"name":"bad-endpoint","password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"email","mfaEmailEnabled":true,"email":"backup@example.org","emailVerified":true,"signupApplication":f.app}])).await;
     assert_eq!(invalid["created"], 0);
     sqlx::query("UPDATE providers SET endpoint='http://127.0.0.1:9/not-sent' WHERE owner=$1 AND name='restore-email'").bind(&f.owner).execute(&f.pool).await.unwrap();
-    let report=f.restore(json!({"users":[{"owner":f.owner,"name":"contacts","password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"email","mfaEmailEnabled":true,"email":"backup@example.org","emailVerified":true,"mfaPhoneEnabled":true,"phone":"+15551234567","countryCode":"US","signupApplication":f.app,"recoveryCodes":codes}]})).await;
+    let report=f.restore(json!({"users":[{"owner":f.owner,"name":"contacts","password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"email","mfaEmailEnabled":true,"email":"backup@example.org","emailVerified":true,"mfaPhoneEnabled":true,"phone":"+12025550123","countryCode":"US","signupApplication":f.app,"recoveryCodes":codes}]})).await;
     assert_eq!(report["created"], 1);
     let user: casdog::models::User =
         sqlx::query_as("SELECT * FROM users WHERE owner=$1 AND name='contacts'")
@@ -597,6 +628,71 @@ async fn email_sms_restore_requires_real_application_delivery_bindings_and_persi
         .await
         .unwrap();
     assert_eq!(n, 1);
+    for (name, phone, country, expected) in [
+        ("phone-cn", "13800138000", "CN", "+8613800138000"),
+        ("phone-us", "2025550123", "US", "+12025550123"),
+        ("phone-pl", "666666666", "PL", "+48666666666"),
+    ] {
+        let row = json!({"owner":f.owner,"name":name,"password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"sms","mfaPhoneEnabled":true,"phone":phone,"countryCode":country,"signupApplication":f.app});
+        let mut ordinary = f.json_upload(json!([row.clone()]), true).await;
+        let rejected: Value = ordinary.take_json().await.unwrap();
+        assert_eq!(rejected["created"], 0);
+        assert_eq!(f.restore(json!([row])).await["created"], 1);
+        let stored: (String, String) =
+            sqlx::query_as("SELECT phone,country_code FROM users WHERE owner=$1 AND name=$2")
+                .bind(&f.owner)
+                .bind(name)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, (expected.into(), country.into()));
+        let mut pending = f.login(name, "correctbatteryhorsestapler").await;
+        let result: Value = pending.take_json().await.unwrap();
+        assert_eq!(result["mfa_required"], true);
+        assert!(
+            result["mfa_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "sms")
+        );
+    }
+    for (phone, country) in [
+        ("123", "CN"),
+        ("2025550123", "ZZ"),
+        ("+12025550123", "CN"),
+        ("2025550123 ext. 42", "US"),
+        ("+15551234567", "US"),
+    ] {
+        let report=f.restore(json!([
+            {"owner":f.owner,"name":"phone-companion","password":BCRYPT,"passwordType":"bcrypt"},
+            {"owner":f.owner,"name":"phone-invalid","password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"sms","mfaPhoneEnabled":true,"phone":phone,"countryCode":country,"signupApplication":f.app}
+        ])).await;
+        assert_eq!(report["created"], 0);
+        assert_eq!(report["failed"], 2);
+    }
+    // Region matching also reaches the actual delivery binding, rather than
+    // merely changing a display field while bypassing countryCodes rules.
+    sqlx::query("UPDATE applications SET providers=$2 WHERE id=$1")
+        .bind(&f.app)
+        .bind(
+            json!([{"name":format!("{}/restore-sms",f.owner),"rule":"MFA","countryCodes":["CN"]}]),
+        )
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(f.restore(json!([
+        {"owner":f.owner,"name":"phone-companion","password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"sms","mfaPhoneEnabled":true,"phone":"13800138000","countryCode":"CN","signupApplication":f.app},
+        {"owner":f.owner,"name":"phone-invalid","password":BCRYPT,"passwordType":"bcrypt","preferredMfaType":"sms","mfaPhoneEnabled":true,"phone":"2025550123","countryCode":"US","signupApplication":f.app}
+    ])).await["created"],0);
+    let leftovers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM users WHERE owner=$1 AND name IN ('phone-companion','phone-invalid')",
+    )
+    .bind(&f.owner)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(leftovers, 0);
     f.cleanup().await;
 }
 
