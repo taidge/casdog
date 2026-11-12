@@ -1,6 +1,6 @@
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{PasswordHasher, SaltString};
 use chrono::Utc;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
@@ -38,11 +38,12 @@ impl UserService {
     }
 
     pub fn verify_password(password: &str, password_hash: &str) -> AppResult<bool> {
-        let parsed_hash = PasswordHash::new(password_hash)
-            .map_err(|e| AppError::Internal(format!("Invalid password hash: {}", e)))?;
-        Ok(Argon2::default()
-            .verify_password(password.as_bytes(), &parsed_hash)
-            .is_ok())
+        crate::services::password_service::PasswordService::verify_password(
+            password,
+            password_hash,
+            "argon2",
+            None,
+        )
     }
 
     pub async fn create(&self, req: CreateUserRequest) -> AppResult<UserResponse> {

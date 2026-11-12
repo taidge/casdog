@@ -40,14 +40,48 @@ async function main() {
     let links=[],consents=[],sessions=[{id:'session-1',name:'Browser session'}];
     let integrations=[];
     let keys=[];
+    let siteSettings={dbMaxOpenConns:0,dbMaxIdleConns:0,dbConnMaxLifetime:0,recordRetentionDays:0};
+    let receivers=[],receiverToken=0;
+    let storeOrders=[],storeSubscriptions=[],walletBalance=100;
+    const storeCatalog={status:'ok',total:2,data:[
+      {id:'store-plan-product',name:'premium',display_name:'Fixture premium',plan_id:'store-plan',price:5,currency:'USD',quantity:-1},
+      {id:'store-recharge',name:'recharge',display_name:'Fixture recharge',is_recharge:true,recharge_options:[5,10],disable_custom_recharge:true,price:0,currency:'USD',quantity:-1},
+    ],plans:[{id:'store-plan',name:'premium',display_name:'Premium',price_per_month:5,price_per_year:50}],pricings:[{id:'store-pricing',name:'public',display_name:'Public',plans:'["store-plan"]'}],providers:[{id:'wallet',name:'wallet',display_name:'Wallet',type:'Balance'},{id:'gateway',name:'gateway',display_name:'Gateway',type:'Dummy'}]};
     const reply=(route,value)=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(value)});
     await context.route('**/api/**',async route=>{
       const req=route.request(), url=new URL(req.url()), endpoint=url.pathname;
       let body;try{body=req.postDataJSON();}catch{}
-      calls.push({endpoint,method:req.method(),body,raw:req.postData()});
+      calls.push({endpoint,method:req.method(),body,raw:req.postData(),query:Object.fromEntries(url.searchParams)});
       if(endpoint==='/api/login/oauth/device/verify')return reply(route,{device_code:'verified-device',application:'Portal'});
       if(endpoint==='/api/login/oauth/device/authorize')return reply(route,{status:'ok'});
       if(endpoint==='/api/health')return reply(route,{status:'ok'});
+      if(endpoint==='/api/get-setting')return reply(route,{status:'ok',data:siteSettings});
+      if(endpoint==='/api/update-setting'){siteSettings=body;return reply(route,{status:'ok',data:true,recordRetentionApplied:true,poolSettingsApplied:false,applied:false});}
+      if(endpoint==='/api/telemetry/receivers'&&req.method()==='GET')return reply(route,{status:'ok',data:receivers});
+      if(endpoint==='/api/telemetry/receivers'&&req.method()==='POST'){
+        let existing=receivers.find(receiver=>receiver.provider===body.provider);
+        const issue=!existing||body.rotate||!existing.enabled;
+        const receiver={id:existing?.id||'receiver-1',organization:'built-in',...body};
+        receivers=[receiver];return reply(route,{status:'ok',data:{...receiver,...(issue?{token:`otlp_fixture_${++receiverToken}`}:{})}});
+      }
+      if(endpoint.startsWith('/api/telemetry/receivers/')&&req.method()==='DELETE'){receivers=receivers.map(receiver=>({...receiver,enabled:false}));return reply(route,{status:'ok'});}
+      if(endpoint==='/api/set-subscription-auto-renew'){
+        const enabled=url.searchParams.get('autoRenew')==='true';const subscription=storeSubscriptions.find(value=>value.id===url.searchParams.get('id'));
+        subscription.renewal={enabled,mode:'balance',currency:'USD',max_amount_cents:500};subscription.auto_renew=enabled;return reply(route,{status:'ok',data:true,data2:subscription.renewal});
+      }
+
+      if(endpoint==='/api/store/catalog')return reply(route,storeCatalog);
+      if(endpoint==='/api/store/purchases')return reply(route,{status:'ok',data:storeOrders,subscriptions:storeSubscriptions,wallet:{balance:walletBalance,currency:'USD'},total:storeOrders.length});
+      if(endpoint==='/api/buy-product'){
+        const recharge=url.searchParams.get('id')==='store-recharge';
+        const order={id:`store-order-${storeOrders.length}`,name:`purchase-${storeOrders.length}`,display_name:recharge?'Wallet recharge':'Premium plan',state:recharge?'Created':'Paid',price:recharge?Number(url.searchParams.get('customPrice')):5,currency:'USD',kind:recharge?'recharge':'plan',pay_url:'https://dummy-payment.example.com/checkout'};
+        storeOrders.unshift(order);
+        if(!recharge){walletBalance-=5;storeSubscriptions.push({id:'subscription-1',plan:'Premium',state:'active',start_date:'2026-11-12',end_date:'2026-12-12',auto_renew:true,renewal:{enabled:false},renewal_quote:{amount:5,currency:'USD'}});}
+        return reply(route,{status:'ok',order,data:{id:'payment-1'},autoPaid:!recharge});
+      }
+      if(endpoint==='/api/reconcile-order'){const order=storeOrders.find(order=>order.id===url.searchParams.get('id'));if(order.state!=='Paid'){order.state='Paid';walletBalance+=order.price;}return reply(route,{status:'ok',order});}
+      if(endpoint==='/api/cancel-order'){storeOrders.find(order=>order.id===url.searchParams.get('id')).state='Canceled';return reply(route,{status:'ok'});}
+
       if(endpoint==='/api/get-keys')return reply(route,{status:'ok',data:keys.map(key=>({...key,accessSecret:'***'}))});
       if(endpoint==='/api/get-key')return reply(route,{status:'ok',data:keys.find(key=>`${key.owner}/${key.name}`===url.searchParams.get('id'))||null});
       if(endpoint==='/api/add-key'){keys.push({...body,accessKey:'fixture-access',accessSecret:'fixture-secret'});return reply(route,{status:'ok',data:true});}
@@ -175,10 +209,71 @@ async function main() {
     await page.getByText('API key deleted.',{exact:true}).waitFor();
     await page.getByRole('button',{name:'New API key',exact:true}).click();
     await page.getByRole('combobox',{name:'Key type',exact:true}).selectOption('Application');
-    assert.equal(await page.getByRole('textbox',{name:'Bound user',exact:true}).inputValue(),'');
+    await page.waitForFunction(()=>document.querySelector('[aria-label="Bound user"]')?.value==='');
     await fill(page.getByRole('textbox',{name:'Reviewed application ID or owner/name',exact:true}),'built-in/reviewed');
     await page.getByRole('button',{name:'Trust static application',exact:true}).click();
     await page.getByText('Static application credentials trusted.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Store',exact:true}).click();
+    await page.getByRole('button',{name:'Select Fixture premium',exact:true}).click();
+    await page.getByRole('combobox',{name:'Payment provider',exact:true}).selectOption('wallet');
+    await page.getByRole('combobox',{name:'Billing period',exact:true}).selectOption('yearly');
+    await page.getByText('Plan price: 50.00 USD',{exact:true}).waitFor();
+    await page.getByRole('combobox',{name:'Billing period',exact:true}).selectOption('monthly');
+    await page.getByRole('button',{name:'Confirm purchase',exact:true}).click();
+    await page.getByText('Purchase paid. Your balance and subscriptions have been refreshed.',{exact:true}).waitFor();
+    await page.getByText('Wallet balance: 95 USD',{exact:true}).waitFor();
+    assert.equal(calls.filter(call=>call.endpoint==='/api/buy-product').at(-1).query.planName,'store-plan');
+    assert.equal(calls.filter(call=>call.endpoint==='/api/buy-product').at(-1).query.period,'monthly');
+    assert.equal(await page.getByRole('button',{name:'Disable renewal',exact:true}).count(),0);
+    const oldConsents=calls.filter(call=>call.endpoint==='/api/set-subscription-auto-renew').length;
+    await page.getByRole('button',{name:'Enable renewal',exact:true}).click();
+    await page.getByText('Confirm renewal authorization before enabling.',{exact:true}).waitFor();
+    assert.equal(calls.filter(call=>call.endpoint==='/api/set-subscription-auto-renew').length,oldConsents);
+    await page.getByRole('checkbox',{name:'I authorize renewal at this price',exact:true}).check();
+    await page.getByRole('button',{name:'Enable renewal',exact:true}).click();
+    await page.getByText('Renewal authorization saved.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Disable renewal',exact:true}).waitFor();
+    assert.equal(calls.filter(call=>call.endpoint==='/api/set-subscription-auto-renew').at(-1).query.maxAmountCents,'500');
+    await page.getByRole('button',{name:'Disable renewal',exact:true}).click();
+    await page.getByText('Future renewals disabled.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Select Fixture recharge',exact:true}).click();
+    assert.equal(await page.getByRole('textbox',{name:'Recharge amount',exact:true}).count(),0);
+    assert.equal(await page.getByRole('combobox',{name:'Payment provider',exact:true}).locator('option[value="wallet"]').count(),0);
+    await page.getByRole('combobox',{name:'Recharge option',exact:true}).selectOption('10');
+    await page.getByRole('button',{name:'Confirm purchase',exact:true}).click();
+    await page.getByText('Purchase created. Continue payment or refresh its status in Your purchases.',{exact:true}).waitFor();
+    assert.equal(calls.filter(call=>call.endpoint==='/api/buy-product').at(-1).query.customPrice,'10');
+    await page.getByRole('button',{name:'Refresh payment store-order-1',exact:true}).click();
+    await page.getByText('Wallet balance: 105 USD',{exact:true}).waitFor();
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
+    await page.screenshot({path:path.join(artifacts,'store-mobile.png'),fullPage:true});
+    await page.setViewportSize({width:1440,height:1000});
+    await page.getByRole('button',{name:'Site settings',exact:true}).click();
+    await page.getByRole('button',{name:'Save site settings',exact:true}).click();
+    await page.getByText('Load current settings before editing.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Load site settings',exact:true}).click();
+    await page.getByText('Site settings loaded.',{exact:true}).waitFor();
+    await fill(page.getByRole('textbox',{name:'Audit retention days',exact:true}),'30');
+    await page.getByRole('button',{name:'Save site settings',exact:true}).click();
+    await page.getByText('Audit retention saved and active for the next cleanup. Pool settings remain pending.',{exact:true}).waitFor();
+    assert.equal(calls.find(call=>call.endpoint==='/api/update-setting').body.recordRetentionDays,30);
+    await page.getByRole('button',{name:'Telemetry',exact:true}).click();
+    await fill(page.getByRole('textbox',{name:'OpenClaw log provider ID or owner/name',exact:true}),'fixture-log');
+    await fill(page.getByRole('textbox',{name:'Receiver application ID or owner/name',exact:true}),'fixture-app');
+    await page.getByRole('button',{name:'Save receiver',exact:true}).click();
+    await page.getByText('Receiver saved.',{exact:true}).waitFor();
+    assert.equal(await page.getByLabel('Exporter token',{exact:true}).inputValue(),'otlp_fixture_1');
+    assert.equal(await page.getByLabel('Exporter token',{exact:true}).getAttribute('type'),'password');
+    await page.getByRole('button',{name:'Show exporter token',exact:true}).click();
+    await page.getByRole('button',{name:'Rotate exporter token',exact:true}).click();
+    await page.getByText('Exporter token rotated.',{exact:true}).waitFor();
+    assert.equal(await page.getByLabel('Exporter token',{exact:true}).inputValue(),'otlp_fixture_2');
+    assert.equal(await page.getByLabel('Exporter token',{exact:true}).getAttribute('type'),'password');
+    assert.equal(receivers[0].token,undefined);
+    await page.getByRole('button',{name:'Revoke receiver receiver-1',exact:true}).click();
+    await page.getByText('Receiver revoked.',{exact:true}).waitFor();
+    assert.equal(await page.getByLabel('Exporter token',{exact:true}).count(),0);
     await page.getByRole('button',{name:'Products',exact:true}).click();
     await fill(page.getByRole('textbox',{name:'Name',exact:true}),'recharge-check');
     await page.getByRole('checkbox',{name:'Recharge product',exact:true}).check();
@@ -200,6 +295,15 @@ async function main() {
     await page.getByRole('button',{name:'Save resource',exact:true}).click();
     await page.getByText('Resource saved.',{exact:true}).waitFor();
     assert.equal(calls.find(c=>c.endpoint==='/api/pricings'&&c.method==='POST').body.plans,'["admin/premium"]');
+    await page.getByRole('button',{name:'Syncers',exact:true}).click();
+    await fill(page.getByRole('textbox',{name:'Username',exact:true}),'directory-reader');
+    await fill(page.getByRole('textbox',{name:'Database',exact:true}),'external');
+    await fill(page.getByRole('textbox',{name:'Table',exact:true}),'directory.users');
+    await fill(page.getByRole('textbox',{name:'Field mappings (JSON array)',exact:true}),'[{"name":"uid","type":"varchar","casdoor_name":"id","is_key":true},{"name":"login","type":"varchar","casdoor_name":"name"}]');
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();
+    await page.getByText('Resource saved.',{exact:true}).waitFor();
+    const syncerWrite=calls.find(call=>call.endpoint==='/api/syncers'&&call.method==='POST').body;
+    assert.equal(syncerWrite.user,'directory-reader');assert.equal(syncerWrite.user_name,undefined);assert.equal(syncerWrite.table_columns[0].is_key,true);assert.equal(syncerWrite.is_read_only,true);
     await page.getByRole('button',{name:'Users',exact:true}).click();
     await page.getByRole('button',{name:'Alice',exact:true}).click();
     const display=page.getByRole('textbox',{name:'Display name',exact:true});

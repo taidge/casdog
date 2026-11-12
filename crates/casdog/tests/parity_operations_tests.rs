@@ -318,7 +318,8 @@ async fn dashboard_subscription_contact_and_atomic_permissions_respect_tenants()
     ))
     .send(&m)
     .await;
-    assert_eq!(res.status_code, Some(StatusCode::OK));
+    // An imported flag without a paid purchase is not a wallet mandate.
+    assert_eq!(res.status_code, Some(StatusCode::CONFLICT));
     let collision = identity(&owner, &member.id, false);
     user(&pool, &collision).await;
     let collision_service = service(&pool, collision);
@@ -333,7 +334,7 @@ async fn dashboard_subscription_contact_and_atomic_permissions_respect_tenants()
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(renew);
+    assert!(!renew);
     let res = TestClient::post(format!(
         "http://localhost/api/set-subscription-auto-renew?id={subscription}&autoRenew=false"
     ))

@@ -282,8 +282,26 @@ async fn rest_and_scim_enforce_actual_owner_lists_self_fields_and_foreign_keys()
         .json(&json!({"owner":f.tenant,"name":"forged-user","organization":f.tenant,"application":f.app,"user":f.other_user})).send(&f.service).await;
     assert_eq!(res.status_code, Some(StatusCode::FORBIDDEN));
     let bad_order = uuid::Uuid::new_v4().to_string();
+    let invalid=sqlx::query(r#"INSERT INTO orders(id,owner,name,display_name,"user") VALUES($1,$2,'bad-order','Bad',$3)"#)
+        .bind(&bad_order).bind(&f.tenant).bind(&f.other_user).execute(&f.pool).await;
+    assert!(
+        invalid.is_err(),
+        "New orders must reject a foreign buyer at creation"
+    );
+    // Preserve the regression for corrupt historical rows that predate buyer
+    // pinning. The DDL lock and transaction keep the fixture change isolated.
+    let mut historical = f.pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE orders DISABLE TRIGGER pin_order_buyer")
+        .execute(&mut *historical)
+        .await
+        .unwrap();
     sqlx::query(r#"INSERT INTO orders(id,owner,name,display_name,"user") VALUES($1,$2,'bad-order','Bad',$3)"#)
-        .bind(&bad_order).bind(&f.tenant).bind(&f.other_user).execute(&f.pool).await.unwrap();
+        .bind(&bad_order).bind(&f.tenant).bind(&f.other_user).execute(&mut *historical).await.unwrap();
+    sqlx::query("ALTER TABLE orders ENABLE TRIGGER pin_order_buyer")
+        .execute(&mut *historical)
+        .await
+        .unwrap();
+    historical.commit().await.unwrap();
     for path in [
         format!("orders/{bad_order}/pay"),
         format!("orders/{bad_order}/cancel"),

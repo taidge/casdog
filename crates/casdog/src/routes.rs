@@ -20,6 +20,9 @@ struct Assets;
 pub fn create_router() -> Router {
     Router::new()
         .push(wellknown_router())
+        .push(Router::with_path("v1/traces").post(crate::handlers::telemetry::traces))
+        .push(Router::with_path("v1/metrics").post(crate::handlers::telemetry::metrics))
+        .push(Router::with_path("v1/logs").post(crate::handlers::telemetry::logs))
         .push(cas_root_router())
         .push(api_router())
         .push(oauth_router())
@@ -101,6 +104,9 @@ fn api_router() -> Router {
 fn public_routes() -> Router {
     Router::new()
         .push(payment_notification_routes())
+        .push(Router::with_path("v1/traces").post(crate::handlers::telemetry::traces))
+        .push(Router::with_path("v1/metrics").post(crate::handlers::telemetry::metrics))
+        .push(Router::with_path("v1/logs").post(crate::handlers::telemetry::logs))
         .push(Router::with_path("health").get(health::health_check))
         .push(Router::with_path("signup").post(auth::signup))
         .push(Router::with_path("request-password-reset").post(crate::handlers::password_reset::request_password_reset))
@@ -183,6 +189,10 @@ fn protected_routes() -> Router {
         .hoop(JwtAuth)
         .hoop(AuthzFilter)
         .push(Router::with_path("trust-application-credentials").post(application::trust_credentials))
+        .push(Router::with_path("store/catalog").get(crate::handlers::commerce_store::catalog))
+        .push(Router::with_path("telemetry/receivers").get(crate::handlers::telemetry::list_receivers).post(crate::handlers::telemetry::save_receiver))
+        .push(Router::with_path("telemetry/receivers/{id}").delete(crate::handlers::telemetry::delete_receiver))
+        .push(Router::with_path("store/purchases").get(crate::handlers::commerce_store::purchases))
         .push(Router::with_path("oauth/register").post(auth::oauth_register))
         .push(Router::with_path("logout").get(auth::logout).post(auth::logout))
         .push(Router::with_path("get-account").get(auth::get_account))
@@ -266,6 +276,7 @@ fn protected_routes() -> Router {
         .push(Router::with_path("sync-ldap-users").post(ldap::sync_ldap_users))
         .push(Router::with_path("invoice-payment").post(payment::invoice_payment))
         .push(Router::with_path("pay-order").post(order::pay_order))
+        .push(Router::with_path("reconcile-order").post(order::reconcile_order))
         .push(Router::with_path("cancel-order").post(order::cancel_order))
         // System info
         .push(Router::with_path("get-system-info").get(system::get_system_info))
@@ -697,6 +708,7 @@ fn order_routes() -> Router {
         .post(order::add_order)
         .push(Router::with_path("{id}/pay").post(order::pay_order))
         .push(Router::with_path("{id}/cancel").post(order::cancel_order))
+        .push(Router::with_path("{id}/reconcile").post(order::reconcile_order))
         .push(
             Router::with_path("{id}")
                 .get(order::get_order)
@@ -1106,6 +1118,7 @@ fn api_router_for_openapi() -> Router {
             )
             .push(Router::with_path("invoice-payment").post(payment::invoice_payment))
             .push(Router::with_path("pay-order").post(order::pay_order))
+        .push(Router::with_path("reconcile-order").post(order::reconcile_order))
             .push(Router::with_path("cancel-order").post(order::cancel_order))
             .push(Router::with_path("get-system-info").get(system::get_system_info))
             .push(Router::with_path("get-version-info").get(system::get_version_info))
@@ -1186,6 +1199,7 @@ fn api_router_for_openapi() -> Router {
                     .post(order::add_order)
                     .push(Router::with_path("{id}/pay").post(order::pay_order))
                     .push(Router::with_path("{id}/cancel").post(order::cancel_order))
+        .push(Router::with_path("{id}/reconcile").post(order::reconcile_order))
                     .push(
                         Router::with_path("{id}")
                             .get(order::get_order)

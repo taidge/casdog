@@ -15,7 +15,7 @@ const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--f
   encoding: 'utf8',
   windowsHide: true,
 }));
-const artifacts = path.join(metadata.target_directory, 'phase7', 'browser-e2e');
+const artifacts = path.join(metadata.target_directory, 'phase9', 'browser-e2e');
 const origin = process.env.CASDOG_E2E_BASE_URL || 'http://localhost:18085';
 const database = process.env.CASDOG_TEST_DATABASE_URL;
 assert.ok(database, 'CASDOG_TEST_DATABASE_URL must identify a migrated disposable database');
@@ -32,6 +32,17 @@ function totp(secret) {
   const digest = crypto.createHmac('sha1', key).update(counter).digest();
   const offset = digest.at(-1) & 15;
   return ((digest.readUInt32BE(offset) & 0x7fffffff) % 1000000).toString().padStart(6, '0');
+}
+
+function protoLength(tag,bytes){
+  function variable(value){const result=[];for(value=BigInt(value);value>127n;value>>=7n)result.push(Number(value&127n)|128);result.push(Number(value));return Buffer.from(result);}
+  return Buffer.concat([variable(BigInt(tag)*8n+2n),variable(bytes.length),bytes]);
+}
+function browserTrace(){
+  const fixed=(tag,value)=>{const bytes=Buffer.alloc(9);bytes[0]=tag*8+1;bytes.writeBigUInt64LE(value,1);return bytes;};
+  const now=BigInt(Date.now())*1000000n;
+  const span=Buffer.concat([protoLength(1,Buffer.alloc(16,4)),protoLength(2,Buffer.alloc(8,5)),protoLength(5,Buffer.from('Browser telemetry span')),fixed(7,now),fixed(8,now+1000000n)]);
+  return protoLength(1,protoLength(2,protoLength(2,span)));
 }
 
 async function main() {
@@ -179,6 +190,39 @@ async function main() {
     await page.getByText('API key deleted.',{exact:true}).waitFor();
     assert.equal((await context.request.get(`${origin}/api/users`,{headers:keyHeaders})).status(),401);
     checks.push('API key UI creates real credentials; Basic/query authenticate without JWT and disable/delete revoke immediately');
+    await navigate('Site settings','Site settings');
+    await page.getByRole('button',{name:'Load site settings',exact:true}).click();
+    await page.getByText('Site settings loaded.',{exact:true}).waitFor();
+    await fill('Audit retention days','30');
+    await page.getByRole('button',{name:'Save site settings',exact:true}).click();
+    await page.getByText('Audit retention saved and active for the next cleanup. Pool settings remain pending.',{exact:true}).waitFor();
+    assert.equal((await api('GET','/api/get-setting',undefined,admin.token)).data.recordRetentionDays,30);
+    checks.push('Global settings UI persists an active audit retention policy while truthfully showing pool settings as pending');
+    const logProvider=await api('POST','/api/providers',{owner:'built-in',name:`browser-log-${suffix}`,display_name:'Browser OpenClaw telemetry',category:'Log',type:'Agent',sub_type:'OpenClaw'},admin.token);
+    const logApplication=await api('POST','/api/applications',{owner:'admin',name:`browser-telemetry-${suffix}`,display_name:'Browser telemetry',organization:'built-in'},admin.token);
+    await navigate('Telemetry','Telemetry receivers');
+    await fill('OpenClaw log provider ID or owner/name',logProvider.id);
+    await fill('Receiver application ID or owner/name',logApplication.id);
+    await page.getByRole('button',{name:'Save receiver',exact:true}).click();
+    await page.getByText('Receiver saved.',{exact:true}).waitFor();
+    let exporter=await page.getByLabel('Exporter token',{exact:true}).inputValue();
+    secretsThatMustNotBeLogged.push(exporter);
+    const exportTrace=async token=>context.request.post(`${origin}/api/v1/traces`,{headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/x-protobuf'},data:browserTrace()});
+    assert.equal((await exportTrace(exporter)).status(),200);
+    const ingested=await api('GET','/api/get-entries?owner=built-in',undefined,admin.token);
+    assert.ok(JSON.stringify(ingested).includes('Browser telemetry span'));
+    await page.getByRole('button',{name:'Rotate exporter token',exact:true}).click();
+    await page.getByText('Exporter token rotated.',{exact:true}).waitFor();
+    const currentExporter=await page.getByLabel('Exporter token',{exact:true}).inputValue();
+    secretsThatMustNotBeLogged.push(currentExporter);assert.notEqual(exporter,currentExporter);
+    assert.equal((await exportTrace(exporter)).status(),401);assert.equal((await exportTrace(currentExporter)).status(),200);
+    assert.equal(await page.getByLabel('Exporter token',{exact:true}).getAttribute('type'),'password');
+    await page.getByRole('button',{name:/^Revoke receiver /}).first().click();
+    await page.getByText('Receiver revoked.',{exact:true}).waitFor();
+    assert.equal((await exportTrace(currentExporter)).status(),401);
+    assert.equal(await page.getByLabel('Exporter token',{exact:true}).count(),0);
+    checks.push('Telemetry UI approves a real receiver; OTLP protobuf persists an Entry and rotation/revocation immediately reject old exporter tokens');
+
     await navigate('Marketplace', 'Marketplace integrations');
     await page.getByRole('button', {name:'Load marketplace',exact:true}).click();
     await page.getByRole('button', {name:'Preview Browser portal',exact:true}).click();
@@ -244,6 +288,65 @@ async function main() {
     await page.getByText('Profile saved.', { exact: true }).waitFor();
     assert.equal((await api('GET', '/api/get-account', undefined, token)).display_name, 'Browser profile saved');
     checks.push('Profile changes persisted through the authenticated API');
+
+    const wallet=await api('POST','/api/providers',{owner:'built-in',name:`browser-wallet-${suffix}`,display_name:'Browser wallet',category:'Payment',type:'Balance'},admin.token);
+    const billingRole=await api('POST','/api/roles',{owner:'built-in',name:`browser-paid-${suffix}`,display_name:'Browser paid member',is_enabled:true},admin.token);
+    const billingPlan=await api('POST','/api/plans',{owner:'built-in',name:`browser-plan-${suffix}`,display_name:'Browser subscription',price_per_month:4.5,price_per_year:45,currency:'USD',role:billingRole.id,is_enabled:true},admin.token);
+    const billingPricing=await api('POST','/api/pricings',{owner:'built-in',name:`browser-pricing-${suffix}`,display_name:'Browser pricing',plans:JSON.stringify([billingPlan.id]),is_enabled:true},admin.token);
+    await api('POST','/api/products',{owner:'built-in',name:`browser-plan-product-${suffix}`,display_name:'Browser premium plan',plan_id:billingPlan.id,price:4.5,currency:'USD',quantity:-1,state:'Active'},admin.token);
+    await api('POST','/api/update-user',{owner:'built-in',name:username,balance:20,balance_currency:'USD'},admin.token);
+    await navigate('Store','Store and subscriptions');
+    await page.getByRole('button',{name:'Select Browser premium plan',exact:true}).click();
+    await page.getByRole('combobox',{name:'Payment provider',exact:true}).selectOption(wallet.id);
+    await page.getByRole('combobox',{name:'Plan pricing',exact:true}).selectOption(billingPricing.id);
+    await page.getByRole('combobox',{name:'Billing period',exact:true}).selectOption('yearly');
+    await page.getByText('Plan price: 45.00 USD',{exact:true}).waitFor();
+    await page.getByRole('combobox',{name:'Billing period',exact:true}).selectOption('monthly');
+    await page.getByRole('button',{name:'Confirm purchase',exact:true}).click();
+    await page.getByText('Purchase paid. Your balance and subscriptions have been refreshed.',{exact:true}).waitFor();
+    await page.getByText('Wallet balance: 15.5 USD',{exact:true}).waitFor();
+    let owned=await api('GET','/api/store/purchases',undefined,token);
+    assert.equal(owned.data.length,1);assert.equal(owned.data[0].state,'Paid');assert.equal(owned.subscriptions.length,1);
+    checks.push('Ordinary user purchases a real priced subscription through the store UI; wallet, paid history and subscription persist');
+    const noConsent=page.getByRole('button',{name:'Enable renewal',exact:true});
+    await noConsent.click();
+    await page.getByText('Confirm renewal authorization before enabling.',{exact:true}).waitFor();
+    await page.getByRole('checkbox',{name:'I authorize renewal at this price',exact:true}).check();
+    await page.getByRole('button',{name:'Enable renewal',exact:true}).click();
+    await page.getByText('Renewal authorization saved.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Disable renewal',exact:true}).waitFor();
+    owned=await api('GET','/api/store/purchases',undefined,token);
+    assert.equal(owned.subscriptions[0].renewal.enabled,true);assert.equal(owned.subscriptions[0].renewal.max_amount_cents,450);
+    await page.getByRole('button',{name:'Disable renewal',exact:true}).click();
+    await page.getByText('Future renewals disabled.',{exact:true}).waitFor();
+    owned=await api('GET','/api/store/purchases',undefined,token);assert.equal(owned.subscriptions[0].renewal.enabled,false);
+    checks.push('Store renewal requires explicit beneficiary consent at the displayed price cap and persists enable/disable without authorizing an administrator to spend for another user');
+
+    const developmentGateway=await api('POST','/api/providers',{owner:'built-in',name:`browser-development-payment-${suffix}`,display_name:'Development gateway',category:'Payment',type:'Dummy'},admin.token);
+    await api('POST','/api/products',{owner:'built-in',name:`browser-recharge-${suffix}`,display_name:'Browser wallet recharge',is_recharge:true,recharge_options:[5,10],disable_custom_recharge:true,price:0,currency:'USD',quantity:-1,state:'Active'},admin.token);
+    await page.getByRole('button',{name:'Refresh store',exact:true}).click();
+    await page.getByRole('button',{name:'Select Browser wallet recharge',exact:true}).click();
+    assert.equal(await page.getByRole('combobox',{name:'Payment provider',exact:true}).locator('option').evaluateAll(options=>options.some(option=>option.textContent==='Browser wallet')),false);
+    assert.equal(await page.getByRole('textbox',{name:'Recharge amount',exact:true}).count(),0);
+    await page.getByRole('combobox',{name:'Payment provider',exact:true}).selectOption(developmentGateway.id);
+    await page.getByRole('combobox',{name:'Recharge option',exact:true}).selectOption('10');
+    await page.getByRole('button',{name:'Confirm purchase',exact:true}).click();
+    await page.getByText('Purchase created. Continue payment or refresh its status in Your purchases.',{exact:true}).waitFor();
+    owned=await api('GET','/api/store/purchases',undefined,token);
+    const pending=owned.data.find(order=>order.kind==='recharge');assert.ok(pending);
+    assert.ok(pending.payment_id);
+    await api('POST','/api/notify-payment',{id:pending.payment_id,state:'Paid'},admin.token);
+    await page.getByRole('button',{name:`Refresh payment ${pending.id}`,exact:true}).click();
+    await page.getByText('Payment refreshed.',{exact:true}).waitFor();
+    await page.getByText('Wallet balance: 25.5 USD',{exact:true}).waitFor();
+    owned=await api('GET','/api/store/purchases',undefined,token);assert.equal(owned.data.find(order=>order.id===pending.id).state,'Paid');
+    await page.screenshot({path:path.join(artifacts,'store-purchases.png'),fullPage:true});
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
+    await page.screenshot({path:path.join(artifacts,'store-mobile.png'),fullPage:true});
+    await page.setViewportSize({width:1440,height:1000});
+    checks.push('Store recharge excludes self-funding wallet, restricts configured amounts and reflects an administrator-settled development payment exactly once');
+    await navigate('Account','Account settings');
 
     const loginApplication=await api('POST','/api/applications',{
       owner:'admin',name:`browser-login-${suffix}`,display_name:'Browser primary login',organization:'built-in',

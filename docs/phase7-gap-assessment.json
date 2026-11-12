@@ -1,7 +1,7 @@
 {
   "date": "2026-11-12",
   "base_commit": "efc7ecef2f83ec0e38105ec45f07cfe6d95ee6f4",
-  "scope": "Phase 6 and 7 changes pending commit; functional parity remains incomplete.",
+  "scope": "Phase 6 and 7 implementation committed as 90a6345; functional parity remains incomplete.",
   "migrations": {
     "new": [
       "027_totp_consumption.sql",

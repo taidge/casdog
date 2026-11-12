@@ -62,6 +62,7 @@ diesel::table! {
         user_balance -> Double,
         balance_credit -> Double,
         balance_currency -> Nullable<VarChar>,
+        record_retention_days -> Integer,
     }
 }
 
@@ -498,9 +499,12 @@ diesel::table! {
         ssl_mode -> Nullable<VarChar>,
         host -> VarChar,
         port -> Integer,
+        #[sql_name = "user"]
         user_name -> VarChar,
         password -> VarChar,
+        #[sql_name = "database"]
         database_name -> Nullable<VarChar>,
+        #[sql_name = "table"]
         table_name -> Nullable<VarChar>,
         table_columns -> Nullable<Text>,
         affiliation_table -> Nullable<VarChar>,
@@ -822,6 +826,7 @@ diesel::table! {
     orders (id) {
         id -> VarChar,
         owner -> VarChar,
+        buyer_id -> Nullable<VarChar>,
         name -> VarChar,
         display_name -> Nullable<VarChar>,
         provider -> Nullable<VarChar>,

@@ -225,6 +225,12 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 required: false,
             },
             FieldDef {
+                key: "record_retention_days",
+                label: "Audit retention days (0 inherits site policy)",
+                kind: FieldKind::Number,
+                required: false,
+            },
+            FieldDef {
                 key: "password_type",
                 label: "Password type",
                 kind: FieldKind::Select(vec![
@@ -1638,6 +1644,34 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 required: true,
             },
             FieldDef {
+                key: "database_type",
+                label: "Database type",
+                kind: FieldKind::Select(vec![SelectOption {
+                    value: "postgres".into(),
+                    label: "PostgreSQL".into(),
+                }]),
+                required: false,
+            },
+            FieldDef {
+                key: "ssl_mode",
+                label: "SSL mode",
+                kind: FieldKind::Select(vec![
+                    SelectOption {
+                        value: "disable".into(),
+                        label: "Disable".into(),
+                    },
+                    SelectOption {
+                        value: "require".into(),
+                        label: "Require".into(),
+                    },
+                    SelectOption {
+                        value: "verify-full".into(),
+                        label: "Verify full".into(),
+                    },
+                ]),
+                required: false,
+            },
+            FieldDef {
                 key: "host",
                 label: "Host",
                 kind: FieldKind::Text,
@@ -1650,7 +1684,7 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 required: false,
             },
             FieldDef {
-                key: "user_name",
+                key: "user",
                 label: "Username",
                 kind: FieldKind::Text,
                 required: false,
@@ -1671,6 +1705,18 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 key: "table",
                 label: "Table",
                 kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "table_columns",
+                label: "Field mappings (JSON array)",
+                kind: FieldKind::Json,
+                required: false,
+            },
+            FieldDef {
+                key: "is_read_only",
+                label: "Read external source only",
+                kind: FieldKind::Toggle,
                 required: false,
             },
             FieldDef {

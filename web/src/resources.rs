@@ -168,7 +168,7 @@ pub const RESOURCES: &[ResourceConfig] = &[
         group: "Connections",
         endpoint: "/api/syncers",
         description: "Directory and database synchronization jobs.",
-        template: r#"{"owner":"admin","name":"syncer_demo","organization":"demo","type":"Database","host":"localhost","port":5432,"user_name":"postgres","password":"postgres"}"#,
+        template: r#"{"owner":"admin","name":"syncer_demo","organization":"built-in","type":"Database","database_type":"postgres","ssl_mode":"require","host":"localhost","port":5432,"user":"","password":"","database":"","table":"","table_columns":[{"name":"id","type":"varchar","casdoor_name":"id","is_key":true},{"name":"username","type":"varchar","casdoor_name":"name"}],"is_read_only":true,"is_enabled":true,"sync_interval":60}"#,
     },
     ResourceConfig {
         slug: "records",

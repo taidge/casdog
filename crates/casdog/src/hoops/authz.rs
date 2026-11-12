@@ -229,16 +229,31 @@ pub async fn validate_resource_references(
     Ok(())
 }
 
+async fn owns_order(
+    _pool: &Pool<Postgres>,
+    principal: &Principal,
+    object: &Value,
+) -> AppResult<bool> {
+    Ok(object.get("buyer_id").and_then(Value::as_str) == Some(principal.id.as_str()))
+}
+
 async fn validate_order_targets(
     pool: &Pool<Postgres>,
     principal: &Principal,
     object: &Value,
 ) -> AppResult<()> {
     let mut references = serde_json::Map::new();
-    for key in ["user", "application", "provider", "payment_id"] {
+    for key in ["application", "provider", "payment_id"] {
         if let Some(value) = object.get(key) {
             references.insert(key.into(), value.clone());
         }
+    }
+    if let Some(user_id) = object.get("buyer_id").and_then(Value::as_str) {
+        references.insert("user_id".into(), Value::String(user_id.into()));
+    } else if let Some(user) = object.get("user") {
+        // Legacy unresolved buyers still cannot point an administrator at a
+        // user outside this order's tenant. They never grant self ownership.
+        references.insert("user".into(), user.clone());
     }
     validate_resource_references(pool, principal, &Value::Object(references), "orders").await
 }
@@ -406,10 +421,19 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
         return Ok(());
     }
 
+    if path == "telemetry/receivers" || path.starts_with("telemetry/receivers/") {
+        return Ok(()); // Handler validates current real administrator and stored receiver scope.
+    }
+    if path == "upload-users" {
+        return if p.admin { Ok(()) } else { Err(denied()) };
+    }
+
     // These handlers enforce tenant and resource policy against persisted rows.
     if matches!(
         path.as_str(),
-        "get-agents"
+        "store/catalog"
+            | "store/purchases"
+            | "get-agents"
             | "upload-resource"
             | "get-openclaw-session-transcript"
             | "sync-mcp-tool"
@@ -609,7 +633,7 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
     }
     if matches!(
         path.as_str(),
-        "pay-order" | "cancel-order" | "invoice-payment" | "payments/invoice"
+        "pay-order" | "cancel-order" | "reconcile-order" | "invoice-payment" | "payments/invoice"
     ) {
         let table = if path.contains("order") {
             "orders"
@@ -619,10 +643,7 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
         let id = req.query::<String>("id").ok_or_else(denied)?;
         let object = stored_object(pool, table, &id).await?;
         p.check_owner(&object, table)?;
-        if !p.admin
-            && !(table == "orders"
-                && object.get("user").and_then(Value::as_str) == Some(p.name.as_str()))
-        {
+        if !p.admin && !(table == "orders" && owns_order(pool, &p, &object).await?) {
             return Err(denied());
         }
         if table == "orders" {
@@ -710,6 +731,7 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
                         | ("syncers", "run")
                         | ("orders", "pay")
                         | ("orders", "cancel")
+                        | ("orders", "reconcile")
                 ))
         {
             return Err(denied());
@@ -725,8 +747,8 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
                     if object.get("user_id").and_then(Value::as_str) == Some(p.id.as_str()) => {}
                 ("orders", "POST")
                     if segments.len() == 3
-                        && matches!(segments[2], "pay" | "cancel")
-                        && object.get("user").and_then(Value::as_str) == Some(p.name.as_str()) => {}
+                        && matches!(segments[2], "pay" | "cancel" | "reconcile")
+                        && owns_order(pool, &p, &object).await? => {}
                 _ => return Err(denied()),
             }
         }

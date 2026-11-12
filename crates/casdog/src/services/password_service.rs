@@ -10,10 +10,259 @@ use crate::error::{AppError, AppResult};
 
 pub struct PasswordService;
 
+pub struct ImportedPassword {
+    pub hash: String,
+    pub password_type: String,
+    pub salt: Option<String>,
+}
+
 // Bound work derived from imported hash strings before invoking a password KDF.
 const MAX_PBKDF2_ITERATIONS: u32 = 2_000_000;
 
 impl PasswordService {
+    /// Canonicalize Casdoor `password` + `passwordType` and native explicit
+    /// `password_hash` without ever treating a declared hash as plaintext.
+    pub fn normalize_import_fields(
+        object: &mut serde_json::Map<String, serde_json::Value>,
+        allow_masked_update: bool,
+    ) -> AppResult<()> {
+        use serde_json::{Value, json};
+        let read = |key: &str| -> AppResult<Option<String>> {
+            object
+                .get(key)
+                .filter(|v| !v.is_null())
+                .map(|v| {
+                    v.as_str().map(str::to_owned).ok_or_else(|| {
+                        AppError::Validation(format!("Credential field {key} must be a string"))
+                    })
+                })
+                .transpose()
+        };
+        let hash = read("password_hash")?;
+        let password = read("password")?;
+        let kind = read("password_type")?;
+        let salt = read("password_salt")?;
+        if hash.is_some() && password.is_some() {
+            return Err(AppError::Validation(
+                "Provide either password or password_hash, not both".into(),
+            ));
+        }
+        let value = hash.as_deref().or(password.as_deref());
+        if value == Some("***") {
+            if !allow_masked_update {
+                return Err(AppError::Validation(
+                    "Masked exports do not contain a recoverable password credential".into(),
+                ));
+            }
+            for key in [
+                "password",
+                "password_hash",
+                "password_type",
+                "password_salt",
+            ] {
+                object.remove(key);
+            }
+            return Ok(());
+        }
+        let Some(value) = value else {
+            if kind.as_deref().is_some_and(|s| !s.is_empty())
+                || salt.as_deref().is_some_and(|s| !s.is_empty())
+            {
+                return Err(AppError::Validation(
+                    "Password type/salt cannot change without a password credential".into(),
+                ));
+            }
+            object.remove("password_type");
+            object.remove("password_salt");
+            return Ok(());
+        };
+        if value.is_empty() {
+            if kind
+                .as_deref()
+                .is_some_and(|s| !s.is_empty() && s != "plain")
+                || salt.as_deref().is_some_and(|s| !s.is_empty())
+            {
+                return Err(AppError::Validation(
+                    "An empty encoded credential cannot be imported".into(),
+                ));
+            }
+            object.remove("password");
+            object.insert("password_hash".into(), json!(""));
+            object.insert("password_type".into(), json!("argon2"));
+            object.insert("password_salt".into(), Value::Null);
+            return Ok(());
+        }
+        let encoded = hash.is_some()
+            || kind
+                .as_deref()
+                .is_some_and(|s| !s.is_empty() && s != "plain");
+        let credential = Self::import_credential(value, kind.as_deref(), salt.as_deref(), encoded)?;
+        object.remove("password");
+        object.insert("password_hash".into(), json!(credential.hash));
+        object.insert("password_type".into(), json!(credential.password_type));
+        object.insert("password_salt".into(), json!(credential.salt));
+        Ok(())
+    }
+    /// Import callers must distinguish plaintext from a stored credential.
+    /// Self-describing encodings can identify their own algorithm; raw digests
+    /// require an explicit type instead of guessing from their length.
+    pub fn import_credential(
+        password: &str,
+        password_type: Option<&str>,
+        salt: Option<&str>,
+        is_hashed: bool,
+    ) -> AppResult<ImportedPassword> {
+        if password.is_empty() || password == "***" || password.len() > 4096 {
+            return Err(AppError::Validation("An actual password credential is required; masked exports cannot restore credentials".into()));
+        }
+        if !is_hashed {
+            if Self::encoded_type(password).is_some() {
+                return Err(AppError::Validation("Encoded password supplied as plaintext; declare its passwordType/hash semantics".into()));
+            }
+            return Ok(ImportedPassword {
+                hash: Self::hash_password(password, "argon2", None)?,
+                password_type: "argon2".into(),
+                salt: None,
+            });
+        }
+        let kind = password_type
+            .filter(|t| !t.is_empty())
+            .map(str::to_ascii_lowercase)
+            .or_else(|| Self::encoded_type(password).map(str::to_owned))
+            .ok_or_else(|| {
+                AppError::Validation(
+                    "A non-self-describing password hash requires passwordType".into(),
+                )
+            })?;
+        if kind == "plain" {
+            return Self::import_credential(password, None, None, false);
+        }
+        Self::validate_encoded_hash(password, &kind, salt)?;
+        Ok(ImportedPassword {
+            hash: password.into(),
+            password_type: kind,
+            salt: salt.filter(|s| !s.is_empty()).map(str::to_owned),
+        })
+    }
+
+    pub fn encoded_type(password: &str) -> Option<&'static str> {
+        if password.starts_with("$argon2id$") {
+            Some("argon2id")
+        } else if password.starts_with("$argon2i$") || password.starts_with("$argon2d$") {
+            Some("argon2")
+        } else if ["$2a$", "$2b$", "$2y$"]
+            .iter()
+            .any(|prefix| password.starts_with(prefix))
+        {
+            Some("bcrypt")
+        } else if password.starts_with("pbkdf2_sha256$") {
+            Some("pbkdf2-django")
+        } else if password.starts_with("$pbkdf2-sha256$") {
+            Some("pbkdf2-sha256")
+        } else {
+            None
+        }
+    }
+
+    /// Validate imported KDF resource parameters without running the KDF.
+    pub fn validate_encoded_hash(hash: &str, kind: &str, salt: Option<&str>) -> AppResult<()> {
+        let invalid =
+            || AppError::Validation("Invalid or unsupported encoded password credential".into());
+        if hash.is_empty()
+            || hash == "***"
+            || hash.len() > 1024
+            || salt.is_some_and(|s| s.len() > 256)
+        {
+            return Err(invalid());
+        }
+        let valid = match kind.to_ascii_lowercase().as_str() {
+            "argon2" | "argon2id" | "" => {
+                let parsed = PasswordHash::new(hash).map_err(|_| invalid())?;
+                let m = parsed.params.get_decimal("m").unwrap_or(0);
+                let t = parsed.params.get_decimal("t").unwrap_or(0);
+                let p = parsed.params.get_decimal("p").unwrap_or(0);
+                matches!(
+                    parsed.algorithm.as_str(),
+                    "argon2id" | "argon2i" | "argon2d"
+                ) && (!kind.eq_ignore_ascii_case("argon2id")
+                    || parsed.algorithm.as_str() == "argon2id")
+                    && matches!(parsed.version, Some(16 | 19))
+                    && (1..=10).contains(&t)
+                    && (1..=16).contains(&p)
+                    && m >= 8 * p
+                    && m <= 262_144
+                    && m.saturating_mul(t) <= 786_432
+                    && parsed.hash.is_some_and(|h| (16..=64).contains(&h.len()))
+                    && parsed
+                        .salt
+                        .is_some_and(|s| (8..=128).contains(&s.as_str().len()))
+            }
+            "bcrypt" => {
+                hash.len() == 60
+                    && Self::encoded_type(hash) == Some("bcrypt")
+                    && hash
+                        .split('$')
+                        .nth(2)
+                        .and_then(|cost| cost.parse::<u32>().ok())
+                        .is_some_and(|cost| (4..=16).contains(&cost))
+                    && hash.as_bytes()[7..]
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'.' | b'/'))
+            }
+            "salt" | "sha256-salt" => {
+                hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+            }
+            "md5-salt" => hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "sha512-salt" => hash.len() == 128 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "pbkdf2-salt" => {
+                STANDARD.decode(hash).is_ok_and(|key| key.len() == 64)
+                    && STANDARD
+                        .decode(salt.unwrap_or_default())
+                        .is_ok_and(|salt| salt.len() <= 128)
+            }
+            "pbkdf2-django" | "pbkdf2-sha256" => {
+                let parts: Vec<_> = hash.split('$').collect();
+                let fields = match parts.as_slice() {
+                    ["pbkdf2_sha256", rounds, salt, hash]
+                        if kind.eq_ignore_ascii_case("pbkdf2-django") =>
+                    {
+                        Some((*rounds, *salt, *hash, true))
+                    }
+                    ["", "pbkdf2-sha256", rounds, salt, hash]
+                        if kind.eq_ignore_ascii_case("pbkdf2-sha256") =>
+                    {
+                        Some((*rounds, *salt, *hash, false))
+                    }
+                    _ => None,
+                };
+                fields.is_some_and(|(rounds, salt, key, django)| {
+                    salt.len() <= 256
+                        && rounds
+                            .parse::<u32>()
+                            .is_ok_and(|r| (1..=MAX_PBKDF2_ITERATIONS).contains(&r))
+                        && if django {
+                            STANDARD.decode(key).is_ok_and(|key| key.len() == 32)
+                        } else {
+                            key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())
+                        }
+                })
+            }
+            "plain" => true,
+            _ => false,
+        };
+        if valid { Ok(()) } else { Err(invalid()) }
+    }
+
+    pub fn needs_rehash(hash: &str, kind: &str, salt: Option<&str>) -> bool {
+        if !matches!(kind, "argon2" | "argon2id" | "") || salt.is_some_and(|s| !s.is_empty()) {
+            return true;
+        }
+        PasswordHash::new(hash).map_or(true, |p| {
+            p.algorithm.as_str() != "argon2id"
+                || p.params.get_decimal("m").unwrap_or(0) < 19_456
+                || p.params.get_decimal("t").unwrap_or(0) < 2
+        })
+    }
     /// Supports all Casdoor credential types and the original Casdog aliases.
     pub fn hash_password(
         password: &str,
@@ -77,6 +326,13 @@ impl PasswordService {
     ) -> AppResult<bool> {
         let salt = salt.unwrap_or_default();
         let kind = password_type.to_lowercase();
+        // Old Casdog markers remain readable for migration, but are never
+        // accepted as imported bcrypt/MD5 encodings.
+        let old_marker = (kind == "bcrypt" && password_hash.starts_with("$bcrypt-fallback$"))
+            || (kind == "md5-salt" && password_hash.starts_with("$md5-fallback$"));
+        if !old_marker && Self::validate_encoded_hash(password_hash, &kind, Some(salt)).is_err() {
+            return Ok(false);
+        }
         match kind.as_str() {
             "argon2" | "argon2id" | "" => {
                 let Ok(parsed) = PasswordHash::new(password_hash) else {
@@ -113,7 +369,7 @@ impl PasswordService {
             "salt" => Ok(Self::verify_digest::<Sha256>(password, password_hash, salt)),
             "sha512-salt" => Ok(Self::verify_digest::<Sha512>(password, password_hash, salt)
                 // Read the old Casdog single-hash format as well.
-                || Self::equal(&hex::encode(Sha512::digest(format!("{password}{salt}"))), password_hash)),
+                || Self::equal(&hex::encode(Sha512::digest(format!("{password}{salt}"))), &password_hash.to_ascii_lowercase())),
             "md5-salt" => {
                 if let Some(old) = password_hash.strip_prefix("$md5-fallback$") {
                     return Ok(Self::equal(
@@ -146,7 +402,12 @@ impl PasswordService {
                 } else {
                     hex::encode(key)
                 };
-                Ok(Self::equal(&computed, expected))
+                let expected = if django {
+                    expected.to_owned()
+                } else {
+                    expected.to_ascii_lowercase()
+                };
+                Ok(Self::equal(&computed, &expected))
             }
             "pbkdf2-salt" | "sha256-salt" | "plain" => {
                 let computed = Self::hash_password(password, &kind, Some(salt))?;
@@ -177,6 +438,7 @@ impl PasswordService {
     }
 
     fn verify_digest<D: Digest>(password: &str, expected: &str, salt: &str) -> bool {
+        let expected = &expected.to_ascii_lowercase();
         Self::equal(&Self::salted_digest::<D>(password, salt), expected)
             || (salt.is_empty()
                 && Self::equal(

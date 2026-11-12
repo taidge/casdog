@@ -39,6 +39,15 @@ pub struct NotifyResult {
     pub raw_state: Option<String>,
 }
 
+/// State read from the provider's authenticated API, not from browser query
+/// parameters. Approval alone is never a settled payment.
+#[derive(Debug, Clone)]
+pub struct RemotePayment {
+    pub result: NotifyResult,
+    pub pay_url: Option<String>,
+    pub capture_required: bool,
+}
+
 /// Trait for payment providers
 #[async_trait]
 pub trait PaymentProvider: Send + Sync {
@@ -55,6 +64,61 @@ pub trait PaymentProvider: Send + Sync {
 
     /// Get invoice/receipt for a completed payment
     async fn get_invoice(&self, order_id: &str) -> AppResult<String>;
+
+    async fn query_payment(
+        &self,
+        _order_id: &str,
+        _local_payment_id: &str,
+    ) -> AppResult<RemotePayment> {
+        Err(AppError::Conflict(
+            "This provider does not support payment reconciliation".into(),
+        ))
+    }
+
+    async fn capture_payment(
+        &self,
+        _order_id: &str,
+        _local_payment_id: &str,
+        _request_id: &str,
+    ) -> AppResult<RemotePayment> {
+        Err(AppError::Conflict(
+            "This provider does not support payment capture".into(),
+        ))
+    }
+
+    async fn cancel_payment(
+        &self,
+        _order_id: &str,
+        _local_payment_id: &str,
+        _request_id: &str,
+    ) -> AppResult<RemotePayment> {
+        Err(AppError::Conflict(
+            "Remote payment cancellation is not available for this provider".into(),
+        ))
+    }
+}
+
+pub fn validate_checkout_url(provider_type: &str, value: &str) -> AppResult<()> {
+    let url = reqwest::Url::parse(value).map_err(|_| {
+        AppError::Authentication("Provider returned an invalid checkout URL".into())
+    })?;
+    let host = url.host_str().unwrap_or_default();
+    let trusted = match provider_type.to_ascii_lowercase().as_str() {
+        "stripe" => host == "checkout.stripe.com",
+        "paypal" => matches!(
+            host,
+            "www.paypal.com" | "paypal.com" | "www.sandbox.paypal.com" | "sandbox.paypal.com"
+        ),
+        "dummy" => host == "dummy-payment.example.com",
+        _ => false,
+    };
+    if url.scheme() != "https" || !trusted || !url.username().is_empty() || url.password().is_some()
+    {
+        return Err(AppError::Authentication(
+            "Provider returned an untrusted checkout URL".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Factory function to create payment providers

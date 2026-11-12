@@ -10,18 +10,26 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 **结论：已有较广的 IAM 骨架和不少真实实现，但不能称为完整 Casdoor 替代品。**
 路由存在、编译通过、返回 401/500 均不证明功能等价。旧 `_todos.md` 把上一轮的局部修复扩大为整体完成，本次纠正。
 
+## 第九阶段提交状态（2026-11-12）
+
+本次提交包含第八阶段已验证成果，以及第九阶段新增的订阅续费授权和后台对账、PostgreSQL Syncer 双向同步、OTLP/HTTP protobuf 接收、审计记录保留策略与对应 Glory/Sapid 页面。部署前需应用迁移 033–039。
+
+第八阶段完整后端回归为 462 次执行通过，其中 140 个显式 PostgreSQL 测试函数实际执行；真实后端浏览器回归为 17 项通过。第九阶段前端 7 个原生测试、WASM 检查、Trunk release 构建与浏览器夹具已通过；新增后端专项和扩展后的真实后端浏览器端到端回归尚未执行完成，不能沿用第八阶段结果作为新功能验收结论。
+
+新增功能仍有明确边界：外部支付自动续费尚无离线扣款授权，只创建待用户主动支付的订单；Syncer 双向写回目前限于满足键约束和可逆映射的 PostgreSQL 源，LDAP/Keycloak 写回拒绝；OTLP 仅支持 HTTP protobuf，可接收 gzip，不包含 gRPC 或 JSON；连接池设置保存后尚未应用到运行中的连接池，审计保留策略独立生效。复核上游 Agent 只有管理 CRUD，没有此前报告假设的代理执行协议，因此不再把代理执行列为上游缺口。
+
 ## 可重复的覆盖指标
 
 运行 `python scripts/check-casdoor-parity.py --reference E:/Repos/casdoor --output docs/casdoor-route-inventory.json`。
 
-| 指标 | 复核前 | 当前（第六阶段） | 边界 |
+| 指标 | 复核前 | 当前（第八阶段） | 边界 |
 | --- | ---: | ---: | --- |
 | 上游显式路由唯一路径 | 336 | 336 | 含协议和非 API 路径 |
 | 可比较的扁平 API 路径＋HTTP 方法 | 299 | 299 | 排除嵌套协议和通配方法 |
 | 匹配声明 | 227 | 299 | 75.92% → 100%，静态声明覆盖 |
 | 缺失声明 | 72 | 0 | 当前范围与边界见 phase5-gap-assessment.json |
 | 上游页面组件 | 105 | 105 | `.tsx` 位于 `web/src/pages`，文件数不是流程数 |
-| Casdog 前端结构 | 8 独立页面＋29 通用资源配置 | 同左 | 通用 CRUD 不能等同专用业务页面 |
+| Casdog 前端结构 | 8 独立页面＋29 通用资源配置 | 11 独立页面＋29 通用资源配置 | 通用 CRUD 不能等同专用业务页面 |
 | 上游密码格式实现 | 仅 plain 直接匹配，其他有缺失或格式差异 | 8 类实现 | 已有旧 Casdog 格式读取兼容 |
 
 此处不提供虚假的整体完成百分比：尚无逐场景 Casdoor/Casdog 差分测试，所有支付、目录、身份提供商也未用真实服务验证。
@@ -85,12 +93,12 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 | P0 | 认证协议 | Kerberos 没有真实票据验证；SAML 签名/验证及全部协议仍需标准一致性和部署测试。OAuth state、回调、令牌撤销/退出已有第二阶段实现和回归用例，不能据此宣称所有协议完成。 |
 | P1 | 社交登录 | 第三阶段已实现 PostgreSQL 共享 state/完成凭证、MFA 补验、已有账户显式绑定及安全解绑。真实 GitHub/Google 等提供商、真实浏览器和生产集群验收仍未完成；本机独立连接池回归不能代替生产部署验收。 |
 | P1 | 找回密码 | 前后端、本机邮件 HTTP 及真实后端浏览器闭环已验证；租户/应用绑定、错误/过期/重放、并发消费与会话撤销已有数据库回归。真实 SMTP/云邮件环境仍需部署验收。 |
-| P1 | MFA | 密码、社交、Passkey 和 FaceID 均已接入补验；第六阶段增加 PostgreSQL TOTP 时间步原子消费与 FaceID nonce 原子消费。FaceID 仍是现有 embedding 接口，可信摄像头采集和活体检查未实现；LDAP/code 首因子还不是独立的完整登录实现。 |
-| P1 | 兼容业务语义 | 通用 CRUD 绕过部分资源 service 校验和副作用；导入时上游 password 是哈希，而普通更新是明文，仍需专用导入契约；分页过滤只有已实现子集。 |
-| P1 | 上游新模块 | 已补 Agent/Server/Entry/Key 管理、Marketplace 应用/提供商安装页面、OpenClaw 基础图及 Local/S3 transcript；代理执行、Key API 凭证身份、theme 集成、OTLP 及更多专用页面仍有缺口。 |
-| P1 | 商业流程 | 普通商品购买已增加异步持久库存预留、通知验签/终态/幂等、管理员手工履约及 CRUD 约束。定价计划/充值、自动续费调度、购物车、远端 void/refund、超时后的 checkout 恢复和专用页面仍缺；PayPal approval 不再误记已付款，但 capture 流程仍需补齐。 |
+| P1 | MFA | 密码、社交、Passkey 和 FaceID 均已接入补验；第六阶段增加 PostgreSQL TOTP 时间步原子消费与 FaceID nonce 原子消费。FaceID 仍是现有 embedding 接口，可信摄像头采集和活体检查未实现；第七阶段已实现邮件/短信 code 和 LDAP 首因子及额外 MFA；生产目录与投递仍需部署验收。 |
+| P1 | 兼容业务语义 | 已补专用 XLSX/CSV/JSON 用户导入、密码摘要/type/salt 语义与整批事务，Syncer 的 REST/兼容 CRUD 共用校验；其余资源副作用、复杂分页过滤、MFA enrollment 迁移与完整导出仍需逐场景补齐。 |
+| P1 | 上游新模块 | 已补 Agent/Server/Entry/Key 管理、Marketplace 应用/提供商安装页面、OpenClaw 基础图及 Local/S3 transcript；Key API 凭证与应用虚拟身份已在第七阶段实现；第九阶段新增 OTLP/HTTP protobuf，专项验收仍待完成，theme 集成及更多专用页面仍有缺口。上游 Agent 仅有管理 CRUD，不包含代理执行协议。 |
+| P1 | 商业流程 | 普通商品购买已增加异步持久库存预留、通知验签/终态/幂等、管理员手工履约及 CRUD 约束。第七阶段已补计划/充值权益，第八阶段增加持久 checkout 恢复、Stripe 对账/远端 expire、PayPal capture 和普通用户商店。自动续费调度、购物车、完整退款及权益冲回、超出幂等窗口的自动恢复仍缺；未知历史买家须人工审核。 |
 | P2 | 运维功能 | 第四阶段已补首次管理员密码、设置保存、Dashboard 热图/MFA/提供商与 Webhook 历史/重放；设置运行时应用仍缺；第五阶段已补配置化系统升级与持久化设备授权流程，部署验收边界见末尾。 |
-| P2 | 提供商 | 当前存储工厂仅 Local/S3，上游列出 11 类；同步器仅 Database(PostgreSQL)/LDAP/Keycloak；上游大量云目录、支付和消息提供商未覆盖。 |
+| P2 | 提供商 | 当前存储工厂仅 Local/S3，上游列出 11 类；同步器本轮验证 PostgreSQL/LDAP 单向新增更新与持久互斥调度；外部写回、源删除禁用、affiliation 外表和 values 转换仍缺。上游大量云目录、支付和消息提供商未覆盖。 |
 | P2 | 前端 | 105 个上游页面组件无法由 29 个通用 JSON 资源编辑器替代；复杂字段、验证、批量操作、关系选择、主题/i18n、组织应用定制需要逐场景验收。 |
 
 ## 验证
@@ -264,3 +272,28 @@ Windows 本次构建使用已安装 PostgreSQL 18 附带的 OpenSSL 3 头文件/
 - 全量后端回归执行 27 个测试程序：438 通过、1 失败、0 忽略；套件包含 121 个显式启用的 PostgreSQL 测试函数。该失败暴露应用消息身份丢失提供商白名单；已修复并将旧夹具补齐真实组织及静态应用信任，授权 7 项与 Key 7 项定向复跑全部通过。最后这处局部修复后没有重复全量命令，保留原始失败日志而不替换记录。
 - 前端 6 项原生测试、WASM 检查、Trunk release 及浏览器夹具通过。15 项真实后端浏览器检查通过，使用新数据库、迁移 001–032 和实际 Glory/Sapid WASM，没有拦截 API。新增验证码、真实 LDAP、Key 管理与即时撤销、静态应用审核；保留 WebAuthn、设备、MFA、注册和找回密码。此浏览器执行早于最终消息处理局部修复，该修复由授权和 Key 定向回归覆盖。
 - Rust 格式检查和 Git 空白检查通过，未运行远端 CI 或严格 Clippy。原始日志与执行边界见 [phase7-gap-assessment.json](phase7-gap-assessment.json)。浏览器服务启动另报告既有 syncer 查询缺少 user 列，调度器 schema 修复保留为待办。
+
+
+## 第八阶段：同步调度、支付恢复、用户导入与商店（2026-11-12）
+
+- Syncer：迁移 033 修正 user/database/table 实际列名与 FromRow 映射，REST 和兼容 CRUD 共用配置验证、组织检查、密码掩码及 masked 更新保留。运行状态、租约、下次时间与失败退避持久保存；独立连接池争抢同一任务只执行一次，过期租约可恢复。单次本地写入在有界事务中提交，失败整批回滚；稳定源键保留账户 ID，未映射密码不再被随机替换，相同明文重复同步不反复撤销会话。
+- 目录边界：验证真实独立 PostgreSQL 源库及 LDAP bind/search 单向新增更新。isReadOnly=false 的结果明确提示 import only，未实现外部反向写回；源删除自动禁用、affiliation 外表与 values 转换继续列为缺口，values 非空明确拒绝。
+- 支付：迁移 034 在远端请求前保存原始 checkout 请求、凭据摘要、重试截止及租约，恢复复用同一个 payment 和幂等键。新增 reconcile-order 与 orders/{id}/reconcile；Stripe 查询权威 session 状态，PayPal 已批准订单发起持久幂等 capture，只有精确金额/币种且完成的 capture 才入账。Stripe 未付款取消先确认远端 session expire；无法确认时保留库存，避免假取消。
+- 买家身份：迁移 035 为所有普通、计划和充值订单固定 buyer_id，新订单忽略客户端伪造买家字段；改名或名字复用不能改变付款、履约、取消及查询归属。历史回填只采用权益、已付款账本或明确 payment UUID 证据，无法证明的历史姓名保持未解析，不按当前同名用户猜测。用户兼容列表以 UUID 隔离，管理员仍可用当前姓名、UUID 或 owner/name 查询。
+- 用户导入：upload-users 保留真实 multipart XLSX 首 sheet 契约，另支持明确的 JSON/CSV/TSV；限制压缩展开、行列、XML 结构与实体，拒绝公式、外部引用和损坏文件。真实当前管理员、组织与 LDAP 绑定均复核，预验证后事务整批插入。上游 password+passwordType/passwordSalt 保存为已声明的摘要，plain 转安全哈希；masked 备份和危险 KDF 参数拒绝。旧摘要在完成真实密码认证后可 CAS 升级，master password 不替换用户凭据；MFA enrollment 迁移仍需单独实现，相关导入明确拒绝。
+- 前端：新增普通用户商店，展示本租户安全目录和自身钱包/购买/订阅，支持计划周期、优惠码、预设或自定义充值、继续付款、对账及取消。钱包币种沿用余额币种→旧 currency→USD 的真实规则；目录不返回提供商秘密。同步器配置表单修正 user 字段并提供 SSL 与映射输入。手机布局已检查。
+
+部署前停止旧版本写入并顺序执行 033–035，再运行新版本。035 会锁订单、用户、付款、账本与权益表；先备份并检查历史归属，对 buyer_id 为 NULL 的旧单保留管理员人工审核，不把该订单自动绑定给当前同名账号。没有订单归属证明且只保存旧姓名的独立付款不会出现在普通用户列表中，管理员仍可核查原始记录。支付请求超过保守幂等重试期限、提供商凭据变更、退款与权益冲回、真实生产网关/目录/云服务验收继续保留。
+
+
+### 第八阶段验证
+
+- 全新最终后端库和浏览器库均顺序执行迁移 001–035；同步源使用另一独立 PostgreSQL 数据库。本轮不使用 Docker，不重定向 Cargo/TEMP 或任何全局缓存。
+- 最终完整命令 `cargo test --workspace --tests --no-fail-fast --jobs 2 -- --include-ignored --test-threads=1` 已通过：**30 个测试程序，462 次执行，0 失败、0 忽略**。lib/main 各运行相同的 38 项单元测试，次数不等于独立业务场景数。
+- **140 个显式启用的 PostgreSQL 测试函数全部通过**，比第七阶段增加 19：商业恢复及买家迁移 7、导入 5、商店/兼容列表 3、同步器 4。逐个将源码 ignore 函数名与最终成功日志核对，无缺失；保留原先 4 个数据库端到端场景。
+- 前端 **7 项原生测试**、WASM 检查、Trunk release 和 API 夹具浏览器回归通过。新增商店购买、计划价格周期、充值限制、付款刷新及同步器表单序列化；**17 项真实后端浏览器检查通过**，使用新数据库和实际编译 WASM，未拦截 API。浏览器充值为开发支付提供商加已授权管理员履约；Stripe/PayPal 由真实本机 HTTP 协议夹具验证，不冒充生产资金验收。
+- 最终后端日志 `target/phase8/backend-tests-final.log`；浏览器日志/结果 `target/phase8/browser-e2e-final.log`、`target/phase8/browser-e2e/results.json`；前端日志 `web/target/phase8-*`。格式与 Git 空白检查通过；未运行远端 CI 或严格 Clippy。逐测试程序统计及剩余范围见 [phase8-gap-assessment.json](phase8-gap-assessment.json)。最终浏览器启动不再出现原有 Syncer 缺列错误。
+
+最终 `cargo check --offline -p casdog --tests --jobs 2` 通过，日志为 `target/phase8/final-check.log`。
+
+整体功能仍未达到 Casdoor 等价。下一优先级为退款及权益冲回、真正自动续费和后台对账、Syncer 双向与删除语义、Agent 执行/OTLP、Kerberos/SAML 互操作及更多专用前端。新增 API、真实本机协议回归和数据库状态证明本轮闭环，不能代替生产服务及硬件验收。

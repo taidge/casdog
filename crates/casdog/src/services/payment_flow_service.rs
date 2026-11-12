@@ -3,13 +3,16 @@ use std::collections::HashMap;
 use chrono::{DateTime, Months, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::models::{Order, OrderResponse, Payment, PaymentResponse, Provider, User};
-use crate::services::providers::payment_provider::build_payment_provider;
+use crate::services::providers::payment_provider::{
+    NotifyResult, PayRequest, PaymentProvider, build_payment_provider, validate_checkout_url,
+};
 
 pub struct PaymentFlowService;
 
@@ -43,6 +46,64 @@ pub struct PaymentNotifyResult {
 }
 
 impl PaymentFlowService {
+    /// Internal Balance renewal capability. The durable work token is checked
+    /// inside the very transaction that debits funds; no user JWT is synthesized.
+    pub(crate) async fn pay_subscription_renewal(
+        pool: &PgPool,
+        work_id: &str,
+        token: &str,
+        order_id: &str,
+    ) -> AppResult<PaymentStartResult> {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT set_config('casdog.checkout_write','on',true)")
+            .execute(&mut *tx)
+            .await?;
+        let order = Self::load_order_for_update(&mut tx, order_id).await?;
+        if let Some(payment_id) = order.payment_id.as_deref().filter(|s| !s.is_empty()) {
+            let payment = Self::load_payment_for_update(&mut tx, payment_id).await?;
+            if payment.state.eq_ignore_ascii_case("paid") {
+                tx.commit().await?;
+                return Ok(Self::start_result(order, payment, json!({})));
+            }
+            return Err(AppError::Conflict(
+                "A renewal already has a pending payment".into(),
+            ));
+        }
+        if !order.state.eq_ignore_ascii_case("created") {
+            return Err(AppError::Conflict("Renewal order is not payable".into()));
+        }
+        Self::validate_order_amount(&order)?;
+        let provider =
+            Self::resolve_provider(&mut tx, &order.owner, None, order.provider.as_deref()).await?;
+        if Self::normalize_provider_type(&provider.provider_type) != "balance" {
+            return Err(AppError::Conflict(
+                "Background renewal requires an authorized Balance provider".into(),
+            ));
+        }
+        // Preserve checkout's order -> product -> user -> subscription ordering.
+        let _: Option<String> =
+            sqlx::query_scalar("SELECT id FROM products WHERE owner=$1 AND name=$2 FOR UPDATE")
+                .bind(&order.owner)
+                .bind(&order.product_name)
+                .fetch_optional(&mut *tx)
+                .await?;
+        Self::load_order_user_for_update(&mut tx, &order).await?;
+        super::subscription_renewal_service::SubscriptionRenewalService::validate_balance_charge(
+            &mut tx, work_id, token, &order, &provider,
+        )
+        .await?;
+        Self::validate_benefit_checkout(&mut tx, &order, &provider).await?;
+        let return_url = Self::build_return_url(&order, None, None);
+        Self::pay_with_balance(tx, order, provider, return_url).await
+    }
+
+    pub(crate) async fn reconcile_in_background(
+        pool: &PgPool,
+        order_id: &str,
+        gateway: Option<&dyn PaymentProvider>,
+    ) -> AppResult<PaymentStartResult> {
+        Self::remote_order_action(pool, order_id, "", "", false, gateway, false, true).await
+    }
     pub async fn start_order_payment(
         pool: &PgPool,
         order_id: &str,
@@ -52,6 +113,54 @@ impl PaymentFlowService {
         is_admin: bool,
         external_origin: Option<&str>,
     ) -> AppResult<PaymentStartResult> {
+        Self::start_order_payment_inner(
+            pool,
+            order_id,
+            provider_hint,
+            current_owner,
+            current_name,
+            is_admin,
+            external_origin,
+            None,
+        )
+        .await
+    }
+
+    /// Explicit transport injection for embedded gateways and HTTP integration
+    /// tests. HTTP handlers always use the provider factory above.
+    pub async fn start_order_payment_using(
+        pool: &PgPool,
+        order_id: &str,
+        provider_hint: Option<&str>,
+        current_owner: &str,
+        current_name: &str,
+        is_admin: bool,
+        external_origin: Option<&str>,
+        gateway: &dyn PaymentProvider,
+    ) -> AppResult<PaymentStartResult> {
+        Self::start_order_payment_inner(
+            pool,
+            order_id,
+            provider_hint,
+            current_owner,
+            current_name,
+            is_admin,
+            external_origin,
+            Some(gateway),
+        )
+        .await
+    }
+
+    async fn start_order_payment_inner(
+        pool: &PgPool,
+        order_id: &str,
+        provider_hint: Option<&str>,
+        current_owner: &str,
+        current_name: &str,
+        is_admin: bool,
+        external_origin: Option<&str>,
+        gateway: Option<&dyn PaymentProvider>,
+    ) -> AppResult<PaymentStartResult> {
         // All mutations use the same lock order: order, payment, product, user.
         // This serializes checkout creation across server instances as well as
         // cancellation and webhooks, without a process-local mutex.
@@ -60,21 +169,39 @@ impl PaymentFlowService {
             .execute(&mut *tx)
             .await?;
         let order = Self::load_order_for_update(&mut tx, order_id).await?;
-        Self::authorize_order(&order, current_owner, current_name, is_admin)?;
+        Self::authorize_order(&mut tx, &order, current_owner, current_name, is_admin).await?;
         if let Some(payment_id) = order.payment_id.as_deref().filter(|id| !id.is_empty()) {
             let payment = Self::load_payment_for_update(&mut tx, payment_id).await?;
             if !Self::is_terminal_payment_state(&payment.state)
                 || payment.state.eq_ignore_ascii_case("paid")
             {
-                let auto_paid = payment.state.eq_ignore_ascii_case("paid");
+                if Self::is_terminal_payment_state(&payment.state)
+                    || payment.pay_url.as_deref().is_some_and(|u| !u.is_empty())
+                    || payment
+                        .out_order_id
+                        .as_deref()
+                        .is_some_and(|id| !id.is_empty() && id != payment.id)
+                {
+                    tx.commit().await?;
+                    return Ok(Self::start_result(order, payment, json!({})));
+                }
+                let provider_id = payment
+                    .provider_id
+                    .as_deref()
+                    .ok_or_else(|| AppError::Validation("Payment provider is missing".into()))?;
+                let provider = Self::load_provider_by_id_tx(&mut tx, provider_id).await?;
+                Self::check_provider_identity(&order, &payment, &provider)?;
+                let Some((request, token, attempt)) =
+                    Self::claim_checkout_create(&mut tx, &payment, &provider).await?
+                else {
+                    tx.commit().await?;
+                    return Ok(Self::start_result(order, payment, json!({"retryAfter":45})));
+                };
                 tx.commit().await?;
-                return Ok(PaymentStartResult {
-                    order: order.into(),
-                    pay_url: payment.pay_url.clone(),
-                    payment: payment.into(),
-                    auto_paid,
-                    attach_info: json!({}),
-                });
+                return Self::dispatch_checkout(
+                    pool, order, payment, provider, request, token, attempt, gateway,
+                )
+                .await;
             }
         }
         if !order.state.eq_ignore_ascii_case("created") {
@@ -96,15 +223,15 @@ impl PaymentFlowService {
         if Self::normalize_provider_type(&provider.provider_type) == "balance" {
             return Self::pay_with_balance(tx, order, provider, return_url).await;
         }
-        let payment_provider = build_payment_provider(&provider)?;
+        if gateway.is_none() {
+            build_payment_provider(&provider)?;
+        }
         Self::reserve_product_stock(&mut tx, &order).await?;
         let payment_id = Uuid::new_v4().to_string();
         let payment_name = format!("payment_{}", &payment_id[..12]);
         let return_url = Self::build_return_url(&order, external_origin, Some(&payment_id));
-        let payer_email = Self::load_order_user_for_update(&mut tx, &order)
-            .await
-            .ok()
-            .and_then(|u| u.email);
+        let payer = Self::load_order_user_for_update(&mut tx, &order).await.ok();
+        let payer_email = payer.as_ref().and_then(|u| u.email.clone());
         let payment = sqlx::query_as::<_, Payment>(
             r#"INSERT INTO payments (
                 id, owner, name, display_name, description, provider_id, payment_type,
@@ -120,7 +247,7 @@ impl PaymentFlowService {
         .bind(&provider.id)
         .bind(&provider.provider_type)
         .bind(&order.product_name)
-        .bind(&order.user)
+        .bind(payer.as_ref().map(|u| &u.id))
         .bind(order.price)
         .bind(order.currency.clone().unwrap_or_else(|| "USD".to_string()))
         .bind(&return_url)
@@ -130,87 +257,227 @@ impl PaymentFlowService {
             "UPDATE orders SET provider=$2,payment_id=$3,payment_name=$4,return_url=COALESCE(return_url,$5),updated_at=NOW() WHERE id=$1 RETURNING *",
         ).bind(&order.id).bind(&provider.name).bind(&payment.id).bind(&payment.name)
             .bind(&return_url).fetch_one(&mut *tx).await?;
-        // The remote request is made only after its local payment and inventory
-        // reservation are durable. Other callers reuse this payment ID.
+        let request = PayRequest {
+            product_name: order
+                .product_name
+                .clone()
+                .unwrap_or_else(|| order.name.clone()),
+            product_display_name: order
+                .product_display_name
+                .clone()
+                .or_else(|| order.product_name.clone())
+                .unwrap_or_else(|| order.display_name.clone()),
+            provider_name: provider.name.clone(),
+            price: order.price,
+            currency: order.currency.clone().unwrap_or_else(|| "USD".into()),
+            quantity: 1,
+            return_url,
+            order_id: payment_id,
+            payer_name: order.user.clone(),
+            payer_email,
+        };
+        let token = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO payment_remote_operations(payment_id,checkout_request,provider_fingerprint,create_retry_until,lease_token,lease_kind,lease_until,attempts) VALUES($1,$2,$3,clock_timestamp()+$4::bigint*INTERVAL '1 second',$5,'create',clock_timestamp()+INTERVAL '45 seconds',1)")
+            .bind(&payment.id).bind(serde_json::to_value(&request).map_err(|e|AppError::Internal(e.to_string()))?)
+            .bind(Self::provider_fingerprint(&provider)).bind(Self::create_retry_seconds(&provider)).bind(&token).execute(&mut *tx).await?;
+        // Persist the exact payload and provider identity before outbound I/O.
         tx.commit().await?;
-        let remote = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            payment_provider.pay(&crate::services::providers::payment_provider::PayRequest {
-                product_name: order
-                    .product_name
-                    .clone()
-                    .unwrap_or_else(|| order.name.clone()),
-                product_display_name: order
-                    .product_display_name
-                    .clone()
-                    .or_else(|| order.product_name.clone())
-                    .unwrap_or_else(|| order.display_name.clone()),
-                provider_name: provider.name.clone(),
-                // order.price is the total payable amount, including discounts.
-                price: order.price,
-                currency: order.currency.clone().unwrap_or_else(|| "USD".to_string()),
-                quantity: 1,
-                return_url: return_url.clone(),
-                order_id: payment_id.clone(),
-                payer_name: order.user.clone(),
-                payer_email,
-            }),
-        )
-        .await;
+        Self::dispatch_checkout(pool, order, payment, provider, request, token, 1, gateway).await
+    }
+
+    fn start_result(order: Order, payment: Payment, attach_info: Value) -> PaymentStartResult {
+        PaymentStartResult {
+            order: order.into(),
+            pay_url: payment.pay_url.clone(),
+            auto_paid: payment.state.eq_ignore_ascii_case("paid"),
+            payment: payment.into(),
+            attach_info,
+        }
+    }
+
+    fn provider_fingerprint(provider: &Provider) -> String {
+        let identity = json!([
+            provider.id,
+            provider.provider_type,
+            provider.client_id,
+            provider.client_secret,
+            provider.host
+        ]);
+        hex::encode(Sha256::digest(identity.to_string().as_bytes()))
+    }
+
+    fn check_provider_identity(
+        order: &Order,
+        payment: &Payment,
+        provider: &Provider,
+    ) -> AppResult<()> {
+        if order.owner != payment.owner
+            || provider.owner != order.owner
+            || !provider.category.eq_ignore_ascii_case("payment")
+            || Self::normalize_provider_type(&payment.payment_type)
+                != Self::normalize_provider_type(&provider.provider_type)
+        {
+            return Err(AppError::Conflict(
+                "Checkout provider identity has changed; operator reconciliation is required"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn create_retry_seconds(provider: &Provider) -> i64 {
+        // Stripe keeps keys for >=24h; PayPal Orders documents 6h. Leave a
+        // conservative margin instead of creating another object after expiry.
+        if Self::normalize_provider_type(&provider.provider_type) == "paypal" {
+            5 * 3600
+        } else {
+            23 * 3600
+        }
+    }
+
+    async fn claim_checkout_create(
+        tx: &mut Transaction<'_, Postgres>,
+        payment: &Payment,
+        provider: &Provider,
+    ) -> AppResult<Option<(PayRequest, String, i32)>> {
+        let row=sqlx::query("SELECT *,lease_until>clock_timestamp() AS leased,create_retry_until>clock_timestamp() AS safe_retry FROM payment_remote_operations WHERE payment_id=$1 FOR UPDATE")
+            .bind(&payment.id).fetch_optional(&mut **tx).await?
+            .ok_or_else(||AppError::Conflict("Legacy checkout has no original request snapshot; reconcile it with the provider before retrying".into()))?;
+        if row.try_get::<Option<bool>, _>("leased")?.unwrap_or(false) {
+            return Ok(None);
+        }
+        if !row
+            .try_get::<Option<bool>, _>("safe_retry")?
+            .unwrap_or(false)
+        {
+            return Err(AppError::Conflict("Checkout creation idempotency window has elapsed; operator reconciliation is required".into()));
+        }
+        if row
+            .try_get::<Option<String>, _>("provider_fingerprint")?
+            .as_deref()
+            != Some(Self::provider_fingerprint(provider).as_str())
+        {
+            return Err(AppError::Conflict(
+                "Checkout credentials changed; an unknown payment cannot be recreated safely"
+                    .into(),
+            ));
+        }
+        let original: Value = row
+            .try_get::<Option<Value>, _>("checkout_request")?
+            .ok_or_else(|| AppError::Conflict("Original checkout request is unavailable".into()))?;
+        let request: PayRequest = serde_json::from_value(original)
+            .map_err(|_| AppError::Internal("Invalid original checkout request".into()))?;
+        if request.order_id != payment.id
+            || request.price != payment.amount
+            || payment.currency.as_deref() != Some(request.currency.as_str())
+        {
+            return Err(AppError::Conflict(
+                "Original checkout request does not match payment".into(),
+            ));
+        }
+        let token = Uuid::new_v4().to_string();
+        let attempts: i32=sqlx::query_scalar("UPDATE payment_remote_operations SET lease_token=$2,lease_kind='create',lease_until=clock_timestamp()+INTERVAL '45 seconds',attempts=attempts+1,updated_at=NOW() WHERE payment_id=$1 RETURNING attempts")
+            .bind(&payment.id).bind(&token).fetch_one(&mut **tx).await?;
+        Ok(Some((request, token, attempts)))
+    }
+
+    async fn dispatch_checkout(
+        pool: &PgPool,
+        order: Order,
+        payment: Payment,
+        provider: Provider,
+        request: PayRequest,
+        token: String,
+        attempt: i32,
+        gateway: Option<&dyn PaymentProvider>,
+    ) -> AppResult<PaymentStartResult> {
+        let native = if gateway.is_none() {
+            Some(build_payment_provider(&provider)?)
+        } else {
+            None
+        };
+        let driver = gateway
+            .or_else(|| native.as_deref())
+            .ok_or_else(|| AppError::Internal("Payment transport unavailable".into()))?;
+        let remote =
+            tokio::time::timeout(std::time::Duration::from_secs(30), driver.pay(&request)).await;
         let response = match remote {
             Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
-                // A transport/server error does not prove that no charge was
-                // created. Only a definitive rejection may release inventory.
-                if matches!(
-                    &error,
-                    AppError::Validation(_) | AppError::Authentication(_) | AppError::Config(_)
-                ) {
-                    Self::apply_payment_state(
+            result => {
+                let error = match result {
+                    Ok(Err(error)) => error,
+                    _ => AppError::Internal(
+                        "Checkout response timed out; payment remains recoverable".into(),
+                    ),
+                };
+                // Only the first definitive rejection can prove that no remote
+                // checkout exists. A rejected retry does not disprove an earlier
+                // request with an unknown outcome.
+                if attempt == 1 && matches!(&error, AppError::Validation(_)) {
+                    Self::apply_payment_state_inner(
                         pool,
-                        &payment_id,
+                        &payment.id,
                         "failed",
                         Some(&error.to_string()),
                         None,
                         false,
+                        Some(&token),
                     )
                     .await?;
                 }
+                Self::release_remote_lease(pool, &payment.id, &token, Some(&error.to_string()))
+                    .await?;
                 return Err(error);
             }
-            Err(_) => {
-                // A transport timeout can happen after the provider has accepted
-                // the request. Keep its durable reservation until a verified
-                // notification or an explicit cancellation resolves the outcome.
-                return Err(AppError::Internal(
-                    "Checkout response timed out; payment remains pending".into(),
-                ));
-            }
         };
+        if let Err(error) = validate_checkout_url(
+            &Self::normalize_provider_type(&provider.provider_type),
+            &response.pay_url,
+        ) {
+            Self::release_remote_lease(pool, &payment.id, &token, Some(&error.to_string())).await?;
+            return Err(error);
+        }
         let mut tx = pool.begin().await?;
         sqlx::query("SELECT set_config('casdog.checkout_write','on',true)")
             .execute(&mut *tx)
             .await?;
         let order = Self::load_order_for_update(&mut tx, &order.id).await?;
-        let payment = Self::load_payment_for_update(&mut tx, &payment_id).await?;
-        // A fast webhook/cancellation may have finalized the payment already.
-        let payment = if !Self::is_terminal_payment_state(&payment.state) {
-            sqlx::query_as::<_, Payment>(
-                "UPDATE payments SET out_order_id=$2,pay_url=$3,message=$4,updated_at=NOW() WHERE id=$1 RETURNING *",
-            ).bind(&payment_id).bind(&response.order_id).bind(&response.pay_url)
-                .bind(format!("Checkout created with provider {}",provider.display_name))
-                .fetch_one(&mut *tx).await?
+        let payment = Self::load_payment_for_update(&mut tx, &payment.id).await?;
+        let lease: Option<String> = sqlx::query_scalar(
+            "SELECT lease_token FROM payment_remote_operations WHERE payment_id=$1 FOR UPDATE",
+        )
+        .bind(&payment.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let payment = if lease.as_deref() == Some(token.as_str())
+            && (!Self::is_terminal_payment_state(&payment.state)
+                || payment
+                    .out_order_id
+                    .as_deref()
+                    .is_none_or(|id| id == payment.id || id.is_empty()))
+        {
+            // A webhook may settle before create returns. Keep its terminal
+            // state but retain the provider ID for receipts and later audits.
+            sqlx::query_as::<_,Payment>("UPDATE payments SET out_order_id=$2,pay_url=$3,message=CASE WHEN lower(state) IN ('paid','failed','canceled','timeout') THEN message ELSE 'Checkout ready' END,updated_at=NOW() WHERE id=$1 RETURNING *")
+                .bind(&payment.id).bind(response.order_id).bind(response.pay_url).fetch_one(&mut *tx).await?
         } else {
             payment
         };
+        sqlx::query("UPDATE payment_remote_operations SET lease_token=NULL,lease_kind=NULL,lease_until=NULL,last_error=NULL,updated_at=NOW() WHERE payment_id=$1 AND lease_token=$2")
+            .bind(&payment.id).bind(token).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(PaymentStartResult {
-            order: order.into(),
-            pay_url: payment.pay_url.clone(),
-            auto_paid: payment.state.eq_ignore_ascii_case("paid"),
-            payment: payment.into(),
-            attach_info: json!({}),
-        })
+        Ok(Self::start_result(order, payment, json!({})))
+    }
+
+    async fn release_remote_lease(
+        pool: &PgPool,
+        payment_id: &str,
+        token: &str,
+        error: Option<&str>,
+    ) -> AppResult<()> {
+        sqlx::query("UPDATE payment_remote_operations SET lease_token=NULL,lease_kind=NULL,lease_until=NULL,last_error=$3,updated_at=NOW() WHERE payment_id=$1 AND lease_token=$2")
+            .bind(payment_id).bind(token).bind(error).execute(pool).await?;
+        Ok(())
     }
 
     pub async fn cancel_order(
@@ -220,12 +487,42 @@ impl PaymentFlowService {
         current_name: &str,
         is_admin: bool,
     ) -> AppResult<OrderResponse> {
+        Self::cancel_order_inner(pool, order_id, current_owner, current_name, is_admin, None).await
+    }
+
+    pub async fn cancel_order_using(
+        pool: &PgPool,
+        order_id: &str,
+        current_owner: &str,
+        current_name: &str,
+        is_admin: bool,
+        gateway: &dyn PaymentProvider,
+    ) -> AppResult<OrderResponse> {
+        Self::cancel_order_inner(
+            pool,
+            order_id,
+            current_owner,
+            current_name,
+            is_admin,
+            Some(gateway),
+        )
+        .await
+    }
+
+    async fn cancel_order_inner(
+        pool: &PgPool,
+        order_id: &str,
+        current_owner: &str,
+        current_name: &str,
+        is_admin: bool,
+        gateway: Option<&dyn PaymentProvider>,
+    ) -> AppResult<OrderResponse> {
         let mut tx = pool.begin().await?;
         sqlx::query("SELECT set_config('casdog.checkout_write','on',true)")
             .execute(&mut *tx)
             .await?;
         let order = Self::load_order_for_update(&mut tx, order_id).await?;
-        Self::authorize_order(&order, current_owner, current_name, is_admin)?;
+        Self::authorize_order(&mut tx, &order, current_owner, current_name, is_admin).await?;
         if order.state.eq_ignore_ascii_case("canceled") {
             return Ok(order.into());
         }
@@ -251,17 +548,31 @@ impl PaymentFlowService {
                 )
             })?;
             let provider = Self::load_provider_by_id_tx(&mut tx, provider_id).await?;
-            // A local state change cannot void a remote checkout. Releasing
-            // stock here would lose fulfilment if a real charge arrives later.
-            // Until provider-specific void/refund exists, only local providers
-            // can acknowledge cancellation synchronously.
-            if !matches!(
-                Self::normalize_provider_type(&provider.provider_type).as_str(),
-                "dummy" | "balance"
-            ) {
-                return Err(AppError::Conflict(
-                    "Remote checkout is still pending; wait for a verified payment or expiration notification before releasing stock".into(),
-                ));
+            let provider_type = Self::normalize_provider_type(&provider.provider_type);
+            if !matches!(provider_type.as_str(), "dummy" | "balance") {
+                if provider_type != "stripe" {
+                    return Err(AppError::Conflict(
+                        "This provider cannot confirm cancellation of a pending checkout".into(),
+                    ));
+                }
+                tx.rollback().await?;
+                let canceled = Self::remote_order_action(
+                    pool,
+                    order_id,
+                    current_owner,
+                    current_name,
+                    is_admin,
+                    gateway,
+                    true,
+                    false,
+                )
+                .await?;
+                if !canceled.order.state.eq_ignore_ascii_case("canceled") {
+                    return Err(AppError::Conflict(
+                        "The payment settled before cancellation; refresh its status".into(),
+                    ));
+                }
+                return Ok(canceled.order);
             }
             sqlx::query("UPDATE payments SET state='canceled',message='Canceled by user',updated_at=NOW() WHERE id=$1")
                 .bind(payment_id).execute(&mut *tx).await?;
@@ -272,6 +583,331 @@ impl PaymentFlowService {
         ).bind(order_id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(order.into())
+    }
+
+    pub async fn reconcile_order_payment(
+        pool: &PgPool,
+        order_id: &str,
+        current_owner: &str,
+        current_name: &str,
+        is_admin: bool,
+    ) -> AppResult<PaymentStartResult> {
+        Self::remote_order_action(
+            pool,
+            order_id,
+            current_owner,
+            current_name,
+            is_admin,
+            None,
+            false,
+            false,
+        )
+        .await
+    }
+
+    pub async fn reconcile_order_payment_using(
+        pool: &PgPool,
+        order_id: &str,
+        current_owner: &str,
+        current_name: &str,
+        is_admin: bool,
+        gateway: &dyn PaymentProvider,
+    ) -> AppResult<PaymentStartResult> {
+        Self::remote_order_action(
+            pool,
+            order_id,
+            current_owner,
+            current_name,
+            is_admin,
+            Some(gateway),
+            false,
+            false,
+        )
+        .await
+    }
+
+    fn validate_remote_payment(
+        payment: &Payment,
+        result: &NotifyResult,
+        require_amount: bool,
+    ) -> AppResult<()> {
+        if payment.out_order_id.as_deref() != Some(result.order_id.as_str()) {
+            return Err(AppError::Authentication(
+                "Provider response references another checkout".into(),
+            ));
+        }
+        let paid = Self::map_provider_payment_state(&result.payment_status) == "paid";
+        if (paid || require_amount) && (result.amount.is_none() || result.currency.is_none()) {
+            return Err(AppError::Authentication(
+                "Provider settlement must include its amount and currency".into(),
+            ));
+        }
+        if let Some(amount) = result.amount {
+            crate::services::ProductService::validate_price(amount, false)?;
+            if (amount - payment.amount).abs() > 0.000001 {
+                return Err(AppError::Authentication(
+                    "Provider settlement amount does not match checkout".into(),
+                ));
+            }
+        }
+        if let Some(currency) = result.currency.as_deref() {
+            if !payment
+                .currency
+                .as_deref()
+                .unwrap_or("USD")
+                .eq_ignore_ascii_case(currency)
+            {
+                return Err(AppError::Authentication(
+                    "Provider settlement currency does not match checkout".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn claim_remote_operation(
+        tx: &mut Transaction<'_, Postgres>,
+        payment: &Payment,
+        cancel: bool,
+    ) -> AppResult<Option<String>> {
+        // Legacy checkouts with an external ID are safe to query, but their
+        // missing original POST payload is never fabricated for re-creation.
+        sqlx::query("INSERT INTO payment_remote_operations(payment_id,created_at) VALUES($1,$2) ON CONFLICT DO NOTHING")
+            .bind(&payment.id).bind(payment.created_at).execute(&mut **tx).await?;
+        let leased: Option<bool>=sqlx::query_scalar("SELECT lease_until>clock_timestamp() FROM payment_remote_operations WHERE payment_id=$1 FOR UPDATE")
+            .bind(&payment.id).fetch_one(&mut **tx).await?;
+        if leased.unwrap_or(false) {
+            return Ok(None);
+        }
+        let token = Uuid::new_v4().to_string();
+        sqlx::query("UPDATE payment_remote_operations SET lease_token=$2,lease_kind=$3,lease_until=clock_timestamp()+INTERVAL '45 seconds',attempts=attempts+1,updated_at=NOW() WHERE payment_id=$1")
+            .bind(&payment.id).bind(&token).bind(if cancel{"cancel"}else{"reconcile"}).execute(&mut **tx).await?;
+        Ok(Some(token))
+    }
+
+    async fn claim_capture_key(
+        pool: &PgPool,
+        order_id: &str,
+        payment_id: &str,
+        token: &str,
+    ) -> AppResult<Option<String>> {
+        let mut tx = pool.begin().await?;
+        Self::load_order_for_update(&mut tx, order_id).await?;
+        let payment = Self::load_payment_for_update(&mut tx, payment_id).await?;
+        if Self::is_terminal_payment_state(&payment.state) {
+            return Ok(None);
+        }
+        let key: Option<String>=sqlx::query_scalar("UPDATE payment_remote_operations SET capture_retry_until=COALESCE(capture_retry_until,clock_timestamp()+INTERVAL '5 hours'),lease_until=clock_timestamp()+INTERVAL '45 seconds',updated_at=NOW() WHERE payment_id=$1 AND lease_token=$2 AND (capture_retry_until IS NULL OR capture_retry_until>clock_timestamp()) RETURNING capture_key")
+            .bind(payment_id).bind(token).fetch_optional(&mut *tx).await?;
+        let key=key.ok_or_else(||AppError::Conflict("Capture lease or idempotency window has expired; reconcile with the provider before retrying".into()))?;
+        tx.commit().await?;
+        Ok(Some(key))
+    }
+
+    async fn current_result(
+        pool: &PgPool,
+        order_id: &str,
+        attach: Value,
+    ) -> AppResult<PaymentStartResult> {
+        let mut tx = pool.begin().await?;
+        let order = Self::load_order_for_update(&mut tx, order_id).await?;
+        let payment = Self::load_payment_for_update(
+            &mut tx,
+            order
+                .payment_id
+                .as_deref()
+                .ok_or_else(|| AppError::NotFound("Order payment is missing".into()))?,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Self::start_result(order, payment, attach))
+    }
+
+    async fn remote_order_action(
+        pool: &PgPool,
+        order_id: &str,
+        current_owner: &str,
+        current_name: &str,
+        is_admin: bool,
+        gateway: Option<&dyn PaymentProvider>,
+        cancel: bool,
+        background: bool,
+    ) -> AppResult<PaymentStartResult> {
+        let mut tx = pool.begin().await?;
+        let order = Self::load_order_for_update(&mut tx, order_id).await?;
+        if !background {
+            Self::authorize_order(&mut tx, &order, current_owner, current_name, is_admin).await?;
+        } else {
+            // A server worker reconciles an already accepted payment, including
+            // users disabled since checkout. It never fabricates a JWT/admin or
+            // authorizes a new purchase; immutable order/payment identities and
+            // the provider proof remain mandatory.
+            let pinned: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM orders o JOIN users u ON u.id=o.buyer_id AND u.owner=o.owner WHERE o.id=$1)").bind(order_id).fetch_one(&mut *tx).await?;
+            if !pinned || cancel {
+                return Err(AppError::Authorization(
+                    "Background reconciliation requires a pinned existing buyer".into(),
+                ));
+            }
+        }
+        let payment_id = order
+            .payment_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::Validation("This order has no payment to reconcile".into()))?;
+        let payment = Self::load_payment_for_update(&mut tx, payment_id).await?;
+        if Self::is_terminal_payment_state(&payment.state) {
+            tx.commit().await?;
+            return Ok(Self::start_result(order, payment, json!({})));
+        }
+        let provider = Self::load_provider_by_id_tx(
+            &mut tx,
+            payment
+                .provider_id
+                .as_deref()
+                .ok_or_else(|| AppError::Validation("Checkout provider is missing".into()))?,
+        )
+        .await?;
+        Self::check_provider_identity(&order, &payment, &provider)?;
+        let external = payment
+            .out_order_id
+            .as_deref()
+            .filter(|s| !s.is_empty() && *s != payment.id)
+            .map(str::to_owned);
+        let Some(external) = external else {
+            if cancel {
+                return Err(AppError::Conflict(
+                    "Recover the original checkout before requesting remote cancellation".into(),
+                ));
+            }
+            if background {
+                let Some((request, token, attempt)) =
+                    Self::claim_checkout_create(&mut tx, &payment, &provider).await?
+                else {
+                    tx.commit().await?;
+                    return Ok(Self::start_result(order, payment, json!({"retryAfter":45})));
+                };
+                tx.commit().await?;
+                return Self::dispatch_checkout(
+                    pool, order, payment, provider, request, token, attempt, gateway,
+                )
+                .await;
+            }
+            tx.rollback().await?;
+            return Self::start_order_payment_inner(
+                pool,
+                order_id,
+                None,
+                current_owner,
+                current_name,
+                is_admin,
+                None,
+                gateway,
+            )
+            .await;
+        };
+        if cancel && Self::normalize_provider_type(&provider.provider_type) != "stripe" {
+            return Err(AppError::Conflict(
+                "This provider does not support remote order cancellation".into(),
+            ));
+        }
+        let native = if gateway.is_none() {
+            Some(build_payment_provider(&provider)?)
+        } else {
+            None
+        };
+        let driver = gateway
+            .or_else(|| native.as_deref())
+            .ok_or_else(|| AppError::Internal("Payment transport unavailable".into()))?;
+        let Some(token) = Self::claim_remote_operation(&mut tx, &payment, cancel).await? else {
+            if cancel {
+                return Err(AppError::Conflict(
+                    "Another payment operation is in progress; cancellation is not yet confirmed"
+                        .into(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok(Self::start_result(order, payment, json!({"retryAfter":45})));
+        };
+        tx.commit().await?;
+        let work = async {
+            let mut remote = if cancel {
+                driver
+                    .cancel_payment(&external, &payment.id, &format!("cancel_{}", payment.id))
+                    .await?
+            } else {
+                driver.query_payment(&external, &payment.id).await?
+            };
+            Self::validate_remote_payment(&payment, &remote.result, remote.capture_required)?;
+            if cancel
+                && Self::map_provider_payment_state(&remote.result.payment_status) != "canceled"
+            {
+                return Err(AppError::Conflict(
+                    "Provider did not confirm checkout cancellation".into(),
+                ));
+            }
+            if remote.capture_required {
+                let Some(key) =
+                    Self::claim_capture_key(pool, order_id, &payment.id, &token).await?
+                else {
+                    return Ok(None);
+                };
+                remote = driver.capture_payment(&external, &payment.id, &key).await?;
+                Self::validate_remote_payment(&payment, &remote.result, false)?;
+            }
+            if let Some(url) = remote.pay_url.as_deref() {
+                validate_checkout_url(
+                    &Self::normalize_provider_type(&provider.provider_type),
+                    url,
+                )?;
+            }
+            Ok::<_, AppError>(Some(remote))
+        };
+        let remote = match tokio::time::timeout(std::time::Duration::from_secs(30), work).await {
+            Ok(Ok(remote)) => remote,
+            other => {
+                let error = match other {
+                    Ok(Err(error)) => error,
+                    _ => AppError::Internal(
+                        "Provider reconciliation timed out; the payment remains pending".into(),
+                    ),
+                };
+                Self::release_remote_lease(pool, &payment.id, &token, Some(&error.to_string()))
+                    .await?;
+                return Err(error);
+            }
+        };
+        if let Some(remote) = remote {
+            if let Some(url) = remote.pay_url {
+                let mut tx = pool.begin().await?;
+                sqlx::query("SELECT set_config('casdog.checkout_write','on',true)")
+                    .execute(&mut *tx)
+                    .await?;
+                Self::load_order_for_update(&mut tx, order_id).await?;
+                let current = Self::load_payment_for_update(&mut tx, &payment.id).await?;
+                if !Self::is_terminal_payment_state(&current.state) {
+                    sqlx::query("UPDATE payments SET pay_url=$2,updated_at=NOW() WHERE id=$1 AND EXISTS(SELECT 1 FROM payment_remote_operations WHERE payment_id=$1 AND lease_token=$3)")
+                        .bind(&payment.id).bind(url).bind(&token).execute(&mut *tx).await?;
+                }
+                tx.commit().await?;
+            }
+            if let Err(error) = Self::apply_payment_state_inner(
+                pool,
+                &payment.id,
+                &remote.result.payment_status,
+                remote.result.raw_state.as_deref(),
+                remote.result.invoice_url.as_deref(),
+                true,
+                Some(&token),
+            )
+            .await
+            {
+                Self::release_remote_lease(pool, &payment.id, &token, Some(&error.to_string()))
+                    .await?;
+                return Err(error);
+            }
+        }
+        Self::release_remote_lease(pool, &payment.id, &token, None).await?;
+        Self::current_result(pool, order_id, json!({"reconciled":true})).await
     }
 
     pub async fn notify_payment(
@@ -359,6 +995,27 @@ impl PaymentFlowService {
         invoice_url: Option<&str>,
         verified: bool,
     ) -> AppResult<PaymentNotifyResult> {
+        Self::apply_payment_state_inner(
+            pool,
+            payment_id,
+            state,
+            message,
+            invoice_url,
+            verified,
+            None,
+        )
+        .await
+    }
+
+    async fn apply_payment_state_inner(
+        pool: &PgPool,
+        payment_id: &str,
+        state: &str,
+        message: Option<&str>,
+        invoice_url: Option<&str>,
+        verified: bool,
+        expected_lease: Option<&str>,
+    ) -> AppResult<PaymentNotifyResult> {
         let new_state = Self::map_provider_payment_state(state);
         let mut tx = pool.begin().await?;
         sqlx::query("SELECT set_config('casdog.checkout_write','on',true)")
@@ -376,6 +1033,20 @@ impl PaymentFlowService {
                 transaction_name: None,
                 verified,
             });
+        }
+        if let Some(token) = expected_lease {
+            let current: Option<String> = sqlx::query_scalar(
+                "SELECT lease_token FROM payment_remote_operations WHERE payment_id=$1 FOR UPDATE",
+            )
+            .bind(payment_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
+            if current.as_deref() != Some(token) {
+                return Err(AppError::Conflict(
+                    "Payment operation lease changed; refresh its current state".into(),
+                ));
+            }
         }
         let provider_id = payment.provider_id.as_deref().ok_or_else(|| {
             AppError::Validation("Payment provider is required for settlement".into())
@@ -519,7 +1190,7 @@ impl PaymentFlowService {
         .bind(&provider.provider_type)
         .bind(None::<String>)
         .bind(&order.product_name)
-        .bind(&order.user)
+        .bind(&user.id)
         .bind(order.price)
         .bind(order.currency.clone().unwrap_or_else(|| "USD".to_string()))
         .bind(Some("Balance payment completed".to_string()))
@@ -604,7 +1275,12 @@ impl PaymentFlowService {
             return Ok(None);
         }
 
-        let user = if order.user.is_some() {
+        let has_buyer: bool =
+            sqlx::query_scalar("SELECT buyer_id IS NOT NULL FROM orders WHERE id=$1")
+                .bind(&order.id)
+                .fetch_one(&mut **tx)
+                .await?;
+        let user = if has_buyer {
             Some(Self::load_order_user_for_update(tx, order).await?)
         } else {
             None
@@ -868,8 +1544,20 @@ impl PaymentFlowService {
                         .into(),
                 ));
             }
-            let existing=sqlx::query_as::<_,crate::models::Subscription>("SELECT * FROM subscriptions WHERE owner=$1 AND user_id=$2 AND plan_id=$3 AND pricing_id=$4 AND is_deleted=false AND lower(state) IN ('active','expired') ORDER BY end_date DESC NULLS FIRST LIMIT 1 FOR UPDATE")
-                .bind(&order.owner).bind(&user.id).bind(plan_id).bind(pricing_id).fetch_optional(&mut **tx).await?;
+            // A scheduled renewal belongs to its original subscription even
+            // when another subscription for the same plan was created later.
+            let renewal_target: Option<String> = sqlx::query_scalar(
+                "SELECT subscription_id FROM subscription_renewal_work WHERE order_id=$1",
+            )
+            .bind(&order.id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            let existing=sqlx::query_as::<_,crate::models::Subscription>("SELECT * FROM subscriptions WHERE owner=$1 AND user_id=$2 AND plan_id=$3 AND pricing_id=$4 AND (($5::text IS NOT NULL AND id=$5) OR ($5::text IS NULL AND is_deleted=false AND lower(state) IN ('active','expired'))) ORDER BY end_date DESC NULLS FIRST LIMIT 1 FOR UPDATE")
+                .bind(&order.owner).bind(&user.id).bind(plan_id).bind(pricing_id).bind(&renewal_target).fetch_optional(&mut **tx).await?;
+            if renewal_target.is_some() && existing.is_none() {
+                return Err(AppError::Conflict("The paid renewal's original subscription identity changed; reconciliation is required".into()));
+            }
+
             let now = Utc::now();
             let (id, start) = if let Some(existing) = &existing {
                 let end = existing.end_date.ok_or_else(|| {
@@ -896,8 +1584,8 @@ impl PaymentFlowService {
                     AppError::Validation("Subscription end date is out of range".into())
                 })?;
             if existing.is_some() {
-                sqlx::query("UPDATE subscriptions SET end_date=$2,state='active',period=$3,updated_at=NOW() WHERE id=$1")
-                    .bind(&id).bind(end).bind(period).execute(&mut **tx).await?;
+                sqlx::query("UPDATE subscriptions SET end_date=$2,state=CASE WHEN $4::boolean AND (is_deleted OR lower(state) NOT IN ('active','expired')) THEN state ELSE 'active' END,period=$3,updated_at=NOW() WHERE id=$1")
+                    .bind(&id).bind(end).bind(period).bind(renewal_target.is_some()).execute(&mut **tx).await?;
             } else {
                 sqlx::query("INSERT INTO subscriptions(id,owner,name,display_name,user_id,plan_id,pricing_id,start_date,end_date,period,state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active')")
                     .bind(&id).bind(&order.owner).bind(format!("sub_{id}"))
@@ -916,11 +1604,35 @@ impl PaymentFlowService {
         Ok(result)
     }
 
-    fn authorize_order(order: &Order, owner: &str, name: &str, admin: bool) -> AppResult<()> {
-        let global_admin = admin && owner == "built-in";
-        if !global_admin
-            && (order.owner != owner || (!admin && order.user.as_deref() != Some(name)))
-        {
+    async fn authorize_order(
+        tx: &mut Transaction<'_, Postgres>,
+        order: &Order,
+        owner: &str,
+        name: &str,
+        admin: bool,
+    ) -> AppResult<()> {
+        if admin && owner == "built-in" {
+            return Ok(());
+        }
+        if order.owner != owner {
+            return Err(AppError::Authorization(
+                "Unauthorized order operation".into(),
+            ));
+        }
+        if admin {
+            return Ok(());
+        }
+        let pinned: Option<String> = sqlx::query_scalar("SELECT buyer_id FROM orders WHERE id=$1")
+            .bind(&order.id)
+            .fetch_one(&mut **tx)
+            .await?;
+        let allowed = if let Some(id) = pinned {
+            sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND owner=$2 AND name=$3 AND is_deleted=false AND is_forbidden=false)")
+                .bind(id).bind(owner).bind(name).fetch_one(&mut **tx).await?
+        } else {
+            false
+        };
+        if !allowed {
             return Err(AppError::Authorization(
                 "Unauthorized order operation".into(),
             ));
@@ -1268,20 +1980,8 @@ impl PaymentFlowService {
         tx: &mut Transaction<'_, Postgres>,
         order: &Order,
     ) -> AppResult<User> {
-        let user_name = order
-            .user
-            .as_deref()
-            .ok_or_else(|| AppError::Validation("Order user is required".to_string()))?;
-        sqlx::query_as::<_, User>(
-            "SELECT u.* FROM users u WHERE u.owner=$1 AND u.is_deleted=false AND u.id=COALESCE((SELECT user_id FROM order_benefits WHERE order_id=$3),(SELECT id FROM users WHERE owner=$1 AND name=$2 AND is_deleted=false)) FOR UPDATE OF u",
-        )
-        .bind(&order.owner)
-        .bind(user_name)
-        .bind(&order.id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or_else(|| {
-            AppError::NotFound(format!("User '{}/{}' not found", order.owner, user_name))
-        })
+        sqlx::query_as::<_,User>("SELECT u.* FROM users u JOIN orders o ON o.buyer_id=u.id AND o.owner=u.owner WHERE o.id=$1 AND o.owner=$2 AND u.is_deleted=false FOR UPDATE OF u")
+            .bind(&order.id).bind(&order.owner).fetch_optional(&mut **tx).await?
+            .ok_or_else(||AppError::NotFound("The original order buyer is unavailable".into()))
     }
 }

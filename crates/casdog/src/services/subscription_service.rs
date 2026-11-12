@@ -50,7 +50,7 @@ impl SubscriptionService {
             sqlx::query_as(
                 r#"
                 SELECT id, owner, name, display_name, description, user_id, plan_id, pricing_id,
-                       start_date, end_date, period, state, is_deleted, created_at, updated_at
+                       start_date, end_date, period, state, auto_renew, is_deleted, created_at, updated_at
                 FROM subscriptions
                 WHERE owner = $1 AND is_deleted = false
                 ORDER BY created_at DESC
@@ -66,7 +66,7 @@ impl SubscriptionService {
             sqlx::query_as(
                 r#"
                 SELECT id, owner, name, display_name, description, user_id, plan_id, pricing_id,
-                       start_date, end_date, period, state, is_deleted, created_at, updated_at
+                       start_date, end_date, period, state, auto_renew, is_deleted, created_at, updated_at
                 FROM subscriptions
                 WHERE is_deleted = false
                 ORDER BY created_at DESC
@@ -99,7 +99,7 @@ impl SubscriptionService {
         let subscription: Subscription = sqlx::query_as(
             r#"
             SELECT id, owner, name, display_name, description, user_id, plan_id, pricing_id,
-                   start_date, end_date, period, state, is_deleted, created_at, updated_at
+                   start_date, end_date, period, state, auto_renew, is_deleted, created_at, updated_at
             FROM subscriptions
             WHERE id = $1 AND is_deleted = false
             "#,
@@ -185,7 +185,7 @@ impl SubscriptionService {
     }
 
     pub async fn delete(pool: &PgPool, id: &str) -> AppResult<()> {
-        let result = sqlx::query("DELETE FROM subscriptions WHERE id = $1")
+        let result = sqlx::query("UPDATE subscriptions SET is_deleted=true,auto_renew=false,updated_at=NOW() WHERE id=$1 AND is_deleted=false")
             .bind(id)
             .execute(pool)
             .await?;

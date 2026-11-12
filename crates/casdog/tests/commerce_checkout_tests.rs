@@ -2150,7 +2150,7 @@ async fn stripe_checkout_http_and_signed_notifications_use_charge_currency_units
                 currency.to_ascii_lowercase()
             );
             assert_eq!(form["line_items[0][quantity]"], quantity.to_string());
-            let response=json!({"id":format!("cs_currency_{index}"),"url":"https://checkout.stripe.test/session","invoice":null}).to_string();
+            let response=json!({"id":format!("cs_currency_{index}"),"url":"https://checkout.stripe.com/c/pay/cs_transport_fixture","invoice":null}).to_string();
             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).as_bytes()).await.unwrap();
         }
     });
@@ -2473,4 +2473,1190 @@ async fn catalog_soft_delete_retains_pending_paid_purchase_history_and_settles_s
         );
         f.cleanup().await;
     }
+}
+
+#[derive(Clone)]
+struct MockCheckout {
+    local: String,
+    external: String,
+    currency: String,
+    minor: i64,
+    status: String,
+    capture_pending: bool,
+}
+#[derive(Default)]
+struct RecoveryGatewayState {
+    records: HashMap<String, MockCheckout>,
+    create_bodies: Vec<Vec<u8>>,
+    create_keys: Vec<String>,
+    capture_keys: Vec<String>,
+    creates: usize,
+    captures: usize,
+    queries: usize,
+    expires: usize,
+    reject_create_once: bool,
+    reject_capture_once: bool,
+    drop_capture_once: bool,
+    wrong_amount: bool,
+    wrong_currency: bool,
+    wrong_reference: bool,
+    capture_pending: bool,
+}
+struct RecoveryGateway {
+    base: String,
+    state: std::sync::Arc<std::sync::Mutex<RecoveryGatewayState>>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for RecoveryGateway {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+async fn read_gateway_request(
+    stream: &mut tokio::net::TcpStream,
+) -> (String, HashMap<String, String>, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+    let mut data = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let end = loop {
+        let count = stream.read(&mut buffer).await.unwrap();
+        assert!(count > 0);
+        data.extend_from_slice(&buffer[..count]);
+        assert!(data.len() < 65536);
+        if let Some(p) = data.windows(4).position(|v| v == b"\r\n\r\n") {
+            break p + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&data[..end]);
+    let path = head
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_owned();
+    let headers: HashMap<String, String> = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            line.split_once(':')
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_owned()))
+        })
+        .collect();
+    let length = headers
+        .get("content-length")
+        .map(|v| v.parse::<usize>().unwrap())
+        .unwrap_or(0);
+    while data.len() < end + length {
+        let count = stream.read(&mut buffer).await.unwrap();
+        assert!(count > 0);
+        data.extend_from_slice(&buffer[..count]);
+    }
+    (path, headers, data[end..end + length].to_vec())
+}
+fn remote_json(record: &MockCheckout, state: &RecoveryGatewayState, paypal: bool) -> Value {
+    let local = if state.wrong_reference {
+        "another_payment"
+    } else {
+        &record.local
+    };
+    let currency = if state.wrong_currency {
+        "EUR"
+    } else {
+        &record.currency
+    };
+    let minor = record.minor + if state.wrong_amount { 1 } else { 0 };
+    if paypal {
+        let money = json!({"currency_code":currency,"value":format!("{:.2}",minor as f64/100.0)});
+        let mut unit = json!({"custom_id":local,"reference_id":local,"amount":money});
+        if record.status == "COMPLETED" {
+            unit["payments"] = json!({"captures":[{"id":"CAPTURE123","status":if record.capture_pending {"PENDING"}else{"COMPLETED"},"final_capture":true,"amount":money}]});
+        }
+        json!({"id":record.external,"intent":"CAPTURE","status":record.status,"purchase_units":[unit],"links":[{"rel":"approve","href":format!("https://www.sandbox.paypal.com/checkoutnow?token={}",record.external)}]})
+    } else {
+        json!({"id":record.external,"client_reference_id":local,"amount_total":minor,"currency":currency.to_ascii_lowercase(),"status":record.status,"payment_status":if record.status=="complete" {"paid"}else{"unpaid"},"url":if record.status=="open" {Some(format!("https://checkout.stripe.com/c/pay/{}",record.external))}else{None::<String>},"invoice":null})
+    }
+}
+impl RecoveryGateway {
+    async fn new() -> Self {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let state = std::sync::Arc::new(std::sync::Mutex::new(RecoveryGatewayState::default()));
+        let shared = state.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (path, headers, body) = read_gateway_request(&mut stream).await;
+                let (code, response, drop_reply) = {
+                    let mut state = shared.lock().unwrap();
+                    let mut code = 200;
+                    let mut drop_reply = false;
+                    let response = if path == "/v1/oauth2/token" {
+                        assert!(headers["authorization"].starts_with("Basic "));
+                        json!({"access_token":"gateway_token","expires_in":3600})
+                    } else if path == "/v1/checkout/sessions" || path == "/v2/checkout/orders" {
+                        let paypal = path.starts_with("/v2");
+                        let key = headers[if paypal {
+                            "paypal-request-id"
+                        } else {
+                            "idempotency-key"
+                        }]
+                        .clone();
+                        state.create_keys.push(key.clone());
+                        state.create_bodies.push(body.clone());
+                        if state.reject_create_once {
+                            state.reject_create_once = false;
+                            code = 400;
+                            json!({"error":"temporary_validation_rejection"})
+                        } else {
+                            if !state.records.contains_key(&key) {
+                                let (currency, minor) = if paypal {
+                                    let value: Value = serde_json::from_slice(&body).unwrap();
+                                    assert_eq!(value["intent"], "CAPTURE");
+                                    assert_eq!(value["purchase_units"][0]["custom_id"], key);
+                                    (
+                                        value["purchase_units"][0]["amount"]["currency_code"]
+                                            .as_str()
+                                            .unwrap()
+                                            .to_owned(),
+                                        (value["purchase_units"][0]["amount"]["value"]
+                                            .as_str()
+                                            .unwrap()
+                                            .parse::<f64>()
+                                            .unwrap()
+                                            * 100.0)
+                                            .round() as i64,
+                                    )
+                                } else {
+                                    let url = reqwest::Url::parse(&format!(
+                                        "http://test/?{}",
+                                        std::str::from_utf8(&body).unwrap()
+                                    ))
+                                    .unwrap();
+                                    let form: HashMap<_, _> = url
+                                        .query_pairs()
+                                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                        .collect();
+                                    assert_eq!(form["client_reference_id"], key);
+                                    (
+                                        form["line_items[0][price_data][currency]"]
+                                            .to_ascii_uppercase(),
+                                        form["line_items[0][price_data][unit_amount]"]
+                                            .parse::<i64>()
+                                            .unwrap(),
+                                    )
+                                };
+                                state.creates += 1;
+                                let external = if paypal {
+                                    format!("PAYPAL{:016}", state.creates)
+                                } else {
+                                    format!("cs_recovery_{}", state.creates)
+                                };
+                                state.records.insert(
+                                    key.clone(),
+                                    MockCheckout {
+                                        local: key.clone(),
+                                        external,
+                                        currency,
+                                        minor,
+                                        status: if paypal { "CREATED" } else { "open" }.into(),
+                                        capture_pending: false,
+                                    },
+                                );
+                            }
+                            let record = state.records.get(&key).unwrap();
+                            if paypal {
+                                json!({"id":record.external,"status":record.status,"links":[{"rel":"approve","href":format!("https://www.sandbox.paypal.com/checkoutnow?token={}",record.external)}]})
+                            } else {
+                                json!({"id":record.external,"url":format!("https://checkout.stripe.com/c/pay/{}",record.external),"invoice":null})
+                            }
+                        }
+                    } else {
+                        let paypal = path.starts_with("/v2");
+                        assert_eq!(
+                            headers["authorization"],
+                            if paypal {
+                                "Bearer gateway_token"
+                            } else {
+                                "Bearer sk_gateway"
+                            }
+                        );
+                        let external = if paypal {
+                            path.strip_prefix("/v2/checkout/orders/")
+                                .unwrap()
+                                .split('/')
+                                .next()
+                                .unwrap()
+                        } else {
+                            path.strip_prefix("/v1/checkout/sessions/")
+                                .unwrap()
+                                .split('/')
+                                .next()
+                                .unwrap()
+                        };
+                        let local = state
+                            .records
+                            .values()
+                            .find(|r| r.external == external)
+                            .unwrap()
+                            .local
+                            .clone();
+                        if path.ends_with("/capture") {
+                            let key = headers["paypal-request-id"].clone();
+                            assert_ne!(key, local);
+                            assert!(key.len() <= 38);
+                            state.capture_keys.push(key);
+                            if state.reject_capture_once {
+                                state.reject_capture_once = false;
+                                code = 500;
+                                json!({"error":"temporary_gateway_failure"})
+                            } else {
+                                let pending = state.capture_pending;
+                                let record = state.records.get_mut(&local).unwrap();
+                                if record.status != "COMPLETED" {
+                                    record.status = "COMPLETED".into();
+                                    record.capture_pending = pending;
+                                    state.captures += 1;
+                                }
+                                if state.drop_capture_once {
+                                    state.drop_capture_once = false;
+                                    drop_reply = true;
+                                }
+                                remote_json(state.records.get(&local).unwrap(), &state, true)
+                            }
+                        } else if path.ends_with("/expire") {
+                            state.expires += 1;
+                            let record = state.records.get_mut(&local).unwrap();
+                            if record.status == "complete" {
+                                code = 409;
+                                json!({"error":"already_paid"})
+                            } else {
+                                record.status = "expired".into();
+                                remote_json(state.records.get(&local).unwrap(), &state, false)
+                            }
+                        } else {
+                            state.queries += 1;
+                            remote_json(state.records.get(&local).unwrap(), &state, paypal)
+                        }
+                    };
+                    (code, response.to_string(), drop_reply)
+                };
+                if drop_reply {
+                    continue;
+                }
+                stream.write_all(format!("HTTP/1.1 {code} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).as_bytes()).await.unwrap();
+            }
+        });
+        Self { base, state, task }
+    }
+    fn stripe(&self) -> casdog::services::providers::stripe_payment::StripePaymentProvider {
+        casdog::services::providers::stripe_payment::StripePaymentProvider::new(
+            "sk_gateway".into(),
+            None,
+        )
+        .with_api_base(&format!("{}/v1", self.base))
+        .unwrap()
+    }
+    fn paypal(&self) -> casdog::services::providers::paypal_payment::PayPalPaymentProvider {
+        casdog::services::providers::paypal_payment::PayPalPaymentProvider::new(
+            "client".into(),
+            "secret".into(),
+            "sandbox".into(),
+            None,
+        )
+        .with_api_base(&self.base)
+        .unwrap()
+    }
+    fn status(&self, local: &str, status: &str) {
+        let mut state = self.state.lock().unwrap();
+        let record = state.records.get_mut(local).unwrap();
+        record.status = status.into();
+        record.capture_pending = false;
+    }
+}
+struct RecoveryGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    once: std::sync::atomic::AtomicBool,
+}
+struct RecoveryDriver {
+    inner: std::sync::Arc<dyn casdog::services::providers::payment_provider::PaymentProvider>,
+    before: std::sync::atomic::AtomicBool,
+    after: std::sync::atomic::AtomicBool,
+    gate: Option<std::sync::Arc<RecoveryGate>>,
+}
+#[async_trait::async_trait]
+impl casdog::services::providers::payment_provider::PaymentProvider for RecoveryDriver {
+    async fn pay(
+        &self,
+        r: &casdog::services::providers::payment_provider::PayRequest,
+    ) -> casdog::error::AppResult<casdog::services::providers::payment_provider::PayResponse> {
+        if self.before.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(casdog::error::AppError::Internal(
+                "Simulated crash before request".into(),
+            ));
+        }
+        let response = self.inner.pay(r).await?;
+        if self.after.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(casdog::error::AppError::Internal(
+                "Simulated lost create response".into(),
+            ));
+        }
+        Ok(response)
+    }
+    async fn notify(
+        &self,
+        b: &[u8],
+        h: &HashMap<String, String>,
+        id: Option<&str>,
+    ) -> casdog::error::AppResult<casdog::services::providers::payment_provider::NotifyResult> {
+        self.inner.notify(b, h, id).await
+    }
+    async fn get_invoice(&self, id: &str) -> casdog::error::AppResult<String> {
+        self.inner.get_invoice(id).await
+    }
+    async fn query_payment(
+        &self,
+        id: &str,
+        local: &str,
+    ) -> casdog::error::AppResult<casdog::services::providers::payment_provider::RemotePayment>
+    {
+        if let Some(gate) = &self.gate {
+            if gate.once.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+        }
+        self.inner.query_payment(id, local).await
+    }
+    async fn capture_payment(
+        &self,
+        id: &str,
+        local: &str,
+        key: &str,
+    ) -> casdog::error::AppResult<casdog::services::providers::payment_provider::RemotePayment>
+    {
+        self.inner.capture_payment(id, local, key).await
+    }
+    async fn cancel_payment(
+        &self,
+        id: &str,
+        local: &str,
+        key: &str,
+    ) -> casdog::error::AppResult<casdog::services::providers::payment_provider::RemotePayment>
+    {
+        self.inner.cancel_payment(id, local, key).await
+    }
+}
+
+async fn configure_recovery_provider(f: &Fixture, paypal: bool) {
+    sqlx::query("UPDATE providers SET type=$2,client_id=$3,client_secret=$4,host=$5 WHERE id=$1")
+        .bind(&f.provider)
+        .bind(if paypal { "PayPal" } else { "Stripe" })
+        .bind(if paypal { Some("client") } else { None::<&str> })
+        .bind(if paypal { "secret" } else { "sk_gateway" })
+        .bind(if paypal {
+            Some("sandbox")
+        } else {
+            None::<&str>
+        })
+        .execute(&f.pool)
+        .await
+        .unwrap();
+}
+#[tokio::test]
+#[ignore = "requires migrated CASDOG_TEST_DATABASE_URL"]
+async fn durable_checkout_recovery_survives_crash_and_preserves_exact_idempotent_request() {
+    use std::sync::{Arc, atomic::AtomicBool};
+    for before in [true, false] {
+        let f = Fixture::new(1).await;
+        let gateway = RecoveryGateway::new().await;
+        configure_recovery_provider(&f, false).await;
+        let order = f.order(1).await;
+        sqlx::query("UPDATE orders SET product_display_name='Original title',return_url='https://merchant.example.test/payment' WHERE id=$1").bind(&order).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE users SET email='original@example.test' WHERE id=$1")
+            .bind(&f.buyer.id)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let driver = RecoveryDriver {
+            inner: Arc::new(gateway.stripe()),
+            before: AtomicBool::new(before),
+            after: AtomicBool::new(!before),
+            gate: None,
+        };
+        assert!(
+            PaymentFlowService::start_order_payment_using(
+                &f.pool,
+                &order,
+                Some(&f.provider),
+                &f.owner,
+                "buyer",
+                false,
+                None,
+                &driver
+            )
+            .await
+            .is_err()
+        );
+        let payment: String = sqlx::query_scalar("SELECT payment_id FROM orders WHERE id=$1")
+            .bind(&order)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(f.stock().await, (0, 0));
+        assert!(
+            PaymentFlowService::cancel_order(&f.pool, &order, &f.owner, "buyer", false)
+                .await
+                .is_err()
+        );
+        let deadline: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT create_retry_until FROM payment_remote_operations WHERE payment_id=$1",
+        )
+        .bind(&payment)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE payment_remote_operations SET lease_token='crashed-process',lease_kind='create',lease_until=clock_timestamp()+INTERVAL '45 seconds' WHERE payment_id=$1").bind(&payment).execute(&f.pool).await.unwrap();
+        let native = gateway.stripe();
+        let busy = PaymentFlowService::start_order_payment_using(
+            &f.pool, &order, None, &f.owner, "buyer", false, None, &native,
+        )
+        .await
+        .unwrap();
+        assert_eq!(busy.payment.id, payment);
+        assert_eq!(busy.attach_info["retryAfter"], 45);
+        assert!(busy.pay_url.is_none());
+        sqlx::query("UPDATE payment_remote_operations SET lease_until=clock_timestamp()-INTERVAL '1 second',create_retry_until=clock_timestamp()-INTERVAL '1 second' WHERE payment_id=$1").bind(&payment).execute(&f.pool).await.unwrap();
+        assert!(
+            PaymentFlowService::start_order_payment_using(
+                &f.pool, &order, None, &f.owner, "buyer", false, None, &native
+            )
+            .await
+            .is_err()
+        );
+        sqlx::query(
+            "UPDATE payment_remote_operations SET create_retry_until=$2 WHERE payment_id=$1",
+        )
+        .bind(&payment)
+        .bind(deadline)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE providers SET client_secret='rotated-to-another-account' WHERE id=$1")
+            .bind(&f.provider)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            PaymentFlowService::start_order_payment_using(
+                &f.pool, &order, None, &f.owner, "buyer", false, None, &native
+            )
+            .await
+            .is_err()
+        );
+        sqlx::query("UPDATE providers SET client_secret='sk_gateway' WHERE id=$1")
+            .bind(&f.provider)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE orders SET product_display_name='Changed after crash',return_url='https://changed.example.test/' WHERE id=$1").bind(&order).execute(&f.pool).await.unwrap();
+        sqlx::query("UPDATE users SET email='changed@example.test' WHERE id=$1")
+            .bind(&f.buyer.id)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // A rejected replay cannot release stock: an earlier request might have
+        // succeeded even though its response never reached this application.
+        gateway.state.lock().unwrap().reject_create_once = true;
+        assert!(
+            PaymentFlowService::start_order_payment_using(
+                &f.pool, &order, None, &f.owner, "buyer", false, None, &native
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT state FROM payments WHERE id=$1")
+                .bind(&payment)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            "created"
+        );
+        assert_eq!(f.stock().await, (0, 0));
+        let restored = PaymentFlowService::start_order_payment_using(
+            &f.pool, &order, None, &f.owner, "buyer", false, None, &native,
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.payment.id, payment);
+        assert!(
+            restored
+                .pay_url
+                .unwrap()
+                .starts_with("https://checkout.stripe.com/")
+        );
+        {
+            let state = gateway.state.lock().unwrap();
+            assert_eq!(state.creates, 1);
+            assert!(state.create_keys.iter().all(|id| id == &payment));
+            assert!(
+                state
+                    .create_bodies
+                    .iter()
+                    .all(|body| body == &state.create_bodies[0])
+            );
+            let form = String::from_utf8_lossy(&state.create_bodies[0]);
+            assert!(form.contains("Original+title"));
+            assert!(form.contains("original%40example.test"));
+        }
+        gateway.status(&payment, "complete");
+        for invalid in ["amount", "currency", "reference"] {
+            {
+                let mut state = gateway.state.lock().unwrap();
+                state.wrong_amount = invalid == "amount";
+                state.wrong_currency = invalid == "currency";
+                state.wrong_reference = invalid == "reference";
+            }
+            assert!(
+                PaymentFlowService::reconcile_order_payment_using(
+                    &f.pool, &order, &f.owner, "buyer", false, &native
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(f.stock().await, (0, 0));
+        }
+        {
+            let mut state = gateway.state.lock().unwrap();
+            state.wrong_amount = false;
+            state.wrong_currency = false;
+            state.wrong_reference = false;
+        }
+        let paid = PaymentFlowService::reconcile_order_payment_using(
+            &f.pool, &order, &f.owner, "buyer", false, &native,
+        )
+        .await
+        .unwrap();
+        assert!(paid.auto_paid);
+        PaymentFlowService::reconcile_order_payment_using(
+            &f.pool, &order, &f.owner, "buyer", false, &native,
+        )
+        .await
+        .unwrap();
+        assert_eq!(f.stock().await, (0, 1));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM payments WHERE owner=$1")
+                .bind(&f.owner)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM transactions WHERE owner=$1")
+                .bind(&f.owner)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires migrated CASDOG_TEST_DATABASE_URL"]
+async fn paypal_capture_retries_reuse_persistent_key_and_reconcile_a_lost_success_response() {
+    let f = Fixture::new(1).await;
+    let gateway = RecoveryGateway::new().await;
+    configure_recovery_provider(&f, true).await;
+    let driver = gateway.paypal();
+    let order = f.order(1).await;
+    let checkout = PaymentFlowService::start_order_payment_using(
+        &f.pool,
+        &order,
+        Some(&f.provider),
+        &f.owner,
+        "buyer",
+        false,
+        None,
+        &driver,
+    )
+    .await
+    .unwrap();
+    assert!(
+        checkout
+            .pay_url
+            .unwrap()
+            .starts_with("https://www.sandbox.paypal.com/")
+    );
+    let payment = checkout.payment.id;
+    assert!(
+        PaymentFlowService::cancel_order_using(&f.pool, &order, &f.owner, "buyer", false, &driver)
+            .await
+            .is_err()
+    );
+    gateway.status(&payment, "APPROVED");
+    for invalid in ["amount", "currency", "reference"] {
+        {
+            let mut state = gateway.state.lock().unwrap();
+            state.wrong_amount = invalid == "amount";
+            state.wrong_currency = invalid == "currency";
+            state.wrong_reference = invalid == "reference";
+        }
+        assert!(
+            PaymentFlowService::reconcile_order_payment_using(
+                &f.pool, &order, &f.owner, "buyer", false, &driver
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(gateway.state.lock().unwrap().captures, 0);
+    }
+    {
+        let mut state = gateway.state.lock().unwrap();
+        state.wrong_amount = false;
+        state.wrong_currency = false;
+        state.wrong_reference = false;
+        state.reject_capture_once = true;
+    }
+    assert!(
+        PaymentFlowService::reconcile_order_payment_using(
+            &f.pool, &order, &f.owner, "buyer", false, &driver
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(f.stock().await, (0, 0));
+    gateway.state.lock().unwrap().drop_capture_once = true;
+    assert!(
+        PaymentFlowService::reconcile_order_payment_using(
+            &f.pool, &order, &f.owner, "buyer", false, &driver
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(gateway.state.lock().unwrap().captures, 1);
+    assert_eq!(f.stock().await, (0, 0));
+    // After the capture retry window, a GET proving completion is still safe;
+    // it must not attempt another capture just to recover its lost response.
+    sqlx::query("UPDATE payment_remote_operations SET capture_retry_until=clock_timestamp()-INTERVAL '1 second' WHERE payment_id=$1").bind(&payment).execute(&f.pool).await.unwrap();
+    let result = PaymentFlowService::reconcile_order_payment_using(
+        &f.pool, &order, &f.owner, "buyer", false, &driver,
+    )
+    .await
+    .unwrap();
+    assert!(result.auto_paid);
+    {
+        let state = gateway.state.lock().unwrap();
+        assert_eq!(state.captures, 1);
+        assert_eq!(state.capture_keys.len(), 2);
+        assert_eq!(state.capture_keys[0], state.capture_keys[1]);
+    }
+    assert_eq!(f.stock().await, (0, 1));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM transactions WHERE owner=$1")
+            .bind(&f.owner)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated CASDOG_TEST_DATABASE_URL"]
+async fn concurrent_instances_capture_once_and_pending_capture_never_grants_paid() {
+    use std::sync::{Arc, atomic::AtomicBool};
+    let f = Fixture::new(1).await;
+    let gateway = RecoveryGateway::new().await;
+    configure_recovery_provider(&f, true).await;
+    let native = Arc::new(gateway.paypal());
+    let order = f.order(1).await;
+    let checkout = PaymentFlowService::start_order_payment_using(
+        &f.pool,
+        &order,
+        Some(&f.provider),
+        &f.owner,
+        "buyer",
+        false,
+        None,
+        native.as_ref(),
+    )
+    .await
+    .unwrap();
+    let payment = checkout.payment.id;
+    gateway.status(&payment, "APPROVED");
+    gateway.state.lock().unwrap().capture_pending = true;
+    let gate = Arc::new(RecoveryGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        once: AtomicBool::new(true),
+    });
+    let blocking = RecoveryDriver {
+        inner: native.clone(),
+        before: AtomicBool::new(false),
+        after: AtomicBool::new(false),
+        gate: Some(gate.clone()),
+    };
+    let second = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&std::env::var("CASDOG_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let first = PaymentFlowService::reconcile_order_payment_using(
+        &f.pool, &order, &f.owner, "buyer", false, &blocking,
+    );
+    let competing = async {
+        gate.entered.notified().await;
+        let result = PaymentFlowService::reconcile_order_payment_using(
+            &second,
+            &order,
+            &f.owner,
+            "buyer",
+            false,
+            native.as_ref(),
+        )
+        .await;
+        gate.release.notify_one();
+        result
+    };
+    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(first, competing)
+    })
+    .await
+    .unwrap();
+    assert!(!a.unwrap().auto_paid);
+    assert_eq!(b.unwrap().attach_info["retryAfter"], 45);
+    assert_eq!(gateway.state.lock().unwrap().captures, 1);
+    assert_eq!(f.stock().await, (0, 0));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM transactions WHERE owner=$1")
+            .bind(&f.owner)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    gateway.status(&payment, "COMPLETED");
+    assert!(
+        PaymentFlowService::reconcile_order_payment_using(
+            &f.pool,
+            &order,
+            &f.owner,
+            "buyer",
+            false,
+            native.as_ref()
+        )
+        .await
+        .unwrap()
+        .auto_paid
+    );
+    assert_eq!(f.stock().await, (0, 1));
+    assert_eq!(gateway.state.lock().unwrap().captures, 1);
+    f.cleanup().await;
+    second.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated CASDOG_TEST_DATABASE_URL"]
+async fn stripe_cancellation_releases_only_after_remote_expiry_and_paid_race_stays_reserved() {
+    let f = Fixture::new(1).await;
+    let gateway = RecoveryGateway::new().await;
+    configure_recovery_provider(&f, false).await;
+    let driver = gateway.stripe();
+    let order = f.order(1).await;
+    PaymentFlowService::start_order_payment_using(
+        &f.pool,
+        &order,
+        Some(&f.provider),
+        &f.owner,
+        "buyer",
+        false,
+        None,
+        &driver,
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        let canceled = PaymentFlowService::cancel_order_using(
+            &f.pool, &order, &f.owner, "buyer", false, &driver,
+        )
+        .await
+        .unwrap();
+        assert_eq!(canceled.state, "Canceled");
+        assert_eq!(f.stock().await, (1, 0));
+    }
+    assert_eq!(gateway.state.lock().unwrap().expires, 1);
+    let next = f.order(1).await;
+    let checkout = PaymentFlowService::start_order_payment_using(
+        &f.pool,
+        &next,
+        Some(&f.provider),
+        &f.owner,
+        "buyer",
+        false,
+        None,
+        &driver,
+    )
+    .await
+    .unwrap();
+    gateway.status(&checkout.payment.id, "complete");
+    assert!(
+        PaymentFlowService::cancel_order_using(&f.pool, &next, &f.owner, "buyer", false, &driver)
+            .await
+            .is_err()
+    );
+    assert_eq!(f.stock().await, (0, 0));
+    assert!(
+        PaymentFlowService::reconcile_order_payment_using(
+            &f.pool, &next, "foreign", "admin", true, &driver
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        PaymentFlowService::reconcile_order_payment_using(
+            &f.pool, &next, &f.owner, "buyer", false, &driver
+        )
+        .await
+        .unwrap()
+        .auto_paid
+    );
+    assert_eq!(f.stock().await, (0, 1));
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated CASDOG_TEST_DATABASE_URL"]
+async fn real_reconcile_routes_preserve_beneficiary_after_rename_and_deny_reused_username() {
+    let f = Fixture::new(2).await;
+    let admin = service(&f.pool, Some(f.admin.clone()));
+    let buyer = service(&f.pool, Some(f.buyer.clone()));
+    configure_plan(&f, &admin).await;
+    sqlx::query("UPDATE providers SET type='Balance' WHERE id=$1")
+        .bind(&f.provider)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let checkout = buy(
+        &f,
+        &buyer,
+        &f.product,
+        &f.provider,
+        "pricingName=public&planName=premium",
+    )
+    .await;
+    let order = checkout["order"]["id"].as_str().unwrap();
+    sqlx::query("UPDATE users SET name='renamed-buyer' WHERE id=$1")
+        .bind(&f.buyer.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let replacement = Identity {
+        id: uuid::Uuid::new_v4().to_string(),
+        ..f.buyer.clone()
+    };
+    sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash) VALUES($1,$2,'buyer','Replacement','unused')").bind(&replacement.id).bind(&f.owner).execute(&f.pool).await.unwrap();
+    let app = Service::new(casdog::routes::create_router())
+        .hoop(salvo::affix_state::AffixList::new().inject(f.pool.clone()));
+    for path in [
+        format!("reconcile-order?id={order}"),
+        format!("orders/{order}/reconcile"),
+    ] {
+        let response = TestClient::post(format!("http://localhost/api/{path}"))
+            .send(&app)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+        let response = TestClient::post(format!("http://localhost/api/{path}"))
+            .add_header(
+                "Authorization",
+                format!("Bearer {}", token(&replacement)),
+                true,
+            )
+            .send(&app)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+        let mut response = TestClient::post(format!("http://localhost/api/{path}"))
+            .add_header("Authorization", format!("Bearer {}", token(&f.buyer)), true)
+            .send(&app)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        assert_eq!(
+            response.take_json::<Value>().await.unwrap()["payment"]["id"],
+            checkout["data"]["id"]
+        );
+    }
+    assert!(
+        PaymentFlowService::reconcile_order_payment(&f.pool, order, &f.owner, "buyer", false)
+            .await
+            .is_err()
+    );
+    assert!(
+        PaymentFlowService::start_order_payment(
+            &f.pool, order, None, &f.owner, "buyer", false, None
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        PaymentFlowService::reconcile_order_payment(
+            &f.pool,
+            order,
+            &f.owner,
+            "renamed-buyer",
+            false
+        )
+        .await
+        .unwrap()
+        .auto_paid
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated CASDOG_TEST_DATABASE_URL"]
+async fn ordinary_order_buyer_is_pinned_and_reused_username_cannot_read_pay_cancel_or_reconcile() {
+    let f = Fixture::new(2).await;
+    let app = Service::new(casdog::routes::create_router())
+        .hoop(salvo::affix_state::AffixList::new().inject(f.pool.clone()));
+    let forged = uuid::Uuid::new_v4().to_string();
+    let response=TestClient::post("http://localhost/api/add-order")
+        .add_header("Authorization",format!("Bearer {}",token(&f.admin)),true)
+        .json(&json!({"id":forged,"owner":f.owner,"name":"forged-buyer","displayName":"Order","user":"buyer","buyerId":f.admin.id,"provider":f.provider,"productName":"book","quantity":1,"price":20,"currency":"USD"})).send(&app).await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT buyer_id FROM orders WHERE id=$1")
+            .bind(&forged)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        f.buyer.id
+    );
+    let order = f.order(1).await;
+    let checkout = f.start(&order).await.unwrap();
+    assert_eq!(
+        checkout.payment.user_id.as_deref(),
+        Some(f.buyer.id.as_str())
+    );
+    let error = sqlx::query("UPDATE orders SET buyer_id=$2 WHERE id=$1")
+        .bind(&order)
+        .bind(&f.admin.id)
+        .execute(&f.pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().constraint(),
+        Some("checkout_lifecycle")
+    );
+    sqlx::query("UPDATE users SET name='renamed-buyer' WHERE id=$1")
+        .bind(&f.buyer.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let replacement = Identity {
+        id: uuid::Uuid::new_v4().to_string(),
+        ..f.buyer.clone()
+    };
+    sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash) VALUES($1,$2,'buyer','Replacement','unused')").bind(&replacement.id).bind(&f.owner).execute(&f.pool).await.unwrap();
+    for path in ["store/purchases", "get-user-orders", "get-user-payments"] {
+        let mut response = TestClient::get(format!("http://localhost/api/{path}"))
+            .add_header(
+                "Authorization",
+                format!("Bearer {}", token(&replacement)),
+                true,
+            )
+            .send(&app)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK), "{path}");
+        assert!(
+            response.take_json::<Value>().await.unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{path}"
+        );
+        let mut response = TestClient::get(format!("http://localhost/api/{path}"))
+            .add_header("Authorization", format!("Bearer {}", token(&f.buyer)), true)
+            .send(&app)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        assert!(
+            !response.take_json::<Value>().await.unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "original buyer lost {path}"
+        );
+    }
+    for path in [
+        format!("pay-order?id={order}"),
+        format!("cancel-order?id={order}"),
+        format!("reconcile-order?id={order}"),
+        format!("orders/{order}/pay"),
+        format!("orders/{order}/cancel"),
+        format!("orders/{order}/reconcile"),
+    ] {
+        let response = TestClient::post(format!("http://localhost/api/{path}"))
+            .add_header(
+                "Authorization",
+                format!("Bearer {}", token(&replacement)),
+                true,
+            )
+            .send(&app)
+            .await;
+        assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN), "{path}");
+    }
+    assert_eq!(f.stock().await, (1, 0));
+    assert!(
+        PaymentFlowService::start_order_payment(
+            &f.pool,
+            &order,
+            None,
+            &f.owner,
+            "renamed-buyer",
+            false,
+            None
+        )
+        .await
+        .is_ok()
+    );
+    let canceled =
+        PaymentFlowService::cancel_order(&f.pool, &order, &f.owner, "renamed-buyer", false)
+            .await
+            .unwrap();
+    assert_eq!(canceled.state, "Canceled");
+    assert_eq!(f.stock().await, (2, 0));
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires migrated CASDOG_TEST_DATABASE_URL and schema creation"]
+async fn buyer_migration_uses_uuid_evidence_and_never_guesses_reused_historical_names() {
+    let pool = database().await;
+    let mut connection = pool.acquire().await.unwrap();
+    let schema = format!("checkout_buyers_{}", uuid::Uuid::new_v4().simple());
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA {schema};SET search_path TO {schema},public;
+        CREATE TABLE users(LIKE public.users INCLUDING ALL);
+        CREATE TABLE orders(LIKE public.orders INCLUDING ALL);
+        ALTER TABLE orders DROP COLUMN buyer_id;
+        CREATE TABLE payments(LIKE public.payments INCLUDING ALL);
+        CREATE TABLE transactions(LIKE public.transactions INCLUDING ALL);
+        CREATE TABLE order_benefits(LIKE public.order_benefits INCLUDING ALL);"
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    let original = uuid::Uuid::new_v4().to_string();
+    let bob = uuid::Uuid::new_v4().to_string();
+    let victim = uuid::Uuid::new_v4().to_string();
+    let collision = uuid::Uuid::new_v4().to_string();
+    for (id, name, days) in [
+        (&original, "renamed-alice", 30),
+        (&bob, "alice", 40),
+        (&victim, "victim", 50),
+        (&collision, victim.as_str(), 50),
+    ] {
+        sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash,created_at) VALUES($1,'tenant',$2,$2,'unused',clock_timestamp()-$3::bigint*INTERVAL '1 day')")
+            .bind(id).bind(name).bind(days as i64).execute(&mut *connection).await.unwrap();
+    }
+    for (id, user) in [
+        ("p-unresolved", "alice"),
+        ("p-paid", "alice"),
+        ("p-explicit", original.as_str()),
+        ("p-collision", victim.as_str()),
+    ] {
+        sqlx::query("INSERT INTO payments(id,owner,name,user_id,amount,state) VALUES($1,'tenant',$1,$2,1,'created')").bind(id).bind(user).execute(&mut *connection).await.unwrap();
+    }
+    for (id, user, payment) in [
+        ("unresolved", "alice", "p-unresolved"),
+        ("paid", "alice", "p-paid"),
+        ("explicit", "alice", "p-explicit"),
+        ("collision", victim.as_str(), "p-collision"),
+        ("benefit", "alice", ""),
+    ] {
+        sqlx::query("INSERT INTO orders(id,owner,name,\"user\",payment_id,price,created_at) VALUES($1,'tenant',$1,$2,NULLIF($3,''),1,clock_timestamp()-INTERVAL '10 days')")
+            .bind(id).bind(user).bind(payment).execute(&mut *connection).await.unwrap();
+    }
+    sqlx::query("INSERT INTO transactions(id,owner,name,category,user_id,amount) VALUES('ledger','tenant','purchase_p-paid','purchase',$1,-1)").bind(&original).execute(&mut *connection).await.unwrap();
+    sqlx::query("INSERT INTO order_benefits(order_id,kind,user_id,amount_cents) VALUES('benefit','recharge',$1,100)").bind(&original).execute(&mut *connection).await.unwrap();
+    sqlx::raw_sql(include_str!("../../../migrations/035_order_buyers.sql"))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    for id in ["paid", "explicit", "benefit"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT buyer_id FROM orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap(),
+            original,
+            "{id}"
+        );
+    }
+    for id in ["unresolved", "collision"] {
+        assert!(
+            sqlx::query_scalar::<_, Option<String>>("SELECT buyer_id FROM orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap()
+                .is_none(),
+            "{id}"
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT user_id FROM payments WHERE id='p-paid'")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap(),
+        original
+    );
+    sqlx::query("UPDATE orders SET state='Processing' WHERE id='unresolved'")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT buyer_id FROM orders WHERE id='unresolved'"
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    sqlx::query("INSERT INTO orders(id,owner,name,\"user\",buyer_id) VALUES('new','tenant','new','renamed-alice',$1)").bind(&bob).execute(&mut *connection).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT buyer_id FROM orders WHERE id='new'")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap(),
+        original
+    );
+    let foreign = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash) VALUES($1,'foreign','foreign','Foreign','unused')").bind(&foreign).execute(&mut *connection).await.unwrap();
+    let alias = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash) VALUES($1,'tenant',$2,'Alias','unused')").bind(&alias).bind(&foreign).execute(&mut *connection).await.unwrap();
+    assert!(sqlx::query("INSERT INTO orders(id,owner,name,\"user\") VALUES('foreign-reference','tenant','foreign-reference',$1)").bind(&foreign).execute(&mut *connection).await.is_err());
+    sqlx::query("INSERT INTO orders(id,owner,name,\"user\") VALUES('qualified-alias','tenant','qualified-alias',$1)").bind(format!("tenant/{foreign}")).execute(&mut *connection).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT buyer_id FROM orders WHERE id='qualified-alias'")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap(),
+        alias
+    );
+    sqlx::raw_sql(&format!(
+        "SET search_path TO public;DROP SCHEMA {schema} CASCADE;"
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
 }

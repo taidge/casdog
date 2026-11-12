@@ -22,6 +22,14 @@ impl OrgService {
     }
 
     pub async fn create(&self, req: CreateOrganizationRequest) -> AppResult<OrganizationResponse> {
+        if req
+            .record_retention_days
+            .is_some_and(|days| !(0..=365000).contains(&days))
+        {
+            return Err(AppError::Validation(
+                "Record retention days must be between 0 and 365000".into(),
+            ));
+        }
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
@@ -56,6 +64,7 @@ impl OrgService {
                 organizations::mfa_items.eq(&req.mfa_items),
                 organizations::created_at.eq(now),
                 organizations::updated_at.eq(now),
+                organizations::record_retention_days.eq(req.record_retention_days.unwrap_or(0)),
             ))
             .returning(Organization::as_returning())
             .get_result(&mut conn)
@@ -322,6 +331,14 @@ impl OrgService {
         if let Some(v) = req.balance_currency {
             org.balance_currency = Some(v);
         }
+        if let Some(days) = req.record_retention_days {
+            if !(0..=365000).contains(&days) {
+                return Err(AppError::Validation(
+                    "Record retention days must be between 0 and 365000".into(),
+                ));
+            }
+            org.record_retention_days = days;
+        }
         org.updated_at = Utc::now();
 
         let updated_org = diesel::update(organizations::table.filter(organizations::id.eq(id)))
@@ -362,6 +379,7 @@ impl OrgService {
                 organizations::mfa_remember_in_hours.eq(org.mfa_remember_in_hours),
                 organizations::balance_currency.eq(&org.balance_currency),
                 organizations::updated_at.eq(org.updated_at),
+                organizations::record_retention_days.eq(org.record_retention_days),
             ))
             .returning(Organization::as_returning())
             .get_result(&mut conn)

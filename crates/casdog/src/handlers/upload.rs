@@ -7,11 +7,9 @@ use sqlx::{Pool, Postgres};
 
 use crate::diesel_pool::DieselPool;
 use crate::error::AppError;
-use crate::models::{
-    CreateGroupRequest, CreatePermissionRequest, CreateRoleRequest, CreateUserRequest,
-};
+use crate::models::{CreateGroupRequest, CreatePermissionRequest, CreateRoleRequest};
 use crate::services::providers::storage_provider::{StorageProvider, get_storage_provider};
-use crate::services::{GroupService, PermissionService, ResourceService, RoleService, UserService};
+use crate::services::{GroupService, PermissionService, ResourceService, RoleService};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UploadResponse {
@@ -163,74 +161,54 @@ pub async fn upload_users(
     depot: &mut Depot,
     req: &mut Request,
 ) -> Result<Json<BulkUploadResponse>, AppError> {
-    let (pool, _pg_pool, owner) = require_upload_context(depot, req).await?;
-    let records = read_upload_records(req).await?;
-    let user_service = UserService::new(pool.clone());
-
-    let mut created = 0usize;
-    let mut errors = Vec::new();
-
-    for (index, record) in records.iter().enumerate() {
-        let name = match require_field(record, "name") {
-            Ok(value) => value,
-            Err(err) => {
-                errors.push(format!("row {}: {}", index + 2, err));
-                continue;
-            }
-        };
-
-        let request = CreateUserRequest {
-            owner: optional_field(record, "owner").unwrap_or_else(|| owner.clone()),
-            name: name.to_string(),
-            password: optional_field(record, "password"),
-            display_name: optional_field(record, "display_name")
-                .or_else(|| optional_field(record, "displayName"))
-                .unwrap_or_else(|| name.to_string()),
-            email: optional_field(record, "email"),
-            phone: optional_field(record, "phone"),
-            avatar: optional_field(record, "avatar"),
-            is_admin: parse_bool(record.get("is_admin"))
-                .or_else(|| parse_bool(record.get("isAdmin"))),
-            user_type: optional_field(record, "user_type")
-                .or_else(|| optional_field(record, "userType")),
-            first_name: optional_field(record, "first_name")
-                .or_else(|| optional_field(record, "firstName")),
-            last_name: optional_field(record, "last_name")
-                .or_else(|| optional_field(record, "lastName")),
-            country_code: optional_field(record, "country_code")
-                .or_else(|| optional_field(record, "countryCode")),
-            region: optional_field(record, "region"),
-            location: optional_field(record, "location"),
-            affiliation: optional_field(record, "affiliation"),
-            tag: optional_field(record, "tag"),
-            language: optional_field(record, "language"),
-            gender: optional_field(record, "gender"),
-            birthday: optional_field(record, "birthday"),
-            education: optional_field(record, "education"),
-            bio: optional_field(record, "bio"),
-            homepage: optional_field(record, "homepage"),
-            signup_application: optional_field(record, "signup_application")
-                .or_else(|| optional_field(record, "signupApplication")),
-            id_card_type: optional_field(record, "id_card_type")
-                .or_else(|| optional_field(record, "idCardType")),
-            id_card: optional_field(record, "id_card").or_else(|| optional_field(record, "idCard")),
-            real_name: optional_field(record, "real_name")
-                .or_else(|| optional_field(record, "realName")),
-            properties: None,
-        };
-
-        match user_service.create(request).await {
-            Ok(_) => created += 1,
-            Err(err) => errors.push(format!("row {}: {}", index + 2, err)),
-        }
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if !principal.admin || principal.is_application() {
+        return Err(AppError::Authorization(
+            "A real administrator is required for user import".into(),
+        ));
     }
-
-    Ok(Json(BulkUploadResponse {
-        total: records.len(),
-        created,
-        failed: errors.len(),
-        errors,
-    }))
+    let pg_pool = depot
+        .obtain::<Pool<Postgres>>()
+        .cloned()
+        .map_err(|_| AppError::Internal("Database pool not available".into()))?;
+    let content_type = req.header::<String>("content-type").unwrap_or_default();
+    let (bytes, filename, owner) = if content_type.split(';').next() == Some("application/json") {
+        let owner = req.query::<String>("owner");
+        let bytes = req
+            .payload()
+            .await
+            .map_err(|_| AppError::Validation("Invalid upload body".into()))?
+            .to_vec();
+        (bytes, "users.json".to_owned(), owner)
+    } else if content_type.starts_with("multipart/form-data") {
+        let owner = req.form::<String>("owner").await;
+        let file = req
+            .file("file")
+            .await
+            .ok_or_else(|| AppError::Validation("No file provided".into()))?;
+        if file.size() > crate::services::user_import_service::MAX_UPLOAD as u64 {
+            return Err(AppError::Validation("User upload exceeds 8 MiB".into()));
+        }
+        let name = file.name().unwrap_or("users.csv").to_owned();
+        let bytes = tokio::fs::read(file.path())
+            .await
+            .map_err(|_| AppError::Internal("Could not read uploaded users".into()))?;
+        (bytes, name, owner)
+    } else {
+        return Err(AppError::Validation(
+            "Use multipart file upload or application/json".into(),
+        ));
+    };
+    let records = crate::services::user_import_service::parse_upload(&bytes, &filename)?;
+    Ok(Json(
+        crate::services::user_import_service::import_users(
+            &pg_pool,
+            &principal,
+            owner.as_deref(),
+            records,
+        )
+        .await?,
+    ))
 }
 
 #[endpoint(tags("Resources"), summary = "Upload groups")]

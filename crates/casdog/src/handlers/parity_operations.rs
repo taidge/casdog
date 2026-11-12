@@ -710,12 +710,35 @@ pub async fn set_subscription_auto_renew(
         Some("false") => false,
         _ => return Err(invalid("autoRenew must be true or false")),
     };
-    sqlx::query("UPDATE subscriptions SET auto_renew=$2,updated_at=NOW() WHERE id=$1")
-        .bind(required(&row, "id")?)
-        .bind(renew)
-        .execute(&pool)
-        .await?;
-    Ok(ok(json!(true)))
+    if p.is_application() {
+        return Err(denied());
+    }
+    let amount = req.query::<String>("maxAmountCents");
+    let currency = req.query::<String>("currency");
+    let quote = match (amount.as_deref(), currency.as_deref()) {
+        (None, None) => None,
+        (Some(amount), Some(currency)) => {
+            if amount.is_empty()
+                || !amount.bytes().all(|b| b.is_ascii_digit())
+                || currency.len() != 3
+                || !currency.bytes().all(|b| b.is_ascii_alphabetic())
+            {
+                return Err(invalid("Invalid renewal quote"));
+            }
+            let cap = amount
+                .parse::<i64>()
+                .map_err(|_| invalid("Invalid renewal quote amount"))?;
+            if cap > 900_000_000_000_000 {
+                return Err(invalid("Renewal quote is out of range"));
+            }
+            Some((cap, currency))
+        }
+        _ => return Err(invalid("maxAmountCents and currency are required together")),
+    };
+    let consent=crate::services::subscription_renewal_service::SubscriptionRenewalService::set_auto_renew_with_quote(
+        &pool,&required(&row,"id")?,&p.owner,&p.id,p.admin,renew,quote,
+    ).await?;
+    Ok(Json(json!({"status":"ok","data":true,"data2":consent})))
 }
 #[handler]
 pub async fn dashboard_providers(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
@@ -748,42 +771,7 @@ pub async fn dashboard_heatmap(depot: &mut Depot, req: &mut Request) -> AppResul
         json!({"data":rows.into_iter().map(|(date,count)|json!({"date":date,"count":count})).collect::<Vec<_>>(),"maxCount":max,"dateRange":[(now-chrono::Duration::days(365)).format("%Y-%m-%d").to_string(),now.format("%Y-%m-%d").to_string()]}),
     ))
 }
-#[handler]
-pub async fn get_setting(depot: &mut Depot) -> AppResult<Json<Value>> {
-    if !admin(depot)?.global_admin() {
-        return Err(denied());
-    }
-    let data:Value=sqlx::query_scalar("SELECT data||jsonb_build_object('createdTime',created_at,'updatedTime',updated_at) FROM operation_settings WHERE singleton").fetch_one(&db(depot)?).await?;
-    Ok(ok(data))
-}
-#[handler]
-pub async fn update_setting(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
-    if !admin(depot)?.global_admin() {
-        return Err(denied());
-    }
-    let b = body(req).await?;
-    let mut data = json!({"owner":"admin","name":"setting-built-in"});
-    for key in [
-        "dbMaxOpenConns",
-        "dbMaxIdleConns",
-        "dbConnMaxLifetime",
-        "recordRetentionDays",
-    ] {
-        data[key] = json!(integer(&b, key)?);
-    }
-    if integer(&data, "dbMaxOpenConns")? > 0
-        && integer(&data, "dbMaxIdleConns")? > integer(&data, "dbMaxOpenConns")?
-    {
-        return Err(invalid("Max idle connections exceeds max open connections"));
-    }
-    sqlx::query("UPDATE operation_settings SET data=$1,updated_at=NOW() WHERE singleton")
-        .bind(&data)
-        .execute(&db(depot)?)
-        .await?;
-    Ok(Json(
-        json!({"status":"ok","data":true,"applied":false,"msg":"Settings saved; runtime pool/retention application requires startup integration"}),
-    ))
-}
+pub use crate::handlers::runtime_settings::{get_setting, update_setting};
 #[handler]
 pub async fn get_email_and_phone(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
     let p = Principal::from_depot(depot)?;

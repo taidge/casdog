@@ -17,6 +17,7 @@ pub struct Subscription {
     pub end_date: Option<DateTime<Utc>>,
     pub period: Option<String>,
     pub state: String,
+    pub auto_renew: bool,
     pub is_deleted: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -62,6 +63,7 @@ pub struct SubscriptionResponse {
     pub end_date: Option<DateTime<Utc>>,
     pub period: Option<String>,
     pub state: String,
+    pub auto_renew: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -81,6 +83,7 @@ impl From<Subscription> for SubscriptionResponse {
             end_date: s.end_date,
             period: s.period,
             state: s.state,
+            auto_renew: s.auto_renew,
             created_at: s.created_at,
             updated_at: s.updated_at,
         }

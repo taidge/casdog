@@ -72,3 +72,8 @@ pub mod parity_operations;
 pub mod primary_auth;
 pub mod protocol_gaps;
 pub mod system_gaps;
+
+pub mod commerce_store;
+
+pub mod runtime_settings;
+pub mod telemetry;

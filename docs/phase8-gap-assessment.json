@@ -1,0 +1,284 @@
+{
+  "date": "2026-11-12",
+  "base_commit": "90a6345598d870a5ad27a5ec1b7e82a057f803e9",
+  "reference_revision": "47da539f886d5b09d2c35cf6ae78d8b6b5f30a43",
+  "scope": "Phase 8 implementation and directly verified regressions; overall Casdoor equivalence remains incomplete.",
+  "flat_route_declarations": {
+    "matched": 299,
+    "expected": 299,
+    "meaning": "Static declaration coverage only; not functional completion."
+  },
+  "migrations": [
+    "033_syncer_execution.sql",
+    "034_payment_recovery.sql",
+    "035_order_buyers.sql"
+  ],
+  "implementation": {
+    "syncers": [
+      "Correct actual SQL columns and FromRow labels; shared validated REST/compatibility CRUD and masked credential preservation.",
+      "Real independent PostgreSQL source and LDAP bind/search imports, stable source-to-user links, explicit credential mapping and batch rollback.",
+      "Shared PostgreSQL due times, short leases, stale-worker fencing, bounded execution, failure backoff and disabled organization checks."
+    ],
+    "commerce": [
+      "Durable original checkout request and provider credential fingerprint before remote I/O, cross-instance leases and bounded same-key retries after lost responses.",
+      "Authenticated Stripe status lookup and remote session expiry before stock release; PayPal approval-to-capture with persistent idempotency key and exact amount/currency validation.",
+      "Normal reconcile-order and REST order reconcile operations; API/Store driven rather than a background automatic scanner.",
+      "Immutable buyer UUID for every new order; ignore forged buyer fields, preserve renamed account ownership and reject reused-name takeover. Historical backfill uses explicit identity evidence only.",
+      "Current-name, qualified-name and UUID compatibility purchase queries resolve to the stored buyer identity. Ambiguous standalone legacy payment names are excluded from ordinary-user lists."
+    ],
+    "user_import": [
+      "Real multipart XLSX first sheet plus JSON, CSV and TSV, bounded ZIP/XML/row/column parsing and atomic batch import.",
+      "Real current administrator and tenant checks, same-tenant LDAP references, preserved legacy IDs and no implicit MFA enrollment loss.",
+      "Casdoor password/type/salt semantics, independent compatibility vectors, masked import rejection and masked legacy update preservation.",
+      "Bounded KDF verification and compare-and-set legacy hash upgrades only after successful real password authentication."
+    ],
+    "frontend": [
+      "User store with safe tenant catalog, plan period/pricing, coupon and recharge inputs, current wallet, own purchases/subscriptions, explicit payment continuation, reconcile and cancel.",
+      "Payment provider secrets omitted from catalog; wallet display preserves legacy currency fallback.",
+      "Syncer form sends canonical user and typed database/SSL/mapping configuration; desktop and 390px store rendering inspected."
+    ]
+  },
+  "validation": {
+    "fresh_migrations": "001-035 applied successfully to independent final backend and browser databases.",
+    "backend_command": "cargo test --workspace --tests --no-fail-fast --jobs 2 -- --include-ignored --test-threads=1",
+    "backend": {
+      "programs": 30,
+      "passed_executions": 462,
+      "failed": 0,
+      "ignored": 0,
+      "explicit_postgresql_functions_verified": 140,
+      "program_results": [
+        {
+          "program": "Running unittests src\\lib.rs (target\\debug\\deps\\casdog-63e78cab89e533a7.exe)",
+          "passed": 38,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running unittests src\\main.rs (target\\debug\\deps\\casdog-9b0062006d33a351.exe)",
+          "passed": 38,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\api_parity_tests.rs (target\\debug\\deps\\api_parity_tests-1446dcfb0a9cbf22.exe)",
+          "passed": 179,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\audit_records_tests.rs (target\\debug\\deps\\audit_records_tests-fd3fc75d83b599c5.exe)",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\auth_security_tests.rs (target\\debug\\deps\\auth_security_tests-80b8a6496bb195d4.exe)",
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\authorization_tests.rs (target\\debug\\deps\\authorization_tests-85553a77ccfd839f.exe)",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\commerce_checkout_tests.rs (target\\debug\\deps\\commerce_checkout_tests-ae224ead0e25f998.exe)",
+          "passed": 25,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\import_password_tests.rs (target\\debug\\deps\\import_password_tests-e0837c64b0bf28e8.exe)",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\key_credentials_tests.rs (target\\debug\\deps\\key_credentials_tests-0d0eae7f51d0067f.exe)",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\legacy_crud_tests.rs (target\\debug\\deps\\legacy_crud_tests-0239921f28f17f75.exe)",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\mfa_replay_tests.rs (target\\debug\\deps\\mfa_replay_tests-f58f2c597cce9bb6.exe)",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\parity_operations_tests.rs (target\\debug\\deps\\parity_operations_tests-045407834be27710.exe)",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\parity_resources_tests.rs (target\\debug\\deps\\parity_resources_tests-fbbf7f936e2f9d19.exe)",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\parity_system_tests.rs (target\\debug\\deps\\parity_system_tests-544b5881e66877be.exe)",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\password_mfa_tests.rs (target\\debug\\deps\\password_mfa_tests-5d0c03b4a2d8ae9a.exe)",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\password_reset_tests.rs (target\\debug\\deps\\password_reset_tests-9b7481bd8b7088db.exe)",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\primary_auth_tests.rs (target\\debug\\deps\\primary_auth_tests-d1760034bd1f1cd5.exe)",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\protocol_gaps_tests.rs (target\\debug\\deps\\protocol_gaps_tests-187ab746883853bb.exe)",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\saml_signing_tests.rs (target\\debug\\deps\\saml_signing_tests-218a6ce054cad71d.exe)",
+          "passed": 23,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\social_link_tests.rs (target\\debug\\deps\\social_link_tests-baa46d7054a6bf81.exe)",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\social_login_tests.rs (target\\debug\\deps\\social_login_tests-e55aff732fc63122.exe)",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\social_mfa_tests.rs (target\\debug\\deps\\social_mfa_tests-6e6c8a04a3896c99.exe)",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\social_state_tests.rs (target\\debug\\deps\\social_state_tests-4f0cb3ead85fc3ac.exe)",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\spnego_tests.rs (target\\debug\\deps\\spnego_tests-f083f526013049fa.exe)",
+          "passed": 16,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\storage_phase6_tests.rs (target\\debug\\deps\\storage_phase6_tests-3539f7b38c269cc5.exe)",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\store_tests.rs (target\\debug\\deps\\store_tests-b670b66b57ab0723.exe)",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\syncer_execution_tests.rs (target\\debug\\deps\\syncer_execution_tests-2a68fb31f85924f8.exe)",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\system_gaps_tests.rs (target\\debug\\deps\\system_gaps_tests-6a55ce7fb671cb72.exe)",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\verification_security_tests.rs (target\\debug\\deps\\verification_security_tests-73102b1ec9214a2c.exe)",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "program": "Running tests\\webauthn_tests.rs (target\\debug\\deps\\webauthn_tests-132489b4d02aa1f5.exe)",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    "execution_count_note": "lib and main each execute the same 38 unit tests; execution count is not a count of independent business scenarios.",
+    "postgresql_new_functions": {
+      "commerce": 7,
+      "user_import": 5,
+      "store": 3,
+      "syncers": 4,
+      "total": 19
+    },
+    "backend_log": "target/phase8/backend-tests-final.log",
+    "frontend": {
+      "native_tests": 7,
+      "wasm_check": true,
+      "trunk_release": true,
+      "browser_api_fixtures": true,
+      "real_backend_browser_checks": 17,
+      "api_interception": false,
+      "runtime_errors": [],
+      "results": "target/phase8/browser-e2e/results.json",
+      "provider_note": "Browser recharge uses the development gateway plus authorized administrator settlement. Stripe/PayPal use real local HTTP protocol fixtures; production financial providers were not exercised."
+    },
+    "format_check": true,
+    "git_whitespace_check": true,
+    "final_compiler_check": {
+      "passed": true,
+      "command": "cargo check --offline -p casdog --tests --jobs 2",
+      "log": "target/phase8/final-check.log"
+    },
+    "remote_ci_run": false,
+    "strict_clippy_run": false,
+    "environment": {
+      "backend_target": "D:/Works/taidge/casdog/target",
+      "frontend_target": "D:/Works/taidge/casdog/web/target",
+      "postgres_cluster": "D:/Works/taidge/casdog/target/phase5/postgres",
+      "docker_used": false,
+      "build_cache_redirection": false
+    }
+  },
+  "deployment": [
+    "Stop old writers and back up before migrations 033-035; do not mix old checkout/syncer implementations with the new schema.",
+    "Review orders with NULL buyer_id before enabling end-user operations. Migration does not infer identity from a currently reused name.",
+    "Provider credential changes or retries past the conservative idempotency deadline require reconciliation rather than blind recreation.",
+    "Share PostgreSQL and deployment configuration across instances; external sources require explicitly configured source credentials."
+  ],
+  "remaining": [
+    "Paid refunds with corresponding subscription/role/balance reversal, reliable PayPal order void, actual auto-renew scheduling, cart and background automatic payment reconciliation.",
+    "Three-decimal currency accounting and multi-currency wallets.",
+    "Syncer external writeback, source deletion-to-local disable, affiliation-table lookup and values conversion; unsupported conversion is explicitly rejected and writeback absence is reported.",
+    "Imported MFA enrollment migration and complete dedicated import/export UI.",
+    "Real Kerberos ticket verification, broader SAML interoperability, Agent execution, OpenClaw/OTLP breadth, Marketplace themes and additional cloud providers.",
+    "Production gateway/directory/mail/SMS/cloud, hardware and cluster acceptance; 299/299 routes do not prove these capabilities."
+  ]
+}

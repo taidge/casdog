@@ -812,22 +812,20 @@ fn append_self_commerce(
     resource: LegacyResource,
     principal: &LegacyPrincipal,
 ) {
-    let column = if resource.table == "orders" {
-        "user"
-    } else {
-        "user_id"
-    };
-    query
-        .push(" AND (")
-        .push(quote_ident(column))
-        .push(" = ")
-        .push_bind(principal.name.clone());
-    query
-        .push(" OR ")
-        .push(quote_ident(column))
-        .push(" = ")
+    if resource.table == "orders" {
+        query
+            .push(" AND buyer_id = ")
+            .push_bind(principal.id.clone());
+        return;
+    }
+    // An order provides the authoritative identity for its payment. Historical
+    // standalone rows using names cannot safely confer ownership after reuse.
+    query.push(" AND (EXISTS(SELECT 1 FROM orders o WHERE o.payment_id=payments.id AND o.owner=payments.owner AND o.buyer_id=")
+        .push_bind(principal.id.clone()).push(") OR (payments.user_id=")
         .push_bind(principal.id.clone())
-        .push(")");
+        .push(" AND NOT EXISTS(SELECT 1 FROM orders o WHERE o.payment_id=payments.id AND o.owner=payments.owner AND (o.buyer_id IS NULL OR o.buyer_id<>")
+        .push_bind(principal.id.clone()).push(")) AND NOT EXISTS(SELECT 1 FROM users u WHERE u.owner=payments.owner AND u.name=payments.user_id AND u.id<>")
+        .push_bind(principal.id.clone()).push(")))");
 }
 
 async fn legacy_get(
@@ -1217,29 +1215,21 @@ fn prepare_body(
         object.insert("is_deleted".to_string(), Value::Bool(false));
     }
 
-    if resource.table == "users"
-        && columns.contains("password_hash")
-        && !object.contains_key("password_hash")
-        && let Some(password) = object.remove("password").and_then(|value| match value {
-            Value::String(value) if !value.is_empty() && value != "***" => Some(value),
-            _ => None,
-        })
-    {
-        let password_type = object
-            .get("password_type")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("argon2")
-            .to_string();
-        let password_salt = object.get("password_salt").and_then(Value::as_str);
-        let password_hash =
-            PasswordService::hash_password(&password, &password_type, password_salt)?;
-        object.insert("password_hash".to_string(), Value::String(password_hash));
-        // Partial updates must not keep a previous algorithm beside a newly generated hash.
-        object.insert("password_type".to_string(), Value::String(password_type));
-        if !object.contains_key("password_salt") {
-            object.insert("password_salt".to_string(), Value::Null);
+    if resource.table == "organizations" {
+        if let Some(days) = object.get("record_retention_days") {
+            if !days
+                .as_i64()
+                .is_some_and(|value| (0..=365000).contains(&value))
+            {
+                return Err(AppError::Validation(
+                    "Record retention days must be between 0 and 365000".into(),
+                ));
+            }
         }
+    }
+
+    if resource.table == "users" && columns.contains("password_hash") {
+        PasswordService::normalize_import_fields(&mut object, true)?;
     }
 
     Ok(object)
@@ -1593,14 +1583,11 @@ legacy_handlers!(
     update_form,
     delete_form
 );
-legacy_handlers!(
-    SYNCERS,
-    get_syncers,
-    get_syncer,
-    add_syncer,
-    update_syncer,
-    delete_syncer
-);
+pub use crate::handlers::syncer::{
+    legacy_add_syncer as add_syncer, legacy_delete_syncer as delete_syncer,
+    legacy_get_syncer as get_syncer, legacy_get_syncers as get_syncers,
+    legacy_update_syncer as update_syncer,
+};
 legacy_handlers!(
     WEBHOOKS,
     get_webhooks,
@@ -1808,20 +1795,54 @@ pub async fn send_invitation_compat(
     })))
 }
 
+async fn commerce_user_id(depot: &mut Depot, req: &mut Request) -> AppResult<String> {
+    let principal = LegacyPrincipal::from_depot(depot)?;
+    if !principal.admin {
+        return Ok(principal.id);
+    }
+    let reference = request_string(req, None, &["userId", "user_id", "user", "name"])
+        .await
+        .unwrap_or_else(|| principal.name.clone());
+    let explicit_owner = req
+        .query::<String>("owner")
+        .filter(|value| !value.is_empty());
+    let (owner, name) = match reference.split_once('/') {
+        Some((owner, name)) => {
+            if explicit_owner
+                .as_deref()
+                .is_some_and(|provided| provided != owner)
+            {
+                return Err(AppError::Authorization(
+                    "Conflicting commerce user tenant".into(),
+                ));
+            }
+            (owner.to_string(), name.to_string())
+        }
+        None => (
+            explicit_owner.unwrap_or_else(|| principal.owner.clone()),
+            reference.clone(),
+        ),
+    };
+    if !principal.global_admin() && owner != principal.owner {
+        return Err(AppError::Authorization(
+            "Cannot list another organization's purchases".into(),
+        ));
+    }
+    sqlx::query_scalar("SELECT id FROM users WHERE owner=$1 AND NOT is_deleted AND (id=$2 OR name=$3) ORDER BY(id=$2) DESC LIMIT 1")
+        .bind(owner).bind(reference).bind(name).fetch_optional(&pg_pool(depot)?).await?
+        .ok_or_else(||AppError::NotFound("Commerce user not found".into()))
+}
+
 #[endpoint(tags("Casdoor compatibility"))]
 pub async fn get_user_orders(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
-    let user = request_string(req, None, &["user", "userId", "user_id", "name"])
-        .await
-        .or_else(|| current_user_name(depot));
-    legacy_list_with_extra_filters(depot, req, ORDERS, &[("user", user)]).await
+    let user_id = commerce_user_id(depot, req).await?;
+    legacy_list_with_extra_filters(depot, req, ORDERS, &[("buyer_id", Some(user_id))]).await
 }
 
 #[endpoint(tags("Casdoor compatibility"))]
 pub async fn get_user_payments(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
-    let user_id = request_string(req, None, &["userId", "user_id", "user", "name"])
-        .await
-        .or_else(|| current_user_name(depot));
-    legacy_list_with_extra_filters(depot, req, PAYMENTS, &[("user_id", user_id)]).await
+    let user_id = commerce_user_id(depot, req).await?;
+    legacy_list_with_extra_filters(depot, req, PAYMENTS, &[("user_id", Some(user_id))]).await
 }
 
 #[endpoint(tags("Casdoor compatibility"))]
@@ -1838,7 +1859,11 @@ pub async fn run_syncer_query(depot: &mut Depot, req: &mut Request) -> AppResult
         "data": result.success,
         "msg": result.message,
         "syncerId": result.syncer_id,
-        "recordsSynced": result.records_synced
+        "recordsSynced": result.records_synced,
+        "recordsExported": result.records_exported,
+        "recordsForbidden": result.records_forbidden,
+        "conflicts": result.conflicts,
+        "operationsPending": result.operations_pending
     })))
 }
 

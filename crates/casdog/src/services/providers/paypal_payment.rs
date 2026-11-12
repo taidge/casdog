@@ -7,8 +7,73 @@ use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
 use crate::services::providers::payment_provider::{
-    NotifyResult, PayRequest, PayResponse, PaymentProvider,
+    NotifyResult, PayRequest, PayResponse, PaymentProvider, RemotePayment, validate_checkout_url,
 };
+
+// PayPal uses major-unit decimal strings. JPY, HUF and TWD do not accept
+// decimals: https://developer.paypal.com/api/codes/currency .
+fn paypal_format_amount(amount: f64, currency: &str) -> AppResult<String> {
+    let currency = currency.to_ascii_uppercase();
+    if !matches!(
+        currency.as_str(),
+        "AUD"
+            | "BRL"
+            | "CAD"
+            | "CNY"
+            | "CZK"
+            | "DKK"
+            | "EUR"
+            | "HKD"
+            | "HUF"
+            | "ILS"
+            | "JPY"
+            | "MYR"
+            | "MXN"
+            | "TWD"
+            | "NZD"
+            | "NOK"
+            | "PHP"
+            | "PLN"
+            | "GBP"
+            | "RUB"
+            | "SGD"
+            | "SEK"
+            | "CHF"
+            | "THB"
+            | "USD"
+    ) {
+        return Err(AppError::Validation(
+            "Currency is not supported by PayPal checkout".into(),
+        ));
+    }
+    crate::services::ProductService::validate_price(amount, true)?;
+    if matches!(currency.as_str(), "JPY" | "HUF" | "TWD") {
+        if amount.fract() != 0.0 {
+            return Err(AppError::Validation(
+                "PayPal requires a whole-unit amount for this currency".into(),
+            ));
+        }
+        Ok(format!("{amount:.0}"))
+    } else {
+        Ok(format!("{amount:.2}"))
+    }
+}
+
+fn paypal_parse_amount(value: &str, currency: &str) -> AppResult<f64> {
+    if value.is_empty()
+        || value.len() > 32
+        || !value.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+    {
+        return Err(AppError::Authentication(
+            "PayPal returned an invalid monetary value".into(),
+        ));
+    }
+    let amount = value
+        .parse::<f64>()
+        .map_err(|_| AppError::Authentication("PayPal returned an invalid amount".into()))?;
+    paypal_format_amount(amount, currency)?;
+    Ok(amount)
+}
 
 /// PayPal payment provider
 pub struct PayPalPaymentProvider {
@@ -86,6 +151,182 @@ struct VerifyWebhookResponse {
 }
 
 impl PayPalPaymentProvider {
+    pub fn with_api_base(mut self, base: &str) -> AppResult<Self> {
+        let url = reqwest::Url::parse(base)
+            .map_err(|_| AppError::Config("Invalid PayPal gateway".into()))?;
+        let loopback = url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(AppError::Config(
+                "PayPal gateway requires HTTPS or loopback HTTP".into(),
+            ));
+        }
+        self.api_base = url.as_str().trim_end_matches('/').to_owned();
+        Ok(self)
+    }
+
+    fn remote_order(
+        order: &serde_json::Value,
+        external_id: &str,
+        local_id: &str,
+    ) -> AppResult<RemotePayment> {
+        if order["id"].as_str() != Some(external_id)
+            || order["intent"].as_str().is_some_and(|s| s != "CAPTURE")
+        {
+            return Err(AppError::Authentication(
+                "PayPal order reference or intent does not match checkout".into(),
+            ));
+        }
+        let units = order["purchase_units"]
+            .as_array()
+            .filter(|v| v.len() == 1)
+            .ok_or_else(|| {
+                AppError::Authentication("PayPal checkout must contain one purchase unit".into())
+            })?;
+        let unit = &units[0];
+        if unit["custom_id"]
+            .as_str()
+            .or_else(|| unit["reference_id"].as_str())
+            != Some(local_id)
+        {
+            return Err(AppError::Authentication(
+                "PayPal order belongs to another payment".into(),
+            ));
+        }
+        let state = order["status"].as_str().unwrap_or("");
+        let money = if state == "COMPLETED" {
+            let captures = unit["payments"]["captures"]
+                .as_array()
+                .filter(|v| v.len() == 1)
+                .ok_or_else(|| {
+                    AppError::Authentication(
+                        "PayPal capture details are required to confirm settlement".into(),
+                    )
+                })?;
+            let capture = &captures[0];
+            if capture["status"].as_str() != Some("COMPLETED") || capture["final_capture"] == false
+            {
+                return Ok(RemotePayment {
+                    result: NotifyResult {
+                        order_id: external_id.into(),
+                        payment_status: "Pending".into(),
+                        payment_name: "PayPal".into(),
+                        amount: None,
+                        currency: None,
+                        invoice_url: None,
+                        raw_state: Some("CAPTURE_PENDING".into()),
+                    },
+                    pay_url: None,
+                    capture_required: false,
+                });
+            }
+            &capture["amount"]
+        } else {
+            &unit["amount"]
+        };
+        let currency = money["currency_code"]
+            .as_str()
+            .ok_or_else(|| AppError::Authentication("PayPal currency is missing".into()))?
+            .to_ascii_uppercase();
+        let value = money["value"]
+            .as_str()
+            .ok_or_else(|| AppError::Authentication("PayPal amount is missing".into()))?;
+        let amount = paypal_parse_amount(value, &currency)?;
+        let status = match state {
+            "COMPLETED" => "Paid",
+            "VOIDED" => "Canceled",
+            "EXPIRED" => "Timeout",
+            _ => "Pending",
+        };
+        let pay_url = order["links"]
+            .as_array()
+            .and_then(|links| {
+                links
+                    .iter()
+                    .find(|link| matches!(link["rel"].as_str(), Some("approve" | "payer-action")))
+            })
+            .and_then(|link| link["href"].as_str())
+            .map(str::to_owned);
+        if let Some(url) = pay_url.as_deref() {
+            validate_checkout_url("paypal", url)?;
+        }
+        Ok(RemotePayment {
+            result: NotifyResult {
+                order_id: external_id.into(),
+                payment_status: status.into(),
+                payment_name: "PayPal".into(),
+                amount: Some(amount),
+                currency: Some(currency),
+                invoice_url: None,
+                raw_state: Some(state.into()),
+            },
+            pay_url,
+            capture_required: state == "APPROVED",
+        })
+    }
+
+    async fn order_request(
+        &self,
+        external_id: &str,
+        local_id: &str,
+        capture_key: Option<&str>,
+    ) -> AppResult<RemotePayment> {
+        if external_id.is_empty()
+            || external_id.len() > 36
+            || !external_id
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        {
+            return Err(AppError::Conflict(
+                "A confirmed PayPal order reference is required".into(),
+            ));
+        }
+        let token = self.get_access_token().await?;
+        let url = format!(
+            "{}/v2/checkout/orders/{}{}",
+            self.api_base,
+            external_id,
+            if capture_key.is_some() {
+                "/capture"
+            } else {
+                ""
+            }
+        );
+        let request = if let Some(key) = capture_key {
+            self.client
+                .post(url)
+                .header("PayPal-Request-Id", key)
+                .header("Prefer", "return=representation")
+                .json(&serde_json::json!({}))
+        } else {
+            self.client.get(url)
+        };
+        let response = request
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("PayPal order request failed: {e}")))?;
+        if !response.status().is_success() {
+            return Err(AppError::Conflict(format!(
+                "PayPal order state could not be confirmed ({})",
+                response.status()
+            )));
+        }
+        let order: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|_| AppError::Authentication("Invalid PayPal order response".into()))?;
+        Self::remote_order(&order, external_id, local_id)
+    }
     /// Create a new PayPal payment provider
     pub fn new(
         client_id: String,
@@ -239,13 +480,29 @@ impl PayPalPaymentProvider {
 
 #[async_trait]
 impl PaymentProvider for PayPalPaymentProvider {
+    async fn query_payment(&self, external_id: &str, local_id: &str) -> AppResult<RemotePayment> {
+        self.order_request(external_id, local_id, None).await
+    }
+
+    async fn capture_payment(
+        &self,
+        external_id: &str,
+        local_id: &str,
+        request_id: &str,
+    ) -> AppResult<RemotePayment> {
+        self.order_request(external_id, local_id, Some(request_id))
+            .await
+    }
     async fn pay(&self, req: &PayRequest) -> AppResult<PayResponse> {
-        // Get access token
-        let access_token = self.get_access_token().await?;
-
-        let url = format!("{}/v2/checkout/orders", self.api_base);
-
         let total_amount = req.price * req.quantity as f64;
+        if req.quantity <= 0 {
+            return Err(AppError::Validation(
+                "Payment quantity must be positive".into(),
+            ));
+        }
+        let formatted = paypal_format_amount(total_amount, &req.currency)?;
+        let access_token = self.get_access_token().await?;
+        let url = format!("{}/v2/checkout/orders", self.api_base);
 
         let order_request = CreateOrderRequest {
             intent: "CAPTURE".to_string(),
@@ -255,7 +512,7 @@ impl PaymentProvider for PayPalPaymentProvider {
                 description: req.product_display_name.clone(),
                 amount: Amount {
                     currency_code: req.currency.to_uppercase(),
-                    value: format!("{:.2}", total_amount),
+                    value: formatted,
                 },
             }],
             application_context: ApplicationContext {
@@ -300,6 +557,7 @@ impl PaymentProvider for PayPalPaymentProvider {
             .iter()
             .find(|link| link.rel == "approve")
             .ok_or_else(|| AppError::Internal("PayPal approval link not found".to_string()))?;
+        validate_checkout_url("paypal", &approval_link.href)?;
 
         Ok(PayResponse {
             pay_url: approval_link.href.clone(),

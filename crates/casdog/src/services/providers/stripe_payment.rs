@@ -7,7 +7,7 @@ use subtle::ConstantTimeEq;
 
 use crate::error::{AppError, AppResult};
 use crate::services::providers::payment_provider::{
-    NotifyResult, PayRequest, PayResponse, PaymentProvider,
+    NotifyResult, PayRequest, PayResponse, PaymentProvider, RemotePayment, validate_checkout_url,
 };
 
 /// Stripe payment provider
@@ -58,6 +58,7 @@ struct StripeCheckoutSessionObject {
     payment_status: Option<String>,
     status: Option<String>,
     invoice: Option<String>,
+    url: Option<String>,
 }
 
 impl StripePaymentProvider {
@@ -104,6 +105,103 @@ impl StripePaymentProvider {
     /// Get Stripe API base URL
     fn get_api_url(&self) -> &str {
         &self.api_base
+    }
+
+    fn remote_session(
+        session: StripeCheckoutSessionObject,
+        external_id: &str,
+        local_id: &str,
+    ) -> AppResult<RemotePayment> {
+        if session.id != external_id || session.client_reference_id.as_deref() != Some(local_id) {
+            return Err(AppError::Authentication(
+                "Stripe session does not belong to this payment".into(),
+            ));
+        }
+        let amount = match (session.amount_total, session.currency.as_deref()) {
+            (Some(value), Some(currency)) => Some(stripe_amount_from_minor(value, currency)?),
+            _ => None,
+        };
+        let status = match (
+            session.status.as_deref(),
+            session.payment_status.as_deref(),
+            amount,
+        ) {
+            (Some("complete"), Some("paid"), _) => "Paid",
+            (Some("complete"), Some("no_payment_required"), Some(0.0)) => "Paid",
+            (Some("expired"), Some("unpaid"), _) => "Timeout",
+            _ => "Pending",
+        };
+        if let Some(url) = session.url.as_deref() {
+            validate_checkout_url("stripe", url)?;
+        }
+        Ok(RemotePayment {
+            result: NotifyResult {
+                order_id: session.id,
+                payment_status: status.into(),
+                payment_name: "Stripe".into(),
+                amount,
+                currency: session.currency.map(|v| v.to_ascii_uppercase()),
+                invoice_url: session.invoice,
+                raw_state: session.status,
+            },
+            pay_url: session.url,
+            capture_required: false,
+        })
+    }
+
+    async fn session_request(
+        &self,
+        external_id: &str,
+        local_id: &str,
+        cancel_key: Option<&str>,
+    ) -> AppResult<RemotePayment> {
+        if !external_id.starts_with("cs_")
+            || !external_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err(AppError::Conflict(
+                "A confirmed Stripe checkout reference is required".into(),
+            ));
+        }
+        let url = format!(
+            "{}/checkout/sessions/{}{}",
+            self.get_api_url(),
+            external_id,
+            if cancel_key.is_some() { "/expire" } else { "" }
+        );
+        let request = if let Some(key) = cancel_key {
+            self.client.post(url).header("Idempotency-Key", key)
+        } else {
+            self.client.get(url)
+        };
+        let response = request
+            .bearer_auth(&self.secret_key)
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Stripe reconciliation request failed: {e}"))
+            })?;
+        if !response.status().is_success() {
+            return Err(AppError::Conflict(format!(
+                "Stripe checkout state could not be confirmed ({})",
+                response.status()
+            )));
+        }
+        let session: StripeCheckoutSessionObject = response
+            .json()
+            .await
+            .map_err(|_| AppError::Authentication("Invalid Stripe checkout response".into()))?;
+        let mut remote = Self::remote_session(session, external_id, local_id)?;
+        if cancel_key.is_some() {
+            if remote.result.payment_status != "Timeout" {
+                return Err(AppError::Conflict(
+                    "Stripe did not confirm an unpaid expired checkout".into(),
+                ));
+            }
+            remote.result.payment_status = "Canceled".into();
+        }
+        Ok(remote)
     }
 
     fn verify_signature(&self, headers: &HashMap<String, String>, body: &[u8]) -> AppResult<()> {
@@ -245,6 +343,19 @@ fn compute_hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
 
 #[async_trait]
 impl PaymentProvider for StripePaymentProvider {
+    async fn query_payment(&self, external_id: &str, local_id: &str) -> AppResult<RemotePayment> {
+        self.session_request(external_id, local_id, None).await
+    }
+
+    async fn cancel_payment(
+        &self,
+        external_id: &str,
+        local_id: &str,
+        request_id: &str,
+    ) -> AppResult<RemotePayment> {
+        self.session_request(external_id, local_id, Some(request_id))
+            .await
+    }
     async fn pay(&self, req: &PayRequest) -> AppResult<PayResponse> {
         let url = format!("{}/checkout/sessions", self.get_api_url());
 
@@ -319,6 +430,7 @@ impl PaymentProvider for StripePaymentProvider {
         let pay_url = session
             .url
             .ok_or_else(|| AppError::Internal("Stripe session URL not found".to_string()))?;
+        validate_checkout_url("stripe", &pay_url)?;
 
         Ok(PayResponse {
             pay_url,

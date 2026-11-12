@@ -96,6 +96,9 @@ fn en(key: &str) -> &str {
         "page.device_auth" => "Device authorization",
         "page.marketplace" => "Marketplace",
         "page.keys" => "API keys",
+        "page.store" => "Store",
+        "page.settings" => "Site settings",
+        "page.telemetry" => "Telemetry",
         "page.result" => "Result",
 
         // Common
@@ -297,6 +300,9 @@ fn zh(key: &str) -> Option<&'static str> {
         "page.device_auth" => "设备授权",
         "page.marketplace" => "集成市场",
         "page.keys" => "API 密钥",
+        "page.store" => "商店",
+        "page.settings" => "站点设置",
+        "page.telemetry" => "遥测",
         "page.result" => "结果",
 
         // Common

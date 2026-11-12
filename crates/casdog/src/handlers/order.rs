@@ -3,6 +3,7 @@ use salvo::prelude::*;
 use sqlx::{Pool, Postgres};
 
 use crate::error::{AppError, AppResult};
+use crate::hoops::authz::Principal;
 use crate::models::{CreateOrderRequest, OrderResponse, UpdateOrderRequest};
 use crate::services::{OrderService, PaymentFlowService};
 
@@ -198,4 +199,37 @@ pub async fn cancel_order(
         "status": "ok",
         "data": order,
     })))
+}
+
+#[endpoint(tags("Order"), summary = "Recover or reconcile an order payment")]
+pub async fn reconcile_order(
+    depot: &mut Depot,
+    req: &Request,
+    id: QueryParam<String, false>,
+) -> AppResult<Json<serde_json::Value>> {
+    let principal = Principal::from_depot(depot)?;
+    if principal.is_application() {
+        return Err(AppError::Authorization(
+            "A signed-in account is required to reconcile a purchase".into(),
+        ));
+    }
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Database pool not found".into()))?
+        .clone();
+    let order_id = id
+        .into_inner()
+        .or_else(|| req.param::<String>("id"))
+        .ok_or_else(|| AppError::Validation("id is required".into()))?;
+    let result = PaymentFlowService::reconcile_order_payment(
+        &pool,
+        &order_id,
+        &principal.owner,
+        &principal.name,
+        principal.admin,
+    )
+    .await?;
+    Ok(Json(
+        serde_json::json!({"status":"ok","order":result.order,"payment":result.payment,"payUrl":result.pay_url,"autoPaid":result.auto_paid,"attachInfo":result.attach_info}),
+    ))
 }

@@ -70,6 +70,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SyncerExecutor::start_scheduler(syncer_pool, tokio::time::Duration::from_secs(60)).await;
     });
 
+    let renewal_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::subscription_renewal_service::SubscriptionRenewalService::run_once(
+                    &renewal_pool,
+                    100,
+                )
+                .await
+            {
+                tracing::error!(%error,"Subscription renewal worker failed");
+            }
+        }
+    });
+    let reconcile_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::payment_reconcile_scheduler::PaymentReconcileScheduler::run_once(
+                    &reconcile_pool,
+                    20,
+                )
+                .await
+            {
+                tracing::error!(%error,"Payment reconciliation worker failed");
+            }
+        }
+    });
+    let retention_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            match services::runtime_settings_service::RuntimeSettingsService::run_once(
+                &retention_pool,
+            )
+            .await
+            {
+                Ok(deleted) if deleted > 0 => {
+                    tracing::info!(deleted, "Expired audit records removed")
+                }
+                Ok(_) => {}
+                Err(error) => tracing::error!(%error,"Audit record retention worker failed"),
+            }
+        }
+    });
+
     let cors = Cors::new()
         .allow_origin("*")
         .allow_methods(vec![

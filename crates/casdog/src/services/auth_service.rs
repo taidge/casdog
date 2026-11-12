@@ -502,7 +502,7 @@ impl AuthService {
         }
 
         // 3. Get user (raw model with password_hash)
-        let user = self
+        let mut user = self
             .user_service
             .get_by_name(&req.owner, &req.name)
             .await
@@ -536,16 +536,12 @@ impl AuthService {
         let password_type = user.password_type.as_deref().unwrap_or("argon2");
         let password_salt = user.password_salt.as_deref();
 
-        let is_valid = if password_type == "argon2" || password_type.is_empty() {
-            UserService::verify_password(&req.password, &user.password_hash)?
-        } else {
-            PasswordService::verify_password(
-                &req.password,
-                &user.password_hash,
-                password_type,
-                password_salt,
-            )?
-        };
+        let is_valid = PasswordService::verify_password(
+            &req.password,
+            &user.password_hash,
+            password_type,
+            password_salt,
+        )?;
 
         if !is_valid {
             // Check master password from org
@@ -617,6 +613,24 @@ impl AuthService {
         }
         // A correct password alone must not reset failed second-factor attempts.
         CheckService::reset_signin_error(pg_pool, &user.id).await?;
+        // Only a completed authentication using the actual account password may
+        // upgrade its representation. Master-password and pending-MFA logins
+        // must never replace the stored credential or break its proof stamp.
+        if is_valid
+            && PasswordService::needs_rehash(&user.password_hash, password_type, password_salt)
+        {
+            let upgraded = PasswordService::hash_password(&req.password, "argon2", None)?;
+            let changed=sqlx::query("UPDATE users SET password_hash=$1,password_type='argon2',password_salt=NULL,updated_at=NOW() WHERE id=$2 AND owner=$3 AND password_hash=$4 AND password_type IS NOT DISTINCT FROM $5 AND password_salt IS NOT DISTINCT FROM $6 AND NOT is_deleted AND NOT is_forbidden")
+                .bind(&upgraded).bind(&user.id).bind(&user.owner).bind(&user.password_hash).bind(&user.password_type).bind(&user.password_salt).execute(pg_pool).await?;
+            if changed.rows_affected() != 1 {
+                return Err(AppError::Authentication(
+                    "Credentials changed during sign-in; try again".into(),
+                ));
+            }
+            user.password_hash = upgraded;
+            user.password_type = Some("argon2".into());
+            user.password_salt = None;
+        }
 
         // 10. Check password expiration
         let password_expire_days = if org.password_expire_days > 0 {

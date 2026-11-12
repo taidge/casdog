@@ -77,6 +77,8 @@ pub struct Organization {
     pub is_deleted: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(alias = "recordRetentionDays")]
+    pub record_retention_days: i32,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -100,6 +102,8 @@ pub struct CreateOrganizationRequest {
     pub default_password: Option<String>,
     pub account_items: Option<serde_json::Value>,
     pub mfa_items: Option<serde_json::Value>,
+    #[serde(alias = "recordRetentionDays")]
+    pub record_retention_days: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -139,6 +143,8 @@ pub struct UpdateOrganizationRequest {
     pub mfa_items: Option<serde_json::Value>,
     pub mfa_remember_in_hours: Option<i32>,
     pub balance_currency: Option<String>,
+    #[serde(alias = "recordRetentionDays")]
+    pub record_retention_days: Option<i32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -180,6 +186,8 @@ pub struct OrganizationResponse {
     pub balance_currency: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(alias = "recordRetentionDays")]
+    pub record_retention_days: i32,
 }
 
 impl From<Organization> for OrganizationResponse {
@@ -222,6 +230,7 @@ impl From<Organization> for OrganizationResponse {
             balance_currency: o.balance_currency,
             created_at: o.created_at,
             updated_at: o.updated_at,
+            record_retention_days: o.record_retention_days,
         }
     }
 }

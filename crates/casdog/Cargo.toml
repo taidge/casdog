@@ -66,6 +66,10 @@ tar = "0.4"
 tempfile = "3"
 which = "7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
+prost = "0.14"
+opentelemetry-proto = { version = "0.33.1", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs", "with-serde", "file-descriptors"] }
+prost-reflect = "0.16"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
