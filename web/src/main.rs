@@ -102,6 +102,7 @@ fn application() -> impl Widget {
                     "consent-page" => pages::consent::page(app),
                     "device-auth-page" => pages::device_auth::page(app),
                     "result-page" => pages::result::page(app),
+                    "marketplace-page" => pages::marketplace::page(app),
                     "dashboard" => dashboard(app),
                     slug => match resources::resource_config(slug) {
                         Some(config) => pages::resource::page(app, config),
@@ -145,6 +146,7 @@ fn sidebar(app: AppState) -> impl Widget {
             ("consent-page", "Consents"),
             ("device-auth-page", "Device authorization"),
             ("result-page", "Result"),
+            ("marketplace-page", "Marketplace"),
         ] {
             navigation.push(boxed(
                 sapid::button()
@@ -159,6 +161,7 @@ fn sidebar(app: AppState) -> impl Widget {
                                 "authorize-page" => "page.authorize",
                                 "consent-page" => "page.consent",
                                 "device-auth-page" => "page.device_auth",
+                                "marketplace-page" => "page.marketplace",
                                 _ => "page.result",
                             },
                             app.locale.get(),

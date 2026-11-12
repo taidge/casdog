@@ -4,6 +4,7 @@ pub mod consent;
 pub mod device_auth;
 pub mod forgot_password;
 pub mod login;
+pub mod marketplace;
 pub mod resource;
 pub mod result;
 pub mod signup;

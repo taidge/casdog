@@ -38,6 +38,7 @@ async function main() {
     const user={...users[0],email:'alice@example.test',phone:'+15555550123'};
     let socialPending=false;
     let links=[],consents=[],sessions=[{id:'session-1',name:'Browser session'}];
+    let integrations=[];
     const reply=(route,value)=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(value)});
     await context.route('**/api/**',async route=>{
       const req=route.request(), url=new URL(req.url()), endpoint=url.pathname;
@@ -46,6 +47,11 @@ async function main() {
       if(endpoint==='/api/login/oauth/device/verify')return reply(route,{device_code:'verified-device',application:'Portal'});
       if(endpoint==='/api/login/oauth/device/authorize')return reply(route,{status:'ok'});
       if(endpoint==='/api/health')return reply(route,{status:'ok'});
+      if(endpoint==='/api/get-integrations')return reply(route,{status:'ok',data:integrations});
+      if(endpoint==='/api/get-marketplace-index')return reply(route,{status:'ok',data:{integrations:[{id:'portal',name:{en:'Portal template'},latest:'1.0'},{id:'other',name:{en:'Other template'},latest:'1.0'}]}});
+      if(endpoint==='/api/get-marketplace-bundle')return reply(route,{status:'ok',data:{manifest:{id:url.searchParams.get('integrationId'),version:'1.0',variables:[{name:'appUrl',label:{en:'Application URL'},type:'url',required:true},{name:'secret',label:{en:'Integration secret'},type:'password',required:true}]}}});
+      if(endpoint==='/api/install-integration'){integrations=[{...body}];return reply(route,{status:'ok'});}
+      if(endpoint==='/api/delete-integration'){integrations=integrations.filter(i=>i.owner!==body.owner||i.name!==body.name);return reply(route,{status:'ok'});}
       if(endpoint==='/api/login')return reply(route,{token:'',mfa_required:true,mfa_types:['email','sms','app','recovery']});
       if(endpoint==='/api/auth/password/session' || endpoint==='/api/auth/session') {
         if(body?.passcode==='123456')return reply(route,{token:'browser-test-token',user});
@@ -81,6 +87,9 @@ async function main() {
     });
     await page.goto(origin);
     await page.getByRole('heading',{name:'Identity and access management'}).waitFor();
+    await page.getByRole('button',{name:'Marketplace',exact:true}).click();
+    await page.getByText('Sign in as a tenant administrator to manage integrations.',{exact:true}).waitFor();
+    assert.equal(calls.filter(c=>c.endpoint==='/api/get-integrations').length,0);
     await page.getByRole('combobox',{name:'Language',exact:true}).selectOption('zh');
     await page.waitForFunction(()=>JSON.parse(localStorage.getItem('casdog.locale'))==='zh');
     await page.getByRole('combobox',{name:'Language',exact:true}).selectOption('en');
@@ -101,6 +110,22 @@ async function main() {
     const loginCall=calls.find(c=>c.endpoint==='/api/login');
     assert.equal(loginCall.body.password,'Password42!');
     assert.equal(calls.find(c=>c.endpoint==='/api/auth/password/session/send-code').body.mfaType,'email');
+    await page.getByRole('button',{name:'Marketplace',exact:true}).click();
+    await page.getByRole('button',{name:'Load marketplace',exact:true}).click();
+    await page.getByRole('button',{name:'Preview Portal template',exact:true}).click();
+    await fill(page.getByRole('textbox',{name:'Application URL',exact:true}),'https://portal.example.test');
+    await fill(page.getByLabel('Integration secret',{exact:true}),'discard-this-secret');
+    await page.getByRole('button',{name:'Preview Other template',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('[aria-label="Application URL"]').value==='');
+    assert.equal(await page.getByLabel('Integration secret',{exact:true}).inputValue(),'');
+    await fill(page.getByRole('textbox',{name:'Application URL',exact:true}),'https://other.example.test');
+    await fill(page.getByLabel('Integration secret',{exact:true}),'new-secret');
+    await page.getByRole('button',{name:'Install integration',exact:true}).click();
+    await page.getByText('Integration installed.',{exact:true}).waitFor();
+    assert.deepEqual(calls.find(c=>c.endpoint==='/api/install-integration').body,{owner:'built-in',name:'other',integrationId:'other',version:'1.0',variables:{appUrl:'https://other.example.test',secret:'new-secret'}});
+    await page.getByRole('button',{name:'Uninstall built-in/other',exact:true}).click();
+    await page.getByText('Integration uninstalled.',{exact:true}).waitFor();
+    assert.deepEqual(calls.find(c=>c.endpoint==='/api/delete-integration').body,{owner:'built-in',name:'other'});
     await page.getByRole('button',{name:'Users',exact:true}).click();
     await page.getByRole('button',{name:'Alice',exact:true}).click();
     const display=page.getByRole('textbox',{name:'Display name',exact:true});
@@ -155,6 +180,7 @@ async function main() {
     assert.match(await page.getByRole('img',{name:'Authenticator setup QR code'}).getAttribute('src'),/^data:image\/svg\+xml,/);
     await fill(page.getByRole('textbox',{name:'Authenticator code'}),'wrong');
     await page.getByRole('button',{name:'Verify and enable MFA'}).click();
+    await page.getByText('The verification code is invalid or expired. Try the current code from your authenticator.',{exact:true}).waitFor();
     await fill(page.getByRole('textbox',{name:'Authenticator code'}),'123456');
     await page.getByRole('button',{name:'Verify and enable MFA'}).click();
     await page.getByText('one-use-code',{exact:true}).waitFor();

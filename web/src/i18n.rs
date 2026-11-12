@@ -94,6 +94,7 @@ fn en(key: &str) -> &str {
         "page.authorize" => "Authorize",
         "page.consent" => "Consents",
         "page.device_auth" => "Device authorization",
+        "page.marketplace" => "Marketplace",
         "page.result" => "Result",
 
         // Common
@@ -293,6 +294,7 @@ fn zh(key: &str) -> Option<&'static str> {
         "page.authorize" => "授权",
         "page.consent" => "应用许可",
         "page.device_auth" => "设备授权",
+        "page.marketplace" => "集成市场",
         "page.result" => "结果",
 
         // Common
