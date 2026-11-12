@@ -12,6 +12,11 @@ const { startCloudStorage }=require('./cloud-browser-fixture.cjs');
 const {startKerberos}=require('./kerberos-browser-fixture.cjs');
 const {startOAuthDirectory}=require('./oauth-browser-fixture.cjs');
 const {startSmtpRelay}=require('./smtp-browser-fixture.cjs');
+const {startTransportFixture,checkTransportForms}=require('./provider-transport-browser.cjs');
+const {configureOAuthProtocols,checkOAuthProtocols}=require('./oauth-protocol-browser.cjs');
+const {configureOidcIdentity,checkOidcIdentity}=require('./oidc-identity-browser.cjs');
+const {startCloudDirectoryFixture,checkCloudDirectories}=require('./cloud-directory-browser.cjs');
+const {runWechatBrowser}=require('./wechat-browser.cjs');
 
 const project = path.resolve(__dirname, '..');
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {
@@ -19,7 +24,7 @@ const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--f
   encoding: 'utf8',
   windowsHide: true,
 }));
-const artifacts = path.join(metadata.target_directory, 'phase14', 'browser-e2e');
+const artifacts = path.join(metadata.target_directory, 'phase16', 'browser-e2e');
 const origin = process.env.CASDOG_E2E_BASE_URL || 'http://localhost:18085';
 const database = process.env.CASDOG_TEST_DATABASE_URL;
 assert.ok(database, 'CASDOG_TEST_DATABASE_URL must identify a migrated disposable database');
@@ -54,6 +59,8 @@ async function main() {
   const mail = [],notificationRequests=[];
   const oauthDirectory=await startOAuthDirectory(),smtpRelay=await startSmtpRelay();
   const cloud=await startCloudStorage();
+  const cloudDirectory=await startCloudDirectoryFixture();
+  const transportFixture=await startTransportFixture();
   const scimToken=crypto.randomBytes(24).toString('hex'),scimRequests=[];
   let scimUsers=[];
   const appBundle = Buffer.from(JSON.stringify({manifest:{id:'browser-portal',type:'app',version:'1.0',variables:[{name:'appUrl',label:{en:'Application URL'},type:'url',required:true}]},files:{'application.json':{redirectUris:['{{appUrl}}/callback']}}}));
@@ -109,7 +116,12 @@ async function main() {
       await new Promise(resolve => probe.close(resolve));
       const binaryName = process.platform === 'win32' ? 'casdog.exe' : 'casdog';
       runtimeImage = path.join(artifacts, `${Date.now()}-${binaryName}`);
-      await fs.copyFile(path.join(metadata.target_directory, 'debug', binaryName), runtimeImage);
+      const sourceImage = path.join(metadata.target_directory, 'debug', binaryName);
+      await fs.copyFile(sourceImage, runtimeImage);
+      const sourceHash = crypto.createHash('sha256').update(await fs.readFile(sourceImage)).digest('hex').toUpperCase();
+      const runtimeHash = crypto.createHash('sha256').update(await fs.readFile(runtimeImage)).digest('hex').toUpperCase();
+      assert.equal(runtimeHash, sourceHash, 'The browser must run the verified copied backend image');
+      await fs.writeFile(path.join(path.dirname(artifacts), 'browser-runtime-image.json'), JSON.stringify({source:sourceImage,runtime_image:runtimeImage,source_sha256:sourceHash,runtime_sha256:runtimeHash,verified_at:new Date().toISOString()},null,2));
       server = spawn(runtimeImage, [], {
         cwd: path.join(project, 'crates', 'casdog'),
         windowsHide: true,
@@ -161,8 +173,9 @@ async function main() {
         data: body,
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
-      const value = await response.json();
-      assert.ok(response.ok() && value.status !== 'error', `${method} ${endpoint} returned ${response.status()} ${JSON.stringify(value)}`);
+      const raw = await response.text();
+      const value = raw.trim() ? JSON.parse(raw) : null;
+      assert.ok(response.ok() && value?.status !== 'error', `${method} ${endpoint} returned ${response.status()} ${JSON.stringify(value)}`);
       return value;
     }
     async function fill(name, value, secret = false) {
@@ -188,10 +201,12 @@ async function main() {
     const password = 'BrowserPassword42!';
     let admin = await api('POST', '/api/login', { owner: 'built-in', name: 'admin', password: '123' });
     assert.ok(admin.token, 'Disposable database admin must be initialized');
-    await api('POST', '/api/providers', {
+    const baselineMail = await api('POST', '/api/providers', {
       owner: 'built-in', name: `browser-mail-${suffix}`, display_name: 'Browser mail fixture',
       category: 'Email', type: 'Custom HTTP', endpoint: mailEndpoint,
     }, admin.token);
+
+    await api('POST',`/api/providers/${baselineMail.id}/network-approval`,{allow_private:true},admin.token);
 
     await page.goto(origin);
     await navigate('Sign in', 'Sign in');
@@ -284,6 +299,7 @@ async function main() {
     assert.equal(movedAd.name,adState.name);assert.equal(movedAd.is_forbidden,true);assert.equal(movedAd.external_id,adGuid);
     await page.screenshot({path:path.join(artifacts,'ad-syncer.png'),fullPage:true});
     checks.push('Active Directory configured through the directory form imports binary GUID, then preserves its user UUID across DN/name moves and applies the account-disabled bit');
+    await checkCloudDirectories({page,navigate,fill,api,admin,checks,fixture:cloudDirectory,suffix,secrets:secretsThatMustNotBeLogged});
     for(const [kind,label,secret] of [['Azure Blob','azure',cloud.key],['Google Cloud Storage','gcs',JSON.stringify(cloud.serviceAccount)],['MinIO','minio','browser-minio-secret']]){
       const providerName=`browser-${label}-${suffix}`,display=`Browser ${label} storage`;
       secretsThatMustNotBeLogged.push(secret);
@@ -331,38 +347,42 @@ async function main() {
     await fill('Secondary client secret',oauthSecondary,true);await saveProvider(createdOAuth.id);
     await fill('Client secret','',true);await fill('Display name',oauthDisplay+' reviewed');await saveProvider(createdOAuth.id);
     const reviewedOAuth=await api('GET',`/api/providers/${createdOAuth.id}`,undefined,admin.token);assert.equal(reviewedOAuth.client_secret,'***');assert.deepEqual(reviewedOAuth.http_headers,{'X-Browser-Config':'***'});assert.ok(!JSON.stringify(reviewedOAuth).includes(oauthSecondary));
-    await page.getByRole('button',{name:'Approve private OAuth endpoints',exact:true}).click();await page.getByText('Private OAuth endpoints approved.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Approve private provider endpoints',exact:true}).click();await page.getByText('Private provider endpoints approved.',{exact:true}).waitFor();
     const approvalStatus=page.waitForResponse(response=>new URL(response.url()).pathname===`/api/providers/${createdOAuth.id}/network-approval`&&response.request().method()==='GET');
-    await page.getByRole('button',{name:'Load private OAuth approval',exact:true}).click();const approvalValue=await(await approvalStatus).json();assert.equal(approvalValue.allow_private,true);assert.equal(approvalValue.stale,false);await page.getByText('Private OAuth endpoints are approved for the saved configuration.',{exact:true}).waitFor();
-    await page.getByRole('button',{name:'Revoke private OAuth approval',exact:true}).click();await page.getByText('Private OAuth endpoint approval revoked.',{exact:true}).waitFor();assert.equal((await api('GET',`/api/providers/${createdOAuth.id}/network-approval`,undefined,admin.token)).allow_private,false);
-    await page.getByRole('button',{name:'Approve private OAuth endpoints',exact:true}).click();await page.getByText('Private OAuth endpoints approved.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Load private provider approval',exact:true}).click();const approvalValue=await(await approvalStatus).json();assert.equal(approvalValue.allow_private,true);assert.equal(approvalValue.stale,false);await page.getByText('Private provider endpoints are approved for the saved configuration.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Revoke private provider approval',exact:true}).click();await page.getByText('Private provider endpoint approval revoked.',{exact:true}).waitFor();assert.equal((await api('GET',`/api/providers/${createdOAuth.id}/network-approval`,undefined,admin.token)).allow_private,false);
+    await page.getByRole('button',{name:'Approve private provider endpoints',exact:true}).click();await page.getByText('Private provider endpoints approved.',{exact:true}).waitFor();
     const oauthApp=await api('POST','/api/applications',{owner:'admin',name:`browser-custom-app-${suffix}`,display_name:'Browser custom identity',organization:'built-in',enable_idp_signup:true,enable_signup:true,providers:[{name:`built-in/${oauthProviderName}`,canSignIn:true,canSignUp:true,canUnlink:true}]},admin.token);
     checks.push('Custom OAuth URLs, scopes and object mapping save in the Provider UI; secondary credentials rotate/clear, blank primary edits retain secrets, and a real global administrator explicitly approves private endpoints');
     const smtpName=`browser-smtp-${suffix}`;
     await page.getByRole('button',{name:'New resource',exact:true}).click();await page.getByRole('combobox',{name:'Category',exact:true}).selectOption({label:'Email'});await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'SMTP'});
     await fill('Owner','built-in');await fill('Name',smtpName);await fill('Display name','Browser SMTP relay');await fill('Client ID / API key',smtpRelay.username);await fill('Client secret',smtpRelay.password,true);
-    await fill('From address','sender@browser.test');await fill('From name','Browser Sender');await fill('Host / Endpoint',smtpRelay.host);await fill('Port',String(smtpRelay.port));await page.getByRole('checkbox',{name:'Allow plaintext SMTP',exact:true}).check();
-    const smtpProvider=await saveProvider();await page.getByRole('button',{name:'Browser SMTP relay',exact:true}).click();await page.waitForFunction(()=>document.querySelector('[aria-label="From name"]')?.value==='Browser Sender');
+    await fill('From address','sender@browser.test');await fill('From name','Browser Sender');await fill('Host / Endpoint',smtpRelay.host);await fill('Port',String(smtpRelay.port));await page.getByRole('combobox',{name:'SMTP SSL mode',exact:true}).selectOption({label:'Disable implicit TLS (optional STARTTLS)'});
+    const smtpProvider=await saveProvider();assert.equal(smtpProvider.ssl_mode,'Disable');await page.getByRole('button',{name:'Browser SMTP relay',exact:true}).click();await page.waitForFunction(()=>document.querySelector('[aria-label="From name"]')?.value==='Browser Sender');
     await fill('Client secret','',true);await fill('Display name','Browser SMTP retained');await saveProvider(smtpProvider.id);
     await api('POST','/api/send-email',{provider:smtpProvider.id,to:'recipient@browser.test',title:'UI configured SMTP',content:'Real SMTP body'},admin.token);
     assert.ok(smtpRelay.authentications.some(value=>value.accepted));assert.equal(smtpRelay.messages.length,1);assert.match(smtpRelay.messages[0],/From: (?:"Browser Sender"|Browser Sender) <sender@browser\.test>/);assert.match(smtpRelay.messages[0],/Real SMTP body/);
     checks.push('SMTP Provider UI persists separate From address/name and explicit TLS setting; blank password edit preserves credentials and the real SMTP relay authenticates and receives the configured From header');
+    const approveDelivery = async id => api('POST',`/api/providers/${id}/network-approval`,{allow_private:true},admin.token);
     const notifyName=`browser-notify-${suffix}`,notifySecret=crypto.randomBytes(24).toString('hex');secretsThatMustNotBeLogged.push(notifySecret);
     await page.getByRole('button',{name:'New resource',exact:true}).click();await page.getByRole('combobox',{name:'Category',exact:true}).selectOption({label:'Notification'});await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'Custom HTTP'});
     await fill('Owner','built-in');await fill('Name',notifyName);await fill('Display name','Browser private notification');await fill('Endpoint URL / paths',`http://127.0.0.1:${mailServer.address().port}/notifications`);await fill('Default receiver','browser-room');await fill('Metadata (JSON)',JSON.stringify([['X-Browser-Secret',notifySecret]]));
-    const notifyProvider=await saveProvider();await page.getByRole('button',{name:'Browser private notification',exact:true}).click();await page.waitForFunction(()=>{try{return JSON.parse(document.querySelector('[aria-label="Metadata (JSON)"]')?.value)?.[0]?.[1]==='***';}catch{return false;}});
+    const notifyProvider=await saveProvider();await approveDelivery(notifyProvider.id);await page.getByRole('button',{name:'Browser private notification',exact:true}).click();await page.waitForFunction(()=>{try{return JSON.parse(document.querySelector('[aria-label="Metadata (JSON)"]')?.value)?.[0]?.[1]==='***';}catch{return false;}});
     const maskedNotify=await api('GET',`/api/providers/${notifyProvider.id}`,undefined,admin.token);assert.deepEqual(JSON.parse(maskedNotify.metadata),[['X-Browser-Secret','***']]);assert.ok(!JSON.stringify(maskedNotify).includes(notifySecret));
-    await fill('Display name','Browser private notification retained');await saveProvider(notifyProvider.id);
+    await fill('Display name','Browser private notification retained');await saveProvider(notifyProvider.id);await approveDelivery(notifyProvider.id);
     await api('POST','/api/send-notification',{provider:notifyProvider.id,title:'Metadata retained',content:'Real notification'},admin.token);assert.equal(notificationRequests.at(-1).headers['x-browser-secret'],notifySecret);assert.equal(notificationRequests.at(-1).body.receiver,'browser-room');
     const notifySecondary=crypto.randomBytes(24).toString('hex');secretsThatMustNotBeLogged.push(notifySecondary);
-    await fill('Secondary client secret',JSON.stringify([['X-Browser-Secondary',notifySecondary]]),true);await saveProvider(notifyProvider.id);
-    await fill('Secondary client secret','',true);await fill('Display name','Browser notification secondary retained');await saveProvider(notifyProvider.id);
+    await fill('Secondary client secret',JSON.stringify([['X-Browser-Secondary',notifySecondary]]),true);await saveProvider(notifyProvider.id);await approveDelivery(notifyProvider.id);
+    await fill('Secondary client secret','',true);await fill('Display name','Browser notification secondary retained');await saveProvider(notifyProvider.id);await approveDelivery(notifyProvider.id);
     await api('POST','/api/send-notification',{provider:notifyProvider.id,title:'Secondary retained',content:'Real secondary notification'},admin.token);assert.equal(notificationRequests.at(-1).headers['x-browser-secondary'],notifySecondary);assert.equal(notificationRequests.at(-1).headers['x-browser-secret'],undefined);
-    await page.getByRole('checkbox',{name:'Clear saved secondary client secret',exact:true}).check();await saveProvider(notifyProvider.id);
-    await page.getByRole('checkbox',{name:'Clear all saved metadata',exact:true}).check();await saveProvider(notifyProvider.id);
+    await page.getByRole('checkbox',{name:'Clear saved secondary client secret',exact:true}).check();await saveProvider(notifyProvider.id);await approveDelivery(notifyProvider.id);
+    await page.getByRole('checkbox',{name:'Clear all saved metadata',exact:true}).check();await saveProvider(notifyProvider.id);await approveDelivery(notifyProvider.id);
     assert.ok(!(await api('GET',`/api/providers/${notifyProvider.id}`,undefined,admin.token)).metadata);
     await api('POST','/api/send-notification',{provider:notifyProvider.id,title:'Metadata removed',content:'Real notification after explicit removal'},admin.token);assert.equal(notificationRequests.at(-1).headers['x-browser-secret'],undefined);assert.equal(notificationRequests.at(-1).headers['x-browser-secondary'],undefined);
     checks.push('Notification metadata and secondary headers remain masked and effective after ordinary UI edits; default receiver and credential precedence reach the real server, and explicit clear removes the previous secrets');
+    await checkTransportForms({page,api,admin,fill,saveProvider,suffix,checks,fixture:transportFixture,secrets:secretsThatMustNotBeLogged});
+    const oauthProtocols=await configureOAuthProtocols({page,fill,saveProvider,api,admin,suffix,fixture:oauthDirectory});
+    const signedOidc=await configureOidcIdentity({page,fill,saveProvider,api,admin,suffix,fixture:oauthDirectory});
     const keytab=kerberos.keytab;secretsThatMustNotBeLogged.push(keytab);
     const organizationRecord=(await api('GET','/api/organizations',undefined,admin.token)).data.find(value=>value.name==='built-in');
     await navigate('Organizations','Organizations');await page.getByRole('button',{name:organizationRecord.display_name||organizationRecord.name,exact:true}).click();
@@ -539,6 +559,8 @@ async function main() {
     assert.equal(oauthDirectory.requests.filter(value=>value.kind==='authorize').length,2);assert.ok(oauthDirectory.requests.filter(value=>value.kind==='authorize').every(value=>value.scope==='profile contacts browser.custom'));assert.equal(oauthDirectory.requests.filter(value=>value.kind==='token').length,2);assert.equal(oauthDirectory.requests.filter(value=>value.kind==='userinfo').length,2);
     await fill('Current password',password,true);await page.getByRole('button',{name:`Unlink ${oauthDisplay} reviewed`,exact:true}).click();await page.getByText('Account unlinked.',{exact:true}).waitFor();assert.equal((await api('GET','/api/get-account',undefined,token)).provider_ids?.[`oauth:${createdOAuth.id}`],undefined);
     checks.push('Existing local account links a distinct mapped OAuth subject through the real authorization server and explicitly unlinks it with password proof without changing the local user UUID');
+    token=await checkOAuthProtocols({page,fill,signIn,password,api,checks,fixture:oauthDirectory,configured:oauthProtocols,suffix});
+    token=await checkOidcIdentity({page,fill,signIn,password,api,admin,checks,fixture:oauthDirectory,configured:signedOidc,suffix});
 
     const wallet=await api('POST','/api/providers',{owner:'built-in',name:`browser-wallet-${suffix}`,display_name:'Browser wallet',category:'Payment',type:'Balance'},admin.token);
     const billingRole=await api('POST','/api/roles',{owner:'built-in',name:`browser-paid-${suffix}`,display_name:'Browser paid member',is_enabled:true},admin.token);
@@ -838,12 +860,14 @@ async function main() {
     await navigate('Recover password', 'Recover password');
     await fill('Email', email);
     await fill('Application', `admin/browser-device-${suffix}`);
+    const recoveryMailStart = mail.length;
+    const recoveryDelivery = () => mail.slice(recoveryMailStart).find(value => value.to === email && value.subject === 'Reset your password');
     await page.getByRole('button', { name: 'Send reset code', exact: true }).click();
     await page.getByRole('textbox', { name: 'Reset code', exact: true }).waitFor();
-    for (let attempt = 0; attempt < 100 && !mail.some(value => value.to === email); attempt++) {
+    for (let attempt = 0; attempt < 100 && !recoveryDelivery(); attempt++) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    const delivery = mail.find(value => value.to === email && value.subject === 'Reset your password');
+    const delivery = recoveryDelivery();
     assert.ok(delivery, 'Local email provider must receive the recovery proof');
     const proof = delivery.body.split('\n')[1];
     await fill('Reset code', proof);
@@ -925,6 +949,7 @@ async function main() {
     assert.equal((await api('GET','/api/get-account',undefined,kerberosToken)).id,kerberosUserId);
     await page.screenshot({path:path.join(artifacts,'kerberos-login.png'),fullPage:true});
     checks.push('Independent Kerby/JDK service ticket passes the real Kerberos UI endpoint, JDK verifies AP-REP, and browser MFA gates the final JWT; native Windows automatic IWA is not claimed');
+    checks.push(...await runWechatBrowser({browser,database,artifacts,fixtureExecutable:path.join(metadata.target_directory,'debug','examples',process.platform==='win32'?'wechat_browser_fixture.exe':'wechat_browser_fixture')}));
     assert.deepEqual(runtimeErrors, []);
     for(const secret of secretsThatMustNotBeLogged)assert.ok(!serverOutput.join('').includes(secret),'Request tracing must omit query secrets');
     await fs.writeFile(path.join(artifacts, 'results.json'), JSON.stringify({ passed: true, checks, runtimeErrors, apiInterception: false }, null, 2));
@@ -947,7 +972,7 @@ async function main() {
     if (runtimeImage) await fs.unlink(runtimeImage).catch(() => {});
     await fs.writeFile(path.join(artifacts, 'server.log'), serverOutput.join(''));
     await new Promise(resolve => mailServer.close(resolve));
-    await directory.close();await adDirectory.close();await cloud.close();await oauthDirectory.close();await smtpRelay.close();
+    await directory.close();await adDirectory.close();await cloud.close();await cloudDirectory.close();await transportFixture.close();await oauthDirectory.close();await smtpRelay.close();
   }
 }
 

@@ -28,22 +28,46 @@ fn kind(object: &Map<String, Value>) -> String {
         .to_ascii_lowercase()
         .replace([' ', '-', '_'], "")
 }
+fn canonical_category(value: &str) -> &str {
+    const CATEGORIES: [&str; 10] = [
+        "OAuth",
+        "Email",
+        "SMS",
+        "Notification",
+        "Storage",
+        "LDAP",
+        "Payment",
+        "SAML",
+        "Captcha",
+        "Log",
+    ];
+    CATEGORIES
+        .into_iter()
+        .find(|category| category.eq_ignore_ascii_case(value.trim()))
+        .unwrap_or(value)
+}
+fn category(object: &Map<String, Value>) -> Option<&str> {
+    object
+        .get("category")
+        .and_then(Value::as_str)
+        .map(canonical_category)
+}
 fn secret_fields(object: &Map<String, Value>) -> Vec<&'static str> {
     let mut fields = vec!["client_secret"];
-    if object.get("category").and_then(Value::as_str) != Some("Email") {
+    if category(object) != Some("Email") {
         fields.push("client_secret2");
     }
     if kind(object) == "wechat" {
         fields.push("content");
     }
     let configured = |key: &str| object.get(key).is_some_and(|value| !value.is_null());
-    if object.get("category").and_then(Value::as_str) == Some("Email")
+    if category(object) == Some("Email")
         && kind(object).contains("sendgrid")
         && !configured("client_secret")
     {
         fields.push("client_id");
     }
-    if object.get("category").and_then(Value::as_str) == Some("Notification") {
+    if category(object) == Some("Notification") {
         let provider_kind = kind(object);
         if provider_kind == "telegram" {
             if !configured("client_secret") {
@@ -59,11 +83,21 @@ fn secret_fields(object: &Map<String, Value>) -> Vec<&'static str> {
             {
                 fields.push(field);
             }
-        } else if provider_kind.starts_with("customhttp")
-            && !configured("endpoint")
-            && !configured("provider_url")
-        {
-            fields.push("client_id");
+        } else if provider_kind.starts_with("customhttp") {
+            // Notification webhooks may carry credentials in their path/query.
+            // Match the actual first nonempty URL carrier, including upstream's
+            // receiver fallback, rather than classifying nullability alone.
+            if let Some(field) = ["endpoint", "provider_url", "client_id", "receiver"]
+                .into_iter()
+                .find(|field| {
+                    object
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                })
+            {
+                fields.push(field);
+            }
         }
     }
     fields
@@ -76,7 +110,7 @@ fn mask(raw: &Value) -> Value {
     }
 }
 fn metadata_public(object: &Map<String, Value>, key: &str) -> bool {
-    match object.get("category").and_then(Value::as_str) {
+    match category(object) {
         Some("Storage") => {
             matches!(kind(object).as_str(), "azureblob" | "googlecloudstorage")
                 && key == "storageApiEndpoint"
@@ -166,9 +200,7 @@ fn project_metadata(object: &Map<String, Value>, raw: &str) -> String {
             return Value::Object(visible).to_string();
         }
     }
-    if object.get("category").and_then(Value::as_str) == Some("Notification")
-        && kind(object).starts_with("customhttp")
-    {
+    if category(object) == Some("Notification") && kind(object).starts_with("customhttp") {
         if let Ok(pairs) = header_pairs(raw) {
             return json!(
                 pairs
@@ -305,6 +337,13 @@ fn merge_pairs(old: Option<&str>, patch: &str) -> AppResult<String> {
 /// preserve current data; an explicit empty string clears a text credential.
 pub fn prepare_patch(current: Option<&Provider>, patch: &mut Map<String, Value>) -> AppResult<()> {
     patch.retain(|_, v| !v.is_null());
+    if let Some(value) = patch.get("ssl_mode") {
+        if !matches!(value.as_str(), Some("" | "Auto" | "Enable" | "Disable")) {
+            return Err(invalid(
+                "SMTP ssl_mode must be Auto, Enable, Disable or an empty legacy value",
+            ));
+        }
+    }
     let old = current.map(|p| serde_json::to_value(p).expect("Provider JSON"));
     let mut target = old
         .as_ref()
@@ -416,7 +455,11 @@ pub fn prepare_patch(current: Option<&Provider>, patch: &mut Map<String, Value>)
                     .map_err(|_| invalid("Provider header values must be strings"))?;
                 header_pairs(&json!(fields.into_iter().collect::<Vec<_>>()).to_string())?;
             } else {
-                validate_mapping(&parsed)?;
+                validate_mapping_for(
+                    category(&target).unwrap_or(""),
+                    target.get("type").and_then(Value::as_str).unwrap_or(""),
+                    &parsed,
+                )?;
             }
             patch.insert(field.into(), json!(parsed.to_string()));
         }
@@ -438,11 +481,11 @@ pub fn prepare_patch(current: Option<&Provider>, patch: &mut Map<String, Value>)
                 .to_string()
         } else if raw.is_empty() {
             String::new()
-        } else if target.get("category").and_then(Value::as_str) == Some("Notification")
+        } else if category(&target) == Some("Notification")
             && matches!(kind(&target).as_str(), "dingtalk" | "lark")
         {
             serde_json::from_str::<String>(&raw).unwrap_or(raw)
-        } else if target.get("category").and_then(Value::as_str) == Some("Notification")
+        } else if category(&target) == Some("Notification")
             && kind(&target).starts_with("customhttp")
         {
             merge_pairs(previous, &raw)?
@@ -460,9 +503,7 @@ pub fn prepare_patch(current: Option<&Provider>, patch: &mut Map<String, Value>)
     }
     // client_secret2 is a JSON header-pair list for Custom HTTP notifications;
     // otherwise it is an opaque secret (Email uses a public From display name).
-    if target.get("category").and_then(Value::as_str) == Some("Notification")
-        && kind(&target).starts_with("customhttp")
-    {
+    if category(&target) == Some("Notification") && kind(&target).starts_with("customhttp") {
         if let Some(raw) = patch
             .get("client_secret2")
             .and_then(Value::as_str)
@@ -481,6 +522,7 @@ pub fn prepare_patch(current: Option<&Provider>, patch: &mut Map<String, Value>)
         "client_id",
         "endpoint",
         "provider_url",
+        "receiver",
     ] {
         if patch.get(field).and_then(Value::as_str) == Some("***") {
             return Err(invalid("A mask cannot be stored as provider configuration"));
@@ -523,12 +565,69 @@ pub fn validate_mapping(value: &Value) -> AppResult<()> {
     Ok(())
 }
 
+/// OAuth maps remote object paths; Custom HTTP delivery maps fixed source
+/// fields to caller-selected output names. The two schemas are not interchangeable.
+pub fn validate_mapping_for(category: &str, provider_type: &str, value: &Value) -> AppResult<()> {
+    if category == "OAuth" {
+        return validate_mapping(value);
+    }
+    let fields = value
+        .as_object()
+        .ok_or_else(|| invalid("User mapping must be an object"))?;
+    if fields.is_empty() {
+        return Ok(());
+    }
+    let normalized = provider_type
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "");
+    let custom = if category == "SMS" {
+        matches!(
+            normalized.as_str(),
+            "customhttp" | "customhttpsms" | "http" | "generic"
+        )
+    } else {
+        normalized.starts_with("customhttp")
+    };
+    let targets: &[&str] = match (category, custom) {
+        ("Email", true) => &[
+            "fromAddress",
+            "fromName",
+            "toAddress",
+            "toAddresses",
+            "subject",
+            "content",
+        ],
+        ("SMS", true) => &["phoneNumber", "content"],
+        _ => {
+            return Err(invalid(
+                "User mapping is unsupported for this delivery provider",
+            ));
+        }
+    };
+    let mut names = HashSet::new();
+    for (source, target) in fields {
+        let target = target
+            .as_str()
+            .ok_or_else(|| invalid("Delivery body mapping values must be output field names"))?;
+        if !targets.contains(&source.as_str())
+            || target.is_empty()
+            || target.len() > 128
+            || target.chars().any(char::is_control)
+            || !names.insert(target)
+        {
+            return Err(invalid(
+                "Unsupported, empty or conflicting delivery body mapping",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn email_sender(
     provider: &Provider,
     override_sender: Option<&str>,
 ) -> AppResult<lettre::message::Mailbox> {
     let address = [
-        override_sender,
         provider.client_id2.as_deref(),
         provider.receiver.as_deref(),
         provider.client_id.as_deref(),
@@ -537,7 +636,11 @@ pub fn email_sender(
     .flatten()
     .find(|s| !s.is_empty())
     .ok_or_else(|| invalid("Email provider requires a From address"))?;
-    let name = provider.client_secret2.as_deref().filter(|s| !s.is_empty());
+    let name = provider
+        .client_secret2
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(override_sender.filter(|s| !s.is_empty()));
     if address.contains(['\r', '\n']) || name.is_some_and(|s| s.contains(['\r', '\n'])) {
         return Err(invalid("Invalid Email From address or name"));
     }
@@ -551,6 +654,9 @@ pub fn email_sender(
 }
 
 pub fn validate(provider: &Provider) -> AppResult<()> {
+    let mut canonical = provider.clone();
+    canonical.category = canonical_category(&provider.category).to_string();
+    let provider = &canonical;
     for value in [
         provider.client_secret.as_deref(),
         provider.client_secret2.as_deref(),
@@ -563,7 +669,9 @@ pub fn validate(provider: &Provider) -> AppResult<()> {
         }
     }
     if let Some(mapping) = provider.user_mapping.as_deref().filter(|s| !s.is_empty()) {
-        validate_mapping(
+        validate_mapping_for(
+            &provider.category,
+            &provider.provider_type,
             &serde_json::from_str(mapping).map_err(|_| invalid("Invalid user mapping JSON"))?,
         )?;
     }
@@ -633,6 +741,29 @@ pub fn validate(provider: &Provider) -> AppResult<()> {
             header_pairs(headers)?;
         }
     }
+    if let Some(mode) = provider.ssl_mode.as_deref().filter(|mode| !mode.is_empty()) {
+        let smtp = provider.category == "Email"
+            && !provider
+                .provider_type
+                .to_ascii_lowercase()
+                .contains("sendgrid")
+            && !provider
+                .provider_type
+                .to_ascii_lowercase()
+                .replace([' ', '-', '_'], "")
+                .contains("customhttp");
+        if !smtp {
+            return Err(invalid(
+                "ssl_mode is supported only by SMTP Email providers",
+            ));
+        }
+        super::providers::email_provider::smtp_tls_mode(
+            Some(mode),
+            provider.disable_ssl,
+            provider.port.unwrap_or(587) as u16,
+        )?;
+    }
+    super::providers::http_delivery::validate_record(provider)?;
     crate::services::protocol_gap_service::validate_storage_configuration(provider)?;
     crate::services::providers::oauth_provider::validate_oauth_configuration(provider)?;
     Ok(())

@@ -387,7 +387,7 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
     // Network exceptions are deliberate global decisions, even when a tenant
     // happens to own a provider in a similarly named namespace.
     let segments: Vec<_> = path.split('/').collect();
-    if segments.len() == 3 && segments[0] == "providers" && segments[2] == "network-approval" {
+    if segments.len() == 3 && matches!(segments[0], "providers" | "syncers") && segments[2] == "network-approval" {
         return Err(denied()); // Current real global administrators returned above.
     }
     // These handlers bind identity/proofs to the authenticated user themselves.

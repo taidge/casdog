@@ -1,4 +1,4 @@
-# Casdoor 改写复核（更新至 2026-11-12）
+# Casdoor 改写复核（更新至 2026-11-13）
 
 ## 基线与结论
 
@@ -9,6 +9,36 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 
 **结论：已有较广的 IAM 骨架和不少真实实现，但不能称为完整 Casdoor 替代品。**
 路由存在、编译通过、返回 401/500 均不证明功能等价。旧 `_todos.md` 把上一轮的局部修复扩大为整体完成，本次纠正。
+
+## 第十六阶段已验收状态（2026-11-13）
+
+本阶段接通 OIDC 已验签 ID-token-only、微信移动端二级凭据，以及 Azure AD 和 Google Workspace 目录与托管组同步。部署需迁移至 051、统一升级；OAuth v3 指纹使旧待登录及私网审批失效，需重新发起登录并审核私网来源。
+
+最终后端回归：50 个程序、560 次执行、0 失败、0 忽略；246 个显式 PostgreSQL 测试函数逐名通过。前端 7 项原生测试、WASM、Trunk release、浏览器夹具和 49 项真实后端浏览器检查通过，无 API 拦截或运行时错误，保留此前全部 41 项检查。微信三个浏览器场景通过普通路由加显式开发服务器传输注入完成，不是实际微信账号验收。详细范围见 `docs/phase16-gap-assessment.json`。
+
+- OIDC：JWKS 公钥验签、nonce/issuer/audience/azp/时间/at_hash 校验及跨实例状态已接通；有 UserInfo 时主体必须与签名一致。basic/post/none 按明确配置与 discovery 协商，不再忽略配置。声明 JWKS 不等于已认证，坏签名或 nonce 不得落账号、会话或 MFA completion。
+- 微信：桌面和 MicroMessenger 分别使用网站与公众号凭据，服务端持久分流，回调 UA 改变不换凭据。OpenID/UnionID 一致性、移动端应用命名空间、跨租户隔离、明确绑定和 MFA 复核均有实际协议回归。
+- 目录：Azure 客户端凭据和 Graph 完整分页、Google 委托服务账号签名及用户/组/成员分页进入正常 CRUD/run。稳定 ID 的改名/禁用保留本地身份和凭据；完整快照才应用，坏页整批回滚。Google 只同步直接 USER 成员，不扩展嵌套组、不把远端管理员变成本地管理员。
+- 托管组：维护组、成员及 JSON 视图台账，保留手工和其他来源成员。删除同步器撤回其受管边，删除组先清本租户对应引用再级联，不能遗留旧的 qualified group 值；相关锁序及并发已回归。
+- 私网审批：绑定配置/密钥指纹和随机代次；每个请求与最终提交检查同一批准，撤销后重批也不能恢复旧批次。复用执行连接避免单连接池死等；长事务锁允许及时重批且保留同步互斥。前端展示实际 token/API 目标 origin，隐藏密钥不会隐藏审核目标。
+
+- 前端并发：登录提供商查询使用请求代次与当前应用双重检查，旧应用的迟到响应不会覆盖新应用按钮；受控延迟用例稳定复现原问题并验证修复。
+
+仍不能认定整体功能等价。后续包括更多数据库/目录与提供商、嵌套组和大目录长任务、更多 OIDC 算法和客户端认证、代理及登出、微信扫码消息票据等。目录继承 60 秒整批预算和 90 秒租约，拒绝上界不是企业规模验收。静态 299/299 仍只说明路由声明。操作说明见 `docs/oauth-providers.md`、`docs/wechat.md` 和 `docs/cloud-directory-sync.md`。
+
+## 第十五阶段已验收状态（2026-11-12）
+
+本阶段接通 Custom HTTP 的实际请求协议、完整 SMTP 模式，以及 OIDC issuer discovery、PKCE 和 OAuth URL 模板。部署须迁移至 049 并统一升级；OAuth v2 配置指纹使旧待完成登录和旧私网审批失效，需重启登录、重新核对并批准私网身份源。内部 Custom HTTP 邮件、短信及通知也须真实全局管理员显式批准后再用于找回密码、MFA 或消息投递。
+
+最终后端回归：45 个程序、535 次执行、0 失败、0 忽略；226 个显式 PostgreSQL 测试函数逐名核对通过。前端 7 项原生测试、WASM、Trunk release、浏览器夹具和 41 项真实后端浏览器检查通过，无 API 拦截或运行时错误，保留上一阶段全部 36 项检查。范围及证据见 `docs/phase15-gap-assessment.json`。
+
+- Custom HTTP：邮件支持 GET/POST/PUT/DELETE、form/JSON、正文重命名和多接收人；通知支持 GET/POST、内容参数名、recipient 与 receiver URL 后备；通用短信接入映射、模板和 URL 占位符。空 method 保留既有 JSON 协议，显式 method 启用上游协议；冲突配置直接拒绝，通用 headers 实际投递且脱敏保留。
+- 投递边界：固定 DNS、禁用代理与跳转、有界响应及超时。所有短信 fallback 都走同一受控路径，类型别名不能绕过私网审批；每次实际请求前重新检查当前 Provider 和批准，撤销后阻止后续收件人请求。已在途请求无法撤回。通知有效 URL 槽整体脱敏，大小写变体和切换槽位不会公开旧 webhook 秘密。
+- SMTP：原生及兼容接口支持 Auto/Enable/Disable，未设模式保持旧安全默认值。Enable 在任意端口要求隐式 TLS；显式 Auto 在 465 隐式、其他机会 STARTTLS；Disable 全部机会 STARTTLS。后两种在无 STARTTLS 时允许明文，证书校验始终保留。真实协议测试验证 ClientHello/STARTTLS、失败握手前不泄漏认证及正文，并保留正常发送检查。
+- OAuth/OIDC：issuer 元数据严格匹配并受网络边界约束，解析端点快照和 PKCE verifier 存于共享短期流程，回调跨实例仍可完成。token URL 模板查询转换为 POST 表单；UserInfo 模板消费本次令牌交换的额外字段，无全局令牌缓存或数据库令牌响应持久化。Generic/OIDC headers 实际生效，协议头和不支持的内置 provider 配置明确拒绝。仍要求认证 UserInfo，不接受未经验证的 ID token。
+- 前端：Glory/Sapid 支持模式、编码、方法、映射、issuer 和审批状态。新增五项真实浏览器流程覆盖邮件 PUT/GET、通知 GET、issuer-only OIDC/PKCE 及令牌额外字段模板登录。
+
+整体功能等价仍未证明。下一优先级为安全的 ID-token-only/JWKS/nonce 验证、微信内嵌浏览器二级凭据、代理及登出配置、更多数据库与云目录；更多提供商、生产集群和专用前端也保留。299/299 仅是静态声明覆盖，不是功能完成率。操作说明见 `docs/custom-http-providers.md`、`docs/provider-configuration.md` 和 `docs/oauth-providers.md`。
 
 ## 第十四阶段已验收状态（2026-11-12）
 

@@ -1,6 +1,6 @@
 # Provider 原生配置与密钥处理
 
-部署时按顺序应用迁移 `001`–`048`。`047_provider_configuration.sql` 扩大 secondary ID/secret、自定义 OAuth URL、Logo 和 receiver 字段，避免结构化凭据或配置被旧短列截断；`048_oauth_network_approvals.sql` 新增独立的 OAuth 私网访问批准记录。数据库迁移和代码应一起部署。
+部署时按顺序应用迁移 `001`–`051`。`047_provider_configuration.sql` 扩大 secondary ID/secret、自定义 OAuth URL、Logo 和 receiver 字段；`048_oauth_network_approvals.sql` 新增独立的私网批准记录，现用于可配置 OAuth 与 Custom HTTP 投递；`049_provider_transport.sql` 增加 SMTP `ssl_mode`；`050`、`051` 接入云目录私网审批与受管组台账。数据库迁移和代码应一起部署。OAuth v3 指纹包含认证方法及二级凭据，使旧待完成登录及旧私网审批失效，需重启登录并重新审查批准；内部 Custom HTTP 邮件、短信和通知须先批准，再用于 MFA、找回密码及消息投递。
 
 ## 正常读写入口
 
@@ -24,7 +24,7 @@
 
 ## 哪些值公开，哪些值脱敏
 
-主密钥以及非 Email 类型的 secondary secret 会显示为 `***`。**Email 的 `client_id2` 是 From 地址，`client_secret2` 是公开的 From 显示名**，后者不是密码。SMTP 和 SendGrid 的实际发送会使用这个名称与地址；SMTP 登录用户名仍为 `client_id`，密码为 `client_secret`。邮件地址和显示名不允许 CR/LF 注入。
+主密钥以及非 Email 类型的 secondary secret 会显示为 `***`。**Email 的 `client_id2` 是 From 地址，`client_secret2` 是公开的 From 显示名**，后者不是密码。SMTP 和 SendGrid 的实际发送会使用这个名称与地址；SMTP 登录用户名仍为 `client_id`，密码为 `client_secret`。显示名为空时，发送接口的 `sender` 作为显示名后备，不会覆盖已配置的 From 地址。邮件地址和显示名不允许 CR/LF 注入。
 
 已有兼容配置可能把真实凭据放在回退字段：SendGrid 缺少主密钥时使用 `client_id` 作为 API key；Telegram 同样可能使用 `client_id` 作为 token。响应会按实际消费分支将这些载体脱敏。Slack、Discord、DingTalk、Lark、Teams 实际选中的 webhook URL 字段也按凭据处理。普通 OAuth client ID 和 Twilio account SID 仍可读。
 
@@ -69,19 +69,35 @@ Custom HTTP 通知的 header 数组按 **header 名称** 匹配脱敏值，忽�
 
 header 数组是完整的新列表，省略的 header 会移除；通用 `http_headers` 对象则按名称合并。所有 header 值保守脱敏，非法或重复名称、CR/LF 等非法值会被拒绝。Custom HTTP 通知优先使用 `client_secret2`，再使用 metadata；显式将已有 secondary secret 清为空字符串会禁用该配置，不会自动回退到 metadata。
 
+Custom HTTP 通知的有效目标 URL 也会整体脱敏，因为 webhook 路径和查询可能包含凭据。按实际投递顺序选择第一个非空的 `endpoint`、`provider_url`、`client_id`、`receiver`；`***` 保留该槽位原值。切换 URL 槽位时必须明确替换或清空将变为普通公开字段的旧槽位，不能让旧 webhook 凭据自动公开。此规则同样适用于类别名称的大小写变体。
+
 ## 类型切换不允许把旧秘密变成公开字段
 
 把 Notification 改成 Email 时，旧 secondary secret 不能悄悄变成公开 From name；把 WeChat 改成其他类型时，旧秘密 content 也不能变成普通可读 content。若旧秘密将进入公开字段，必须明确提交新的公开值或清空该字段，省略、`null`、`***` 都不能完成这种转换。
 
 非空 metadata 跨 category/type 切换时同样需要明确替换或清空。新类型使用新的合并上下文，不会把旧的不透明秘密按新类型的公开白名单显示出来。切换凭据载体也受同一规则约束，例如新增 SendGrid 主密钥后，不能让原先作为回退 API key 的 `client_id` 自动公开。
 
-## SMTP 的 disable_ssl
+## SMTP 的 ssl_mode / sslMode
 
-默认的 `disable_ssl: false` 在 465 端口使用隐式 TLS，其他端口（包括默认 587）要求先完成 STARTTLS，再发送认证或邮件内容。旧字段设为 `true` 时禁用隐式 TLS，但服务器若声明支持 STARTTLS 仍会升级；仅在服务器没有 STARTTLS 能力时允许明文。该兼容模式可能受 STARTTLS 降级攻击，仅应在操作者明确接受的受控网络使用。证书校验不会关闭；完整的上游 `ssl_mode` 选项尚未实现，不能把此旧布尔字段当成完整 TLS 模式选择器。
+原生 API 接受 `ssl_mode`，同时接受兼容别名 `sslMode`；兼容 API 读回 `sslMode`。只接受 `Auto`、`Enable`、`Disable`、空字符串及省略/null。未知模式拒绝保存；非 SMTP Provider 的非空模式明确拒绝，而不会保存一个实际未生效的开关。
 
-## 私有 OAuth 地址需要单独批准
+| 配置 | 实际连接行为 |
+| --- | --- |
+| 显式 `Enable` | 任意端口均先建立隐式 TLS，证书验证成功后才进行 SMTP |
+| 显式 `Disable` | 不使用隐式 TLS；服务端提供 STARTTLS 时必须升级，否则允许明文 |
+| 显式 `Auto` | 按上游 gomail：465 隐式 TLS，其他端口机会式 STARTTLS；没有 STARTTLS 时允许明文 |
+| 省略/null/`""` 且旧 `disable_ssl=false` | 保留本项目既有安全默认：465 隐式 TLS，其他端口必须 STARTTLS |
+| 省略/null/`""` 且旧 `disable_ssl=true` | 保留旧字段兼容行为：机会式 STARTTLS，仅未提供时允许明文 |
 
-保存内部 URL 不会自动授予私网访问。批准是独立的服务端记录，绑定实际 Provider 配置；`owner=admin`、`owner=built-in`、metadata 里的某个标志都不代表已经批准。
+新列保持 NULL，不把已有配置回填为 `Auto`，从而不会把未配置的旧记录从“必须 STARTTLS”降为允许明文。`null` 更新表示保留；空字符串显式切回旧布尔兼容策略。显式模式优先于旧布尔值。机会式模式可能遭受 STARTTLS 能力降级，仅应在操作者接受的受控网络选择；所有模式都保留证书校验，TLS 握手失败不会继续发送 AUTH 或邮件。
+
+## Custom HTTP 的 body mapping
+
+OAuth 的 `user_mapping` 仍是八个用户资料目标到远端点分对象路径。Custom HTTP Email 的目标为 `fromAddress/fromName/toAddress/toAddresses/subject/content`，SMS 为 `phoneNumber/content`；这些值表示实际输出字段名，不是 OAuth 对象路径。空对象重置默认映射；未知目标、重复输出名、空名和控制字符会被拒绝。其他投递适配器的非空映射明确拒绝。方法、内容类型、header 冲突规则由实际 HTTP 投递适配器共同校验，不会静默接收后忽略。
+
+## 私有 Provider 地址需要单独批准
+
+保存内部 URL 不会自动授予私网访问。批准是独立的服务端记录，绑定实际 Provider 配置；`owner=admin`、`owner=built-in`、metadata 里的某个标志都不代表已经批准。公开地址仍受检查后的 DNS、禁止跳转等传输规则约束。
 
 仅当前有效的真实全局管理员可以调用以下受保护入口；租户管理员和应用身份不能批准：
 
@@ -91,6 +107,6 @@ POST   /api/providers/{id}/network-approval   body: {"allow_private":true}
 DELETE /api/providers/{id}/network-approval
 ```
 
-适用范围为有明确端点配置的自定义 OAuth，以及配置了明确 issuer 的 Okta。状态包含 `allow_private`、`stale`、`approved_by`、`approved_at`。相关配置改变后旧批准失效，需管理员重新核对并批准；撤销使用 DELETE。执行时仍通过固定 DNS、超时、禁用重定向等网络检查，批准不是任意地址的通用放行开关。
+适用范围为自定义 OAuth、OIDC issuer discovery、配置了明确 issuer 的 Okta，以及 Custom HTTP 邮件、短信和通知。状态包含 `allow_private`、`stale`、`approved_by`、`approved_at`。相关配置改变后旧批准失效，需管理员重新核对并批准；撤销使用 DELETE。执行时仍通过固定 DNS、超时、禁用重定向等网络检查，批准不是任意地址的通用放行开关。Custom HTTP 每次实际请求都复核当前配置和批准，包括多收件人的后续请求；已在途请求无法撤回。
 
 本指南描述配置与保护规则。本机协议夹具和数据库回归用于验证应用行为；具体结果以当前完成度报告和测试日志为准，不代表真实第三方生产账号已验收。

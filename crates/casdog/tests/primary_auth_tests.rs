@@ -1,4 +1,6 @@
 //! Real first-factor proofs through PostgreSQL, HTTP delivery and LDAP BER.
+#[path = "support/provider_network.rs"]
+mod fixture_network;
 use casdog::{
     config::AppConfig,
     diesel_pool::create_diesel_pool,
@@ -248,6 +250,7 @@ impl Fixture {
             sqlx::query("INSERT INTO providers(id,owner,name,display_name,category,type,endpoint,client_secret) VALUES($1,$2,$3,$3,$4,$5,$6,'send-secret')")
                 .bind(uuid::Uuid::new_v4().to_string()).bind(&owner).bind(name).bind(category).bind(kind).bind(&endpoint).execute(&pool).await.unwrap();
         }
+        fixture_network::approve_owner(&pool, &owner).await;
         sqlx::query("INSERT INTO providers(id,owner,name,display_name,category,type,host,client_id,client_secret,metadata,disable_ssl) VALUES($1,$2,'ldap','Directory','LDAP','LDAP',$3,'cn=service,dc=example,dc=test','search-password',$4,true)")
             .bind(&ldap).bind(&owner).bind(address).bind(json!({"base_dn":"dc=example,dc=test","filter":"(objectClass=person)"}).to_string()).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO applications(id,owner,name,display_name,organization,client_id,client_secret,redirect_uris,enable_password,enable_code_signin,signin_methods,providers,grant_types) VALUES($1,$2,'app','App',$2,$1,'secret','https://example.test/callback',true,true,$3,$4,$5)")

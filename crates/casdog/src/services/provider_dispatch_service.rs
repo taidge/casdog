@@ -38,6 +38,14 @@ struct ApplicationProviderItem {
 }
 
 impl ProviderDispatchService {
+    async fn http_private_access(&self, provider: &Provider) -> AppResult<bool> {
+        if !crate::services::providers::http_delivery::is_custom_http(provider) {
+            return Ok(false);
+        }
+        crate::services::providers::http_delivery::current_private_access(&self.pool, provider)
+            .await
+    }
+
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
@@ -210,6 +218,17 @@ impl ProviderDispatchService {
             ));
         }
 
+        if crate::services::providers::http_delivery::is_custom_http(&provider_record) {
+            let allow_private = self.http_private_access(&provider_record).await?;
+            CustomHttpEmailProvider::from_record(&provider_record, allow_private)?
+                .with_pool(self.pool.clone())
+                .send_many(&receivers, subject, content, sender)
+                .await?;
+            return Ok(DeliveryResult {
+                provider: provider_record,
+                receivers,
+            });
+        }
         let provider = email_provider_from_record(&provider_record, sender)?;
         for receiver in &receivers {
             provider.send_email(receiver, subject, content).await?;
@@ -261,7 +280,19 @@ impl ProviderDispatchService {
             ));
         }
 
-        let provider = sms_provider_from_record(&provider_record)?;
+        let provider: Box<dyn SmsProviderTrait> =
+            if crate::services::providers::http_delivery::is_custom_http(&provider_record) {
+                let allow_private = self.http_private_access(&provider_record).await?;
+                Box::new(
+                    crate::services::providers::http_delivery::CustomHttpSmsProvider::from_record(
+                        &provider_record,
+                        allow_private,
+                    )?
+                    .with_pool(self.pool.clone()),
+                )
+            } else {
+                sms_provider_from_record(&provider_record)?
+            };
         for receiver in &receivers {
             provider.send_sms(receiver, content).await?;
         }
@@ -289,9 +320,19 @@ impl ProviderDispatchService {
                 None,
             )
             .await?;
-        let receivers =
-            notification_receivers(requested_receivers, resolved.provider.receiver.as_deref());
-        let provider = notification_provider_from_record(&resolved.provider)?;
+        let custom = crate::services::providers::http_delivery::is_custom_http(&resolved.provider);
+        let default = if custom
+            && crate::services::providers::http_delivery::notification_receiver_is_endpoint(
+                &resolved.provider,
+            ) {
+            None
+        } else {
+            resolved.provider.receiver.as_deref()
+        };
+        let receivers = notification_receivers(requested_receivers, default);
+        let allow_private = self.http_private_access(&resolved.provider).await?;
+        let provider =
+            notification_provider_from_record(&resolved.provider, allow_private, &self.pool)?;
 
         for receiver in &receivers {
             provider.send(title, content, receiver).await?;
@@ -522,6 +563,9 @@ fn split_receivers(receivers: Option<&str>) -> Vec<String> {
 /// Check a restored factor's actual delivery configuration without sending a
 /// message. Keep restore validation in sync with the normal delivery factory.
 pub fn validate_mfa_delivery_provider(provider: &Provider) -> AppResult<()> {
+    if crate::services::providers::http_delivery::is_custom_http(provider) {
+        return crate::services::providers::http_delivery::validate_record(provider);
+    }
     let invalid = || {
         AppError::Validation("MFA delivery provider configuration is incomplete or invalid".into())
     };
@@ -627,14 +671,10 @@ fn email_provider_from_record(
             SendGridEmailProvider::from_provider_record(&api_key, &from_address.email.to_string())
                 .with_sender(&from_address),
         ))
-    } else if provider_type.contains("custom http") {
-        let endpoint = provider.endpoint.clone().ok_or_else(|| {
-            AppError::Validation("Custom HTTP Email provider requires endpoint".to_string())
-        })?;
-        Ok(Box::new(CustomHttpEmailProvider::from_provider_record(
-            &endpoint,
-            provider.client_secret.as_deref(),
-        )))
+    } else if crate::services::providers::http_delivery::is_custom_http(provider) {
+        Ok(Box::new(CustomHttpEmailProvider::from_record(
+            provider, false,
+        )?))
     } else {
         let host = provider
             .host
@@ -650,18 +690,28 @@ fn email_provider_from_record(
         let from_address =
             crate::services::provider_configuration_service::email_sender(provider, sender)?
                 .to_string();
-        Ok(Box::new(SmtpEmailProvider::from_provider_record(
-            &host,
-            port,
-            &username,
-            &password,
-            &from_address,
-            !provider.disable_ssl,
-        )))
+        Ok(Box::new(
+            SmtpEmailProvider::from_provider_record(
+                &host,
+                port,
+                &username,
+                &password,
+                &from_address,
+                !provider.disable_ssl,
+            )
+            .with_ssl_mode(provider.ssl_mode.as_deref())?,
+        ))
     }
 }
 
 fn sms_provider_from_record(provider: &Provider) -> AppResult<Box<dyn SmsProviderTrait>> {
+    if crate::services::providers::http_delivery::is_custom_http(provider) {
+        return Ok(Box::new(
+            crate::services::providers::http_delivery::CustomHttpSmsProvider::from_record(
+                provider, false,
+            )?,
+        ));
+    }
     let provider_type = provider.provider_type.to_ascii_lowercase();
     if provider_type.contains("twilio") {
         let account_sid = provider.client_id.clone().ok_or_else(|| {
@@ -686,33 +736,26 @@ fn sms_provider_from_record(provider: &Provider) -> AppResult<Box<dyn SmsProvide
             from_number,
         )))
     } else {
-        let api_url = provider
-            .endpoint
-            .clone()
-            .or_else(|| provider.provider_url.clone())
-            .ok_or_else(|| {
-                AppError::Validation("HTTP SMS provider requires endpoint".to_string())
-            })?;
-        let api_key = provider.client_secret.clone().ok_or_else(|| {
-            AppError::Validation("HTTP SMS provider requires client_secret".to_string())
-        })?;
-        let from_number = provider
-            .app_id
-            .clone()
-            .or_else(|| provider.sign_name.clone())
-            .or_else(|| provider.receiver.clone())
-            .unwrap_or_default();
-        Ok(Box::new(crate::services::providers::HttpSmsProvider::new(
-            api_url,
-            api_key,
-            from_number,
-        )))
+        Err(AppError::Validation(
+            "Unsupported SMS provider or missing HTTP endpoint".into(),
+        ))
     }
 }
 
 fn notification_provider_from_record(
     provider: &Provider,
+    allow_private: bool,
+    pool: &PgPool,
 ) -> AppResult<Box<dyn crate::services::providers::NotificationProvider>> {
+    if crate::services::providers::http_delivery::is_custom_http(provider) {
+        return Ok(Box::new(
+            crate::services::providers::custom_http_notify::CustomHttpNotifyProvider::from_record(
+                provider,
+                allow_private,
+            )?
+            .with_pool(pool.clone()),
+        ));
+    }
     let provider_type = normalize_notification_provider_type(&provider.provider_type);
     let token_or_url = match provider_type.as_str() {
         "CustomHTTP" | "Slack" | "Discord" | "DingTalk" | "Lark" | "Teams" => provider

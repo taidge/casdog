@@ -41,25 +41,96 @@ fn update(editor: Cage<String>, key: &str, value: Value, message: Cage<String>) 
 fn read(editor: Cage<String>, key: &str) -> Value {
     serde_json::from_str::<Value>(&editor.get()).unwrap_or(Value::Null)[key].clone()
 }
+fn cloud_directory(editor: Cage<String>) -> bool {
+    matches!(
+        read(editor, "type").as_str(),
+        Some("Azure AD" | "Google Workspace")
+    )
+}
+fn cloud_label(editor: Cage<String>, key: &str) -> Option<&'static str> {
+    match (read(editor, "type").as_str(), key) {
+        (Some("Azure AD"), "host") => Some("Azure tenant ID / domain"),
+        (Some("Azure AD"), "user") => Some("Azure client ID"),
+        (Some("Azure AD"), "password") => Some("Azure client secret"),
+        (Some("Google Workspace"), "host") => Some("Delegated administrator email"),
+        (Some("Google Workspace"), "user") => Some("Service account email"),
+        (Some("Google Workspace"), "password") => Some("Service account JSON"),
+        (Some("Azure AD" | "Google Workspace"), "database") => {
+            Some("Cloud transport options (JSON)")
+        }
+        _ => None,
+    }
+}
+fn custom_delivery(editor: Cage<String>) -> bool {
+    let kind = read(editor, "type")
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "");
+    matches!(
+        read(editor, "category").as_str(),
+        Some("Email" | "Notification")
+    ) && kind.starts_with("customhttp")
+        || read(editor, "category") == "SMS"
+            && matches!(
+                kind.as_str(),
+                "http" | "customhttp" | "customhttpsms" | "generic"
+            )
+}
+pub fn supports_network_approval(value: &Value) -> bool {
+    let kind = value["type"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .replace([' ', '-', '_'], "");
+    match value["category"].as_str() {
+        Some("OAuth") => matches!(kind.as_str(), "custom" | "oidc" | "okta" | "genericoauth"),
+        Some("Email" | "Notification") => kind.starts_with("customhttp"),
+        Some("SMS") => {
+            kind != "twilio"
+                && ["endpoint", "provider_url"]
+                    .iter()
+                    .any(|key| value[*key].as_str().is_some_and(|v| !v.is_empty()))
+        }
+        _ => false,
+    }
+}
 fn provider_field_visible(editor: Cage<String>, key: &str) -> bool {
     let category = read(editor, "category");
     let category = category.as_str().unwrap_or("");
     match key {
-        "custom_auth_url"
-        | "custom_token_url"
-        | "custom_user_info_url"
-        | "custom_logo"
-        | "user_mapping" => category == "OAuth",
-        "method" | "issuer_url" => matches!(category, "OAuth" | "SAML"),
+        "custom_auth_url" | "custom_token_url" | "custom_user_info_url" | "custom_logo" => {
+            category == "OAuth"
+        }
+        "user_mapping" => {
+            category == "OAuth" || custom_delivery(editor) && matches!(category, "Email" | "SMS")
+        }
+        "method" => matches!(category, "OAuth" | "SAML") || custom_delivery(editor),
+        "issuer_url" => {
+            matches!(category, "OAuth" | "SAML")
+                || custom_delivery(editor) && matches!(category, "Email" | "SMS")
+        }
         "client_id2" => matches!(category, "Email" | "OAuth" | "Payment" | "Notification"),
         "client_secret2" => matches!(category, "Email" | "OAuth" | "Payment" | "Notification"),
-        "host" | "port" | "disable_ssl" => matches!(category, "Email" | "LDAP"),
+        "host" | "port" => matches!(category, "Email" | "LDAP"),
+        "disable_ssl" => {
+            category == "LDAP"
+                || category == "Email"
+                    && read(editor, "ssl_mode")
+                        .as_str()
+                        .is_none_or(|v| v.is_empty())
+        }
+        "ssl_mode" => {
+            category == "Email" && matches!(read(editor, "type").as_str(), Some("SMTP" | "SUBMAIL"))
+        }
         "receiver" => matches!(category, "Email" | "SMS" | "Notification"),
         "title" => matches!(category, "Email" | "SMS" | "Notification"),
         "app_id" | "sign_name" | "template_code" => category == "SMS",
         "region_id" => matches!(category, "Storage" | "SMS"),
         "domain" => {
-            category == "Storage" || (category == "OAuth" && read(editor, "type") == "Okta")
+            category == "Storage"
+                || (category == "OAuth"
+                    && matches!(read(editor, "type").as_str(), Some("Okta" | "OIDC")))
         }
         "bucket" | "path_prefix" => category == "Storage",
         "cert" => category == "SAML",
@@ -75,7 +146,9 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
             let key = field.key;
             let name = field.label;
             let accessible = scope.bond(move || {
-                if config.slug == "syncers"
+                if config.slug == "syncers" && cloud_directory(editor) {
+                    cloud_label(editor, key).unwrap_or(name).to_string()
+                } else if config.slug == "syncers"
                     && matches!(
                         read(editor, "type").as_str(),
                         Some("LDAP" | "Active Directory")
@@ -95,6 +168,19 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                         ("client_id2", Some("Email")) => "From address".into(),
                         ("client_secret2", Some("Email")) => "From name".into(),
                         ("region_id", Some("SMS")) => "SMS region".into(),
+                        ("method", Some("Email" | "SMS" | "Notification")) => {
+                            "HTTP request method".into()
+                        }
+                        ("user_mapping", Some("Email" | "SMS")) => {
+                            "HTTP body mapping (JSON)".into()
+                        }
+                        ("issuer_url", Some("Email" | "SMS")) => "HTTP content type".into(),
+                        ("title", Some("Notification")) if custom_delivery(editor) => {
+                            "Notification parameter name".into()
+                        }
+                        ("domain", Some("OAuth")) if read(editor, "type") == "OIDC" => {
+                            "OIDC issuer base".into()
+                        }
                         ("domain", Some("OAuth")) if read(editor, "type") == "Okta" => {
                             "Okta issuer base".into()
                         }
@@ -139,6 +225,34 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                                     .and_then(|index| values.get(index))
                                     .cloned()
                                     .unwrap_or_default();
+                                if config.slug == "syncers"
+                                    && key == "type"
+                                    && matches!(value.as_str(), "Azure AD" | "Google Workspace")
+                                    && read(editor, "type") != value
+                                {
+                                    if let Ok(Value::Object(mut data)) =
+                                        serde_json::from_str::<Value>(&editor.get())
+                                    {
+                                        data.insert("type".into(), json!(value));
+                                        data.insert("is_read_only".into(), json!(true));
+                                        data.insert("table_columns".into(), json!([]));
+                                        for key in [
+                                            "database_type",
+                                            "ssl_mode",
+                                            "table",
+                                            "affiliation_table",
+                                        ] {
+                                            data.insert(key.into(), Value::Null);
+                                        }
+                                        for key in ["host", "user", "password", "database"] {
+                                            data.insert(key.into(), json!(""));
+                                        }
+                                        data.insert("port".into(), json!(443));
+                                        editor.set(crate::api::pretty_json(&Value::Object(data)));
+                                        message.set(String::new());
+                                        return;
+                                    }
+                                }
                                 if config.slug == "syncers"
                                     && key == "type"
                                     && value == "SCIM"
@@ -347,7 +461,9 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                 }
             };
             let title = scope.bond(move || {
-                if config.slug == "syncers"
+                if config.slug == "syncers" && cloud_directory(editor) {
+                    cloud_label(editor, key).unwrap_or(name)
+                } else if config.slug == "syncers"
                     && matches!(
                         read(editor, "type").as_str(),
                         Some("LDAP" | "Active Directory")
@@ -366,6 +482,15 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                         ("client_id2", Some("Email")) => "From address",
                         ("client_secret2", Some("Email")) => "From name",
                         ("region_id", Some("SMS")) => "SMS region",
+                        ("method", Some("Email" | "SMS" | "Notification")) => "HTTP request method",
+                        ("user_mapping", Some("Email" | "SMS")) => "HTTP body mapping (JSON)",
+                        ("issuer_url", Some("Email" | "SMS")) => "HTTP content type",
+                        ("title", Some("Notification")) if custom_delivery(editor) => {
+                            "Notification parameter name"
+                        }
+                        ("domain", Some("OAuth")) if read(editor, "type") == "OIDC" => {
+                            "OIDC issuer base"
+                        }
                         ("domain", Some("OAuth")) if read(editor, "type") == "Okta" => {
                             "Okta issuer base"
                         }
@@ -395,6 +520,15 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                                         "affiliation_table",
                                     ]
                                     .contains(&key))
+                                    || (cloud_directory(editor)
+                                        && [
+                                            "database_type",
+                                            "ssl_mode",
+                                            "port",
+                                            "table",
+                                            "affiliation_table",
+                                        ]
+                                        .contains(&key))
                                     || (directory
                                         && ["database_type", "affiliation_table", "ssl_mode"]
                                             .contains(&key)));
@@ -410,14 +544,21 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
         let structured = stack(widgets);
         stack((
             stack((
+            stack((
             when(scope.bond(move || config.slug=="syncers" && read(editor,"type")=="SCIM"), || label("SCIM reads users from Host/Users. Enter an HTTPS base URL, or local HTTP for testing. Leave Username blank and put a Bearer token in Password; enter both for Basic authentication. Empty mappings use standard SCIM fields. Only read-only synchronization is supported.")),
+            when(scope.bond(move || config.slug=="syncers" && read(editor,"type")=="Azure AD"),||label("Azure AD uses your tenant ID or domain, application client ID and client secret to read Microsoft Graph. Grant the application directory read permissions. Synchronization is read-only and preserves local passwords, MFA and account links. Empty mappings use the standard directory fields. Cloud transport options may override token_endpoint and api_base; internal endpoints require global administrator review and approval.")),
+            when(scope.bond(move || config.slug=="syncers" && read(editor,"type")=="Google Workspace"),||label("Google Workspace requires a service account JSON key with domain-wide delegation and a delegated administrator email. Service account email may be empty or must match client_email in the key. Users, groups and memberships are fully read before local changes apply. Managed groups preserve manual memberships; remote administrators do not become local administrators. Cloud transport options may set api_base and customer. Internal endpoints, including a private token_uri in the key, require separate global approval.")),
             when(scope.bond(move || config.slug=="syncers" && matches!(read(editor,"type").as_str(),Some("LDAP"|"Active Directory"))),||label("Directory synchronization is read-only. Host accepts ldap:// or ldaps://; use Base DN and an optional LDAP filter, not SQL database/table names. Empty mappings use directory defaults. Active Directory tracks objectGUID across DN/OU/name changes and reads the account-disabled bit. Use starttls with ldap:// or ldaps:// for encrypted connections.")),
+            )),
             when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="Storage"),||label("Storage: Bucket is the container/bucket; Region is used by S3/MinIO. Domain takes precedence over Endpoint as the public/CDN base for Azure Blob and Google Cloud Storage. For Azure Blob and Google Cloud Storage, Domain's path and Path prefix become part of the stored object key. MinIO/S3 Endpoint is the storage API origin. Without a public base, resource access uses a fresh signed URL or authenticated download. Azure Client ID is the account name and Client secret is its base64 account key. Google Cloud Storage Client secret is the full service_account JSON, including private_key and token_uri; keep it out of Content. Metadata may contain the advanced storageApiEndpoint API-origin override; this is separate from the public/CDN base.")),
             when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="OAuth"),||label("Custom OAuth uses the authorization, token and user info URLs. Scopes are sent during sign-in and account linking. User mapping maps id, username, displayName, email, emailVerified, phone, phoneVerified or avatarUrl to dot-separated response paths, for example {\"id\":\"data.employeeId\",\"displayName\":\"data.name\"}. Changing identity configuration requires starting a new sign-in.")),
             when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="OAuth" && read(editor,"type")=="Okta"),||label("Okta issuer base is the complete authorization-server URL, including any path such as https://example.okta.com/oauth2/default. The provider appends /v1/authorize, /v1/token and /v1/userinfo. Issuer URL is a fallback when the issuer base is empty.")),
-            when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="Email"),||label("From address uses the secondary client ID; From name uses the secondary client secret field as a public display name. SMTP Host and Port select the mail server. Port 465 uses implicit TLS; other ports require STARTTLS by default. Allow plaintext SMTP permits a trusted relay without STARTTLS, while still upgrading to TLS whenever the relay offers STARTTLS.")),
+            when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="OAuth" && read(editor,"type")=="WeChat"),||label("WeChat website login uses Client ID and Client secret. In the WeChat browser, Secondary client ID and Secondary client secret are the official-account credentials. Configure both before mobile sign-in. The selected account remains bound to that login attempt across callback and MFA. A changed credential requires starting sign-in again; accounts are never linked by display name or email.")),
+            when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="Email"),||label("From address uses the secondary client ID; From name uses the secondary client secret field as a public display name. SMTP Host and Port select the mail server. Legacy secure defaults use implicit TLS on port 465 and require STARTTLS elsewhere; the legacy plaintext toggle permits a relay without STARTTLS. Explicit Enable requires implicit TLS on any port. Auto chooses implicit TLS on 465 and optional STARTTLS elsewhere; Disable uses optional STARTTLS on all ports. Auto and Disable allow plaintext when the relay has no STARTTLS. TLS certificate verification remains enabled.")),
+            when(scope.bond(move || config.slug=="providers" && custom_delivery(editor)),||label("Custom HTTP: leave Method empty to retain the existing JSON protocol. An explicit method enables the Casdoor protocol. Email supports GET/POST/PUT/DELETE; HTTP content type is application/json or application/x-www-form-urlencoded (default). Body mapping renames request fields. Notification supports GET/POST and uses Notification parameter name for the content field, plus recipient. HTTP headers are sent to the configured endpoint and remain masked. Internal endpoints require separate global administrator approval; configuration changes require approval again.")),
+            when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="OAuth" && read(editor,"type")=="OIDC"),||label("OIDC issuer base takes precedence over Issuer URL. The server discovers authorization, token and user info endpoints from the issuer metadata; explicit URLs override discovered endpoints. The discovered issuer must match. Providers publishing JWKS can return a signed ID token without UserInfo; signatures, audience and a login-bound nonce are verified. When UserInfo is also returned, its subject must match. Authentication method accepts client_secret_basic, client_secret_post or none; leave it empty to use discovery. An unverified token is never accepted as identity.")),
             when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="SMS"),||label("Twilio uses the client ID as account SID and client secret as auth token. Sender uses application ID, then signature, then default receiver. HTTP SMS uses Endpoint and the client secret API key.")),
-            when(scope.bond(move || config.slug=="providers"),||label("Saved secrets are masked. Leave a secret blank to retain it; enter a new value to rotate it. Use the explicit clear controls to remove saved credentials. Metadata shows only safe or masked configuration; JSON objects merge by key and {} retains existing keys. Do not place credentials in public text fields.")),
+            when(scope.bond(move || config.slug=="providers"),||label("Saved secrets are masked. Leave a secret blank to retain it; enter a new value to rotate it. Use the explicit clear controls to remove saved credentials. Metadata shows only safe or masked configuration; JSON objects merge by key and {} retains existing keys. Webhook URLs are masked; *** preserves the saved URL. Enter a replacement explicitly to change it. Do not place credentials in public text fields.")),
             when(scope.bond(move || config.slug=="organizations"),||label("Kerberos uses your browser's integrated authentication. Configure the realm, KDC host and HTTP service plus a base64 MIT keytab. The masked *** value preserves the saved keytab. Clear all four fields together to disable it.")),
             )),
             when(scope.bond(move || config.slug=="syncers" && matches!(read(editor,"type").as_str(),Some("LDAP"|"Active Directory"))),move ||widget(move |scope| {
@@ -1555,6 +1696,10 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                         label: "Okta".into(),
                     },
                     SelectOption {
+                        value: "OIDC".into(),
+                        label: "OIDC".into(),
+                    },
+                    SelectOption {
                         value: "WeChat".into(),
                         label: "WeChat".into(),
                     },
@@ -1743,6 +1888,29 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 key: "disable_ssl",
                 label: "Disable implicit TLS",
                 kind: FieldKind::Toggle,
+                required: false,
+            },
+            FieldDef {
+                key: "ssl_mode",
+                label: "SMTP SSL mode",
+                kind: FieldKind::Select(vec![
+                    SelectOption {
+                        value: "".into(),
+                        label: "Legacy secure defaults".into(),
+                    },
+                    SelectOption {
+                        value: "Auto".into(),
+                        label: "Auto (465 implicit, otherwise optional STARTTLS)".into(),
+                    },
+                    SelectOption {
+                        value: "Enable".into(),
+                        label: "Enable (require implicit TLS on this port)".into(),
+                    },
+                    SelectOption {
+                        value: "Disable".into(),
+                        label: "Disable implicit TLS (optional STARTTLS)".into(),
+                    },
+                ]),
                 required: false,
             },
             FieldDef {
@@ -2080,6 +2248,14 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                     SelectOption {
                         value: "SCIM".into(),
                         label: "SCIM".into(),
+                    },
+                    SelectOption {
+                        value: "Azure AD".into(),
+                        label: "Azure AD".into(),
+                    },
+                    SelectOption {
+                        value: "Google Workspace".into(),
+                        label: "Google Workspace".into(),
                     },
                 ]),
                 required: true,

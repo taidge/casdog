@@ -131,76 +131,74 @@ impl EmailProviderTrait for SendGridEmailProvider {
     }
 }
 
-/// Custom HTTP email provider
-/// POSTs to a configurable URL with JSON payload
+/// Custom HTTP email: method-empty JSON compatibility or explicit upstream protocol.
 pub struct CustomHttpEmailProvider {
-    client: Client,
     endpoint_url: String,
     api_key: Option<String>,
+    record: Option<crate::models::Provider>,
+    allow_private: bool,
+    pool: Option<sqlx::PgPool>,
 }
-
-#[derive(Debug, Serialize)]
-struct CustomEmailRequest {
-    to: String,
-    subject: String,
-    body: String,
-    timestamp: String,
-}
-
 impl CustomHttpEmailProvider {
-    /// Create a new custom HTTP email provider
     pub fn new(endpoint_url: String, api_key: Option<String>) -> Self {
         Self {
-            client: Client::new(),
             endpoint_url,
             api_key,
+            record: None,
+            allow_private: false,
+            pool: None,
         }
     }
-
-    /// Create provider from database record fields
     pub fn from_provider_record(endpoint_url: &str, api_key: Option<&str>) -> Self {
-        Self::new(endpoint_url.to_string(), api_key.map(|s| s.to_string()))
+        Self::new(endpoint_url.into(), api_key.map(str::to_owned))
+    }
+    pub fn from_record(record: &crate::models::Provider, allow_private: bool) -> AppResult<Self> {
+        super::http_delivery::HttpDelivery::from_record(record, allow_private)?;
+        Ok(Self {
+            endpoint_url: String::new(),
+            api_key: None,
+            record: Some(record.clone()),
+            allow_private,
+            pool: None,
+        })
+    }
+    pub fn with_private_network_access(mut self, allow: bool) -> Self {
+        self.allow_private = allow;
+        self
+    }
+    pub fn with_pool(mut self, pool: sqlx::PgPool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+    pub async fn send_many(
+        &self,
+        to: &[String],
+        subject: &str,
+        body: &str,
+        sender_name: Option<&str>,
+    ) -> AppResult<()> {
+        let delivery = if let Some(record) = &self.record {
+            super::http_delivery::HttpDelivery::from_record(record, self.allow_private)?
+        } else {
+            super::http_delivery::HttpDelivery::legacy(
+                "Email",
+                &self.endpoint_url,
+                self.api_key.as_deref(),
+                None,
+                self.allow_private,
+            )?
+        };
+        let delivery = if let Some(pool) = &self.pool {
+            delivery.with_pool(pool.clone())
+        } else {
+            delivery
+        };
+        delivery.email(to, subject, body, sender_name).await
     }
 }
-
 #[async_trait]
 impl EmailProviderTrait for CustomHttpEmailProvider {
     async fn send_email(&self, to: &str, subject: &str, body: &str) -> AppResult<()> {
-        let request = CustomEmailRequest {
-            to: to.to_string(),
-            subject: subject.to_string(),
-            body: body.to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-
-        let mut req_builder = self
-            .client
-            .post(&self.endpoint_url)
-            .header("Content-Type", "application/json")
-            .json(&request);
-
-        // Add API key as Bearer token if provided
-        if let Some(ref api_key) = self.api_key {
-            req_builder = req_builder.bearer_auth(api_key);
-        }
-
-        let response = req_builder
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("Custom HTTP email request failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(AppError::Internal(format!(
-                "Custom HTTP email API failed with status {}: {}",
-                status, body_text
-            )));
-        }
-
-        Ok(())
+        self.send_many(&[to.into()], subject, body, None).await
     }
 }

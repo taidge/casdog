@@ -334,6 +334,7 @@ diesel::table! {
         host -> Nullable<VarChar>,
         port -> Nullable<Integer>,
         disable_ssl -> Bool,
+        ssl_mode -> Nullable<Text>,
         title -> Nullable<VarChar>,
         content -> Nullable<Text>,
         receiver -> Nullable<Text>,

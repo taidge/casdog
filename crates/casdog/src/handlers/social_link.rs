@@ -193,11 +193,21 @@ pub async fn begin_link(
         .or(payload.provider)
         .ok_or_else(|| AppError::Validation("Provider required".into()))?;
     let provider = social_login::provider_for_application(&pool, &app, &name).await?;
-    let oauth = social_login::oauth_provider(&provider)?;
-    proof["provider_stamp"] =
-        json!(crate::services::providers::oauth_provider::configuration_stamp(&provider));
-    proof["network_binding"] =
-        json!(social_login::network_binding(&mut *pool.acquire().await?, &provider, false).await?);
+    let user_agent = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let transport = depot
+        .obtain::<std::sync::Arc<crate::services::wechat_flow::WeChatTestTransport>>()
+        .ok()
+        .cloned();
+    let (oauth, context) =
+        social_login::prepare_oauth(&pool, &provider, user_agent, transport.as_deref()).await?;
+    proof
+        .as_object_mut()
+        .unwrap()
+        .extend(context.as_object().unwrap().clone());
     let origin = social_login::public_origin()?;
     let redirect_uri = format!(
         "{origin}/api/auth/{}/callback",
@@ -210,10 +220,10 @@ pub async fn begin_link(
         organization: app.organization,
         redirect_uri: redirect_uri.clone(),
         purpose: "link".into(),
-        context: proof,
+        context: proof.clone(),
     };
     let (state, browser) = social_state_service::create_flow(&pool, &flow).await?;
-    let url = oauth.get_auth_url(&redirect_uri, &state, None);
+    let url = social_login::authorization_url(oauth.as_ref(), &proof, &redirect_uri, &state)?;
     social_login::set_cookie(
         res,
         "casdog_oauth_browser",
@@ -379,7 +389,10 @@ async fn unlink_impl(
         .fetch_all(&mut *tx)
         .await?;
     let alternative = all.iter().any(|other| {
-        if other.id == provider.id || social_login::oauth_provider(other).is_err() {
+        if other.id == provider.id
+            || crate::services::providers::oauth_provider::validate_oauth_configuration(other)
+                .is_err()
+        {
             return false;
         }
         let configured = app

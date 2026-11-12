@@ -399,6 +399,7 @@ fn provider_routes() -> Router {
                 .put(provider::update_provider)
                 .delete(provider::delete_provider)
                 .push(Router::with_path("network-approval")
+                    .hoop(crate::handlers::provider_network::no_store_hoop)
                     .get(crate::handlers::provider_network::get)
                     .post(crate::handlers::provider_network::approve)
                     .delete(crate::handlers::provider_network::revoke)),
@@ -497,6 +498,11 @@ fn syncer_routes() -> Router {
     Router::with_path("syncers")
         .get(syncer::list_syncers)
         .post(syncer::create_syncer)
+        .push(Router::with_path("{id}/network-approval")
+                    .hoop(crate::handlers::provider_network::no_store_hoop)
+            .get(crate::handlers::syncer_network::get)
+            .post(crate::handlers::syncer_network::approve)
+            .delete(crate::handlers::syncer_network::revoke))
         .push(Router::with_path("{id}/run").post(syncer::run_syncer))
         .push(
             Router::with_path("{id}")
@@ -917,6 +923,7 @@ fn api_router_for_openapi() -> Router {
                             .put(provider::update_provider)
                             .delete(provider::delete_provider)
                             .push(Router::with_path("network-approval")
+                    .hoop(crate::handlers::provider_network::no_store_hoop)
                                 .get(crate::handlers::provider_network::get)
                                 .post(crate::handlers::provider_network::approve)
                                 .delete(crate::handlers::provider_network::revoke)),
@@ -1007,6 +1014,11 @@ fn api_router_for_openapi() -> Router {
                 Router::with_path("syncers")
                     .get(syncer::list_syncers)
                     .post(syncer::create_syncer)
+                    .push(Router::with_path("{id}/network-approval")
+                    .hoop(crate::handlers::provider_network::no_store_hoop)
+                        .get(crate::handlers::syncer_network::get)
+                        .post(crate::handlers::syncer_network::approve)
+                        .delete(crate::handlers::syncer_network::revoke))
                     .push(Router::with_path("{id}/run").post(syncer::run_syncer))
                     .push(
                         Router::with_path("{id}")

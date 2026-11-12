@@ -33,6 +33,7 @@ pub struct Provider {
     pub host: Option<String>,
     pub port: Option<i32>,
     pub disable_ssl: bool,
+    pub ssl_mode: Option<String>,
     pub title: Option<String>,
     pub content: Option<String>,
     pub receiver: Option<String>,
@@ -101,6 +102,8 @@ pub struct CreateProviderRequest {
     pub port: Option<i32>,
     #[serde(alias = "disableSsl")]
     pub disable_ssl: Option<bool>,
+    #[serde(alias = "sslMode")]
+    pub ssl_mode: Option<String>,
     pub title: Option<String>,
     pub receiver: Option<String>,
     pub endpoint: Option<String>,
@@ -175,6 +178,8 @@ pub struct UpdateProviderRequest {
     pub port: Option<i32>,
     #[serde(alias = "disableSsl")]
     pub disable_ssl: Option<bool>,
+    #[serde(alias = "sslMode")]
+    pub ssl_mode: Option<String>,
     pub title: Option<String>,
     pub receiver: Option<String>,
     pub endpoint: Option<String>,
@@ -234,6 +239,8 @@ pub struct ProviderResponse {
     pub host: Option<String>,
     pub port: Option<i32>,
     pub disable_ssl: Option<bool>,
+    #[serde(alias = "sslMode")]
+    pub ssl_mode: Option<String>,
     pub title: Option<String>,
     pub receiver: Option<String>,
     pub endpoint: Option<String>,

@@ -553,6 +553,14 @@ fn render_email_verification_content(
 }
 
 fn render_sms_verification_content(provider: &crate::models::Provider, code: &str) -> String {
+    if crate::services::providers::http_delivery::is_custom_http(provider)
+        && provider
+            .method
+            .as_deref()
+            .is_some_and(|method| !method.trim().is_empty())
+    {
+        return code.to_string();
+    }
     let template = provider
         .template_code
         .as_deref()

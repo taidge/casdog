@@ -2,7 +2,7 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::models::{CreateGroupRequest, Group, GroupResponse, UpdateGroupRequest};
 
 pub struct GroupService;
@@ -122,16 +122,60 @@ impl GroupService {
     }
 
     pub async fn delete(pool: &PgPool, id: &str) -> AppResult<()> {
-        sqlx::query("DELETE FROM groups WHERE id = $1")
+        let mut tx = pool.begin().await?;
+        // Cloud reconciliation holds Syncer before any users. Do not lock the
+        // Group first: a running importer can still need its member rows.
+        let _:Vec<String>=sqlx::query_scalar("SELECT s.id FROM syncers s JOIN syncer_group_links l ON l.syncer_id=s.id WHERE l.group_id=$1 ORDER BY s.id FOR UPDATE OF s")
             .bind(id)
-            .execute(pool)
+            .fetch_all(&mut *tx)
             .await?;
+        let group: Option<(String, String)> =
+            sqlx::query_as("SELECT owner,name FROM groups WHERE id=$1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((owner, name)) = group else {
+            tx.commit().await?;
+            return Ok(());
+        };
+        let qualified = format!("{owner}/{name}");
+        let users:Vec<String>=sqlx::query_scalar("SELECT u.id FROM users u WHERE u.owner=$2 AND (CASE WHEN jsonb_typeof(u.groups)='array' THEN (u.groups ? $3 OR u.groups ? $4) ELSE false END OR EXISTS(SELECT 1 FROM user_groups ug WHERE ug.user_id=u.id AND ug.group_id=$1) OR EXISTS(SELECT 1 FROM syncer_group_memberships m WHERE m.user_id=u.id AND m.group_id=$1)) ORDER BY u.id FOR UPDATE OF u")
+            .bind(id).bind(&owner).bind(&qualified).bind(&name).fetch_all(&mut *tx).await?;
+        // jsonb subtraction preserves unknown array elements exactly; malformed
+        // legacy non-array JSON and every foreign tenant remain untouched.
+        sqlx::query("UPDATE users SET groups=(groups-$3::text)-$4::text,updated_at=clock_timestamp() WHERE id=ANY($1) AND owner=$2 AND jsonb_typeof(groups)='array' AND (groups ? $3 OR groups ? $4)")
+            .bind(&users).bind(&owner).bind(&qualified).bind(&name).execute(&mut *tx).await?;
+        let deleted = sqlx::query("DELETE FROM groups WHERE id=$1 AND owner=$2 AND name=$3")
+            .bind(id)
+            .bind(&owner)
+            .bind(&name)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if deleted == 0
+            && sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM groups WHERE id=$1)")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?
+        {
+            return Err(AppError::Conflict(
+                "Group changed during deletion; retry with its current identity".into(),
+            ));
+        }
+        tx.commit().await?;
         Ok(())
     }
 
     pub async fn add_user_to_group(pool: &PgPool, user_id: &str, group_id: &str) -> AppResult<()> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
+        let mut tx = pool.begin().await?;
+        // Directory reconciliation uses this same user -> ledger -> pair
+        // ordering, so a concurrent manual add cannot lose its intent.
+        sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?;
 
         sqlx::query(
             r#"INSERT INTO user_groups (id, user_id, group_id, created_at)
@@ -141,8 +185,15 @@ impl GroupService {
         .bind(user_id)
         .bind(group_id)
         .bind(now)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+        // An explicit administrator add preserves the membership even if a
+        // directory previously created the same pair. Row identity alone
+        // cannot express this later manual ownership of an existing pair.
+        sqlx::query("UPDATE syncer_group_memberships SET manual_preserved=true WHERE user_id=$1 AND group_id=$2")
+            .bind(user_id).bind(group_id).execute(&mut *tx).await?;
+        tx.commit().await?;
 
         Ok(())
     }

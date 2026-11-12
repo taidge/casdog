@@ -1,4 +1,6 @@
 //! Durable social sign-in second-factor regressions; requires migrations 001-019.
+#[path = "support/provider_network.rs"]
+mod fixture_network;
 use casdog::{
     config::AppConfig,
     diesel_pool::create_diesel_pool,
@@ -491,6 +493,7 @@ async fn social_mfa_sender_uses_enrolled_contact_and_scoped_provider() {
     });
     sqlx::query("INSERT INTO providers(id,owner,name,display_name,category,type,endpoint) VALUES($1,$2,'mail','Mail','Email','Custom HTTP',$3)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&f.owner).bind(endpoint).execute(&f.pool).await.unwrap();
+    fixture_network::approve_owner(&f.pool, &f.owner).await;
     let key = f.completion().await;
     // A tenant default provider is insufficient: the application must explicitly select it.
     let send = || {

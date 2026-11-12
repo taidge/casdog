@@ -89,26 +89,52 @@ pub fn page(app: AppState, config: ResourceConfig) -> Element {
                     sapid::checkbox().label("Clear all saved HTTP headers").checked(clear_headers).on_checked_change(move |value| clear_headers.set(value)),
                 )).build(scope)
             })),
-            when(scope.bond(move || config.slug=="providers" && selected.get().is_some() && app.account.get().is_some_and(|account|account.owner=="built-in" && account.is_admin) && serde_json::from_str::<Value>(&editor.get()).ok().is_some_and(|value|value["category"]=="OAuth")), move || widget(move |scope| {
+            when(scope.bond(move || config.slug=="providers" && selected.get().is_some() && app.account.get().is_some_and(|account|account.owner=="built-in" && account.is_admin) && serde_json::from_str::<Value>(&editor.get()).ok().is_some_and(|value|crate::components::resource_form::supports_network_approval(&value))), move || widget(move |scope| {
                 stack((
-                    label("Private OAuth endpoints require explicit review by a global administrator. Approve only trusted internal identity providers. Saving a changed configuration requires reviewing it again."),
-                    action(scope,"Load private OAuth approval",busy,message,move || async move {
-                        let id=selected.get().ok_or("Select a saved OAuth provider first.")?;
+                    label("Private provider endpoints require explicit review by a global administrator. Approve only trusted internal endpoints after reviewing the effective credentials and transport configuration. Saving a changed configuration requires reviewing it again."),
+                    action(scope,"Load private provider approval",busy,message,move || async move {
+                        let id=selected.get().ok_or("Select a saved provider first.")?;
                         let value=app.request("GET",&format!("/api/providers/{}/network-approval",query_component(&id)),None).await?;
-                        network_status.set(if value["allow_private"]==true {"Private OAuth endpoints are approved for the saved configuration."} else if value["stale"]==true {"The saved OAuth configuration changed. Review its endpoints before approving again."} else {"Private OAuth endpoints are not approved for the saved configuration."}.into());
+                        network_status.set(if value["allow_private"]==true {"Private provider endpoints are approved for the saved configuration."} else if value["stale"]==true {"The saved provider configuration changed. Review its endpoints before approving again."} else {"Private provider endpoints are not approved for the saved configuration."}.into());
                         Ok(String::new())
                     }),
-                    action(scope,"Approve private OAuth endpoints",busy,message,move || async move {
-                        let id=selected.get().ok_or("Select a saved OAuth provider first.")?;
+                    action(scope,"Approve private provider endpoints",busy,message,move || async move {
+                        let id=selected.get().ok_or("Select a saved provider first.")?;
                         app.request("POST",&format!("/api/providers/{}/network-approval",query_component(&id)),Some(serde_json::json!({"allow_private":true}))).await?;
-                        network_status.set("Private OAuth endpoints are approved for the saved configuration.".into());
-                        Ok("Private OAuth endpoints approved.".into())
+                        network_status.set("Private provider endpoints are approved for the saved configuration.".into());
+                        Ok("Private provider endpoints approved.".into())
                     }),
-                    action(scope,"Revoke private OAuth approval",busy,message,move || async move {
-                        let id=selected.get().ok_or("Select a saved OAuth provider first.")?;
+                    action(scope,"Revoke private provider approval",busy,message,move || async move {
+                        let id=selected.get().ok_or("Select a saved provider first.")?;
                         app.request("DELETE",&format!("/api/providers/{}/network-approval",query_component(&id)),None).await?;
-                        network_status.set("Private OAuth endpoints are not approved for the saved configuration.".into());
-                        Ok("Private OAuth endpoint approval revoked.".into())
+                        network_status.set("Private provider endpoints are not approved for the saved configuration.".into());
+                        Ok("Private provider endpoint approval revoked.".into())
+                    }),
+                    notice(network_status),
+                )).build(scope)
+            })),
+            when(scope.bond(move || config.slug=="syncers" && selected.get().is_some() && app.account.get().is_some_and(|account|account.owner=="built-in" && account.is_admin) && serde_json::from_str::<Value>(&editor.get()).ok().is_some_and(|value|matches!(value["type"].as_str(),Some("Azure AD"|"Google Workspace")))),move||widget(move|scope| {
+                stack((
+                    label("Private cloud-directory endpoints require explicit review by a global administrator. Review both token and directory API endpoints; changed credentials or options require approval again."),
+                    action(scope,"Load directory network approval",busy,message,move||async move {
+                        let id=selected.get().ok_or("Select a saved cloud directory first.")?;
+                        let value=app.request("GET",&format!("/api/syncers/{}/network-approval",query_component(&id)),None).await?;
+                        let status=if value["allow_private"]==true {"Private directory endpoints are approved for the saved configuration."}else if value["stale"]==true {"The saved directory configuration changed. Review its endpoints before approving again."}else{"Private directory endpoints are not approved for the saved configuration."};
+                        let targets=value["target_origins"].as_array().map(|values|values.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                        network_status.set(format!("{status} Targets: {targets}"));
+                        Ok(String::new())
+                    }),
+                    action(scope,"Approve private directory endpoints",busy,message,move||async move {
+                        let id=selected.get().ok_or("Select a saved cloud directory first.")?;
+                        app.request("POST",&format!("/api/syncers/{}/network-approval",query_component(&id)),Some(serde_json::json!({"allow_private":true}))).await?;
+                        network_status.set("Private directory endpoints are approved for the saved configuration.".into());
+                        Ok("Private directory endpoints approved.".into())
+                    }),
+                    action(scope,"Revoke directory network approval",busy,message,move||async move {
+                        let id=selected.get().ok_or("Select a saved cloud directory first.")?;
+                        app.request("DELETE",&format!("/api/syncers/{}/network-approval",query_component(&id)),None).await?;
+                        network_status.set("Private directory endpoints are not approved for the saved configuration.".into());
+                        Ok("Private directory network approval revoked.".into())
                     }),
                     notice(network_status),
                 )).build(scope)

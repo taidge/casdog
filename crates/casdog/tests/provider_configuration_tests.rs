@@ -650,6 +650,12 @@ async fn native_notification_headers_mask_reorder_and_rotation_are_used_by_real_
     )
     .await;
     let dispatcher = ProviderDispatchService::new(f.pool.clone());
+    f.ok(
+        "POST",
+        &format!("/api/providers/{id}/network-approval"),
+        Some(json!({"allow_private":true})),
+    )
+    .await;
     dispatcher
         .send_notification(
             Some(&format!("{}/notify", f.owner)),
@@ -671,6 +677,12 @@ async fn native_notification_headers_mask_reorder_and_rotation_are_used_by_real_
         "PUT",
         &path,
         Some(json!({"metadata":[["X-One","rotated-real"]]})),
+    )
+    .await;
+    f.ok(
+        "POST",
+        &format!("/api/providers/{id}/network-approval"),
+        Some(json!({"allow_private":true})),
     )
     .await;
     dispatcher
@@ -697,6 +709,12 @@ async fn native_notification_headers_mask_reorder_and_rotation_are_used_by_real_
     let get = f.ok("GET", &path, None).await;
     assert_eq!(get["client_secret2"], "***");
     f.ok("PUT", &path, Some(get)).await;
+    f.ok(
+        "POST",
+        &format!("/api/providers/{id}/network-approval"),
+        Some(json!({"allow_private":true})),
+    )
+    .await;
     dispatcher
         .send_notification(
             Some(&format!("{}/notify", f.owner)),
@@ -713,6 +731,12 @@ async fn native_notification_headers_mask_reorder_and_rotation_are_used_by_real_
         assert!(!requests[2].0.contains_key("x-one"));
     }
     f.ok("PUT", &path, Some(json!({"client_secret2":""}))).await;
+    f.ok(
+        "POST",
+        &format!("/api/providers/{id}/network-approval"),
+        Some(json!({"allow_private":true})),
+    )
+    .await;
     dispatcher
         .send_notification(
             Some(&format!("{}/notify", f.owner)),
@@ -743,6 +767,12 @@ async fn native_sms_sender_receiver_and_credential_survive_masked_edits_and_real
         "PUT",
         &format!("/api/providers/{id}"),
         Some(provider.clone()),
+    )
+    .await;
+    f.ok(
+        "POST",
+        &format!("/api/providers/{id}/network-approval"),
+        Some(json!({"allow_private":true})),
     )
     .await;
     ProviderDispatchService::new(f.pool.clone())

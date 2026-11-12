@@ -40,6 +40,8 @@ async function main() {
     let delayProfile=false,releaseProfile;
     const profileGate=new Promise(resolve=>{releaseProfile=resolve;});
     let socialPending=false;
+    let providerRace=false,releaseDefaultProviders;
+    const defaultProvidersGate=new Promise(resolve=>{releaseDefaultProviders=resolve;});
     let links=[],consents=[],sessions=[{id:'session-1',name:'Browser session'}];
     let integrations=[];
     let themeInstalled=false;
@@ -133,7 +135,14 @@ async function main() {
         return reply(route,{pending:false});
       }
       if(endpoint.endsWith('/send-code')||endpoint.endsWith('/cancel'))return reply(route,{status:'ok'});
-      if(endpoint==='/api/auth/providers')return reply(route,{status:'ok',data:[{name:'mock',display_name:'Mock provider'}]});
+      if(endpoint==='/api/auth/providers'){
+        if(providerRace&&url.searchParams.get('application')==='admin/app-built-in'){
+          await defaultProvidersGate;
+          return reply(route,{status:'ok',data:[]});
+        }
+        if(providerRace&&url.searchParams.get('application')==='current-application')return reply(route,{status:'ok',data:[{name:'current-provider',display_name:'Current application provider'}]});
+        return reply(route,{status:'ok',data:[{name:'mock',display_name:'Mock provider'}]});
+      }
       if(endpoint==='/api/auth/links')return reply(route,{status:'ok',data:links});
       if(endpoint==='/api/auth/mock') {socialPending=true;return reply(route,{url:origin+'/?social=complete'});}
       if(endpoint==='/api/auth/mock/link'){links=[{provider_id:'provider-1',provider:'mock',display_name:'Mock provider'}];return reply(route,{url:origin+'/?social=linked'});}
@@ -163,6 +172,19 @@ async function main() {
     });
     await page.goto(origin);
     await page.getByRole('heading',{name:'Identity and access management'}).waitFor();
+    providerRace=true;
+    const defaultProvidersStarted=page.waitForRequest(request=>new URL(request.url()).pathname==='/api/auth/providers'&&new URL(request.url()).searchParams.get('application')==='admin/app-built-in');
+    await page.getByRole('button',{name:'Sign in',exact:true}).first().click();
+    await defaultProvidersStarted;
+    await fill(page.getByRole('textbox',{name:'Application',exact:true}),'current-application');
+    await page.getByRole('button',{name:'Sign in with Current application provider',exact:true}).waitFor();
+    const staleProviders=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/auth/providers'&&new URL(response.url()).searchParams.get('application')==='admin/app-built-in');
+    releaseDefaultProviders();
+    await (await staleProviders).finished();
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assert.equal(await page.getByRole('button',{name:'Sign in with Current application provider',exact:true}).count(),1,'A late default-application response must not replace the selected application providers');
+    providerRace=false;
+    await page.getByRole('button',{name:'Dashboard',exact:true}).first().click();
     await page.getByRole('button',{name:'Marketplace',exact:true}).click();
     await page.getByText('Sign in as a tenant administrator to manage integrations.',{exact:true}).waitFor();
     assert.equal(calls.filter(c=>c.endpoint==='/api/get-integrations').length,0);
@@ -418,6 +440,21 @@ async function main() {
     const scimWrite=calls.filter(call=>call.endpoint==='/api/syncers'&&call.method==='POST').at(-1).body;
     assert.equal(scimWrite.type,'SCIM');assert.equal(scimWrite.user,'');assert.equal(scimWrite.password,'fixture-scim-token');
     assert.deepEqual(scimWrite.table_columns,[]);assert.equal(scimWrite.is_read_only,true);
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'Azure AD'});
+    await fill(page.getByRole('textbox',{name:'Azure tenant ID / domain',exact:true}),'tenant.example.test');
+    await fill(page.getByRole('textbox',{name:'Azure client ID',exact:true}),'azure-client');
+    await fill(page.getByLabel('Azure client secret',{exact:true}),'azure-secret');
+    await fill(page.getByRole('textbox',{name:'Cloud transport options (JSON)',exact:true}),'{"api_base":"https://graph.microsoft.com/v1.0"}');
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+    const azureWrite=calls.filter(c=>c.endpoint==='/api/syncers'&&c.method==='POST').at(-1).body;
+    assert.equal(azureWrite.type,'Azure AD');assert.equal(azureWrite.user,'azure-client');assert.equal(azureWrite.password,'azure-secret');assert.equal(azureWrite.is_read_only,true);assert.equal(azureWrite.ssl_mode,null);assert.equal(azureWrite.table,null);assert.deepEqual(azureWrite.table_columns,[]);
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'Google Workspace'});
+    await fill(page.getByRole('textbox',{name:'Delegated administrator email',exact:true}),'admin@workspace.test');
+    await fill(page.getByRole('textbox',{name:'Service account email',exact:true}),'service@workspace.test');
+    await fill(page.getByLabel('Service account JSON',{exact:true}),'{"type":"service_account","private_key":"fixture-key"}');
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+    const googleWrite=calls.filter(c=>c.endpoint==='/api/syncers'&&c.method==='POST').at(-1).body;
+    assert.equal(googleWrite.type,'Google Workspace');assert.equal(googleWrite.host,'admin@workspace.test');assert.equal(googleWrite.user,'service@workspace.test');assert.equal(googleWrite.is_read_only,true);
     await page.getByRole('button',{name:'Restore users and MFA',exact:true}).first().click();
     await page.getByRole('heading',{name:'Restore users and MFA',exact:true}).waitFor();
     const chooseBackup=async value=>{
@@ -504,6 +541,11 @@ async function main() {
     await fill(page.getByRole('textbox',{name:'Okta issuer base',exact:true}),'https://example.okta.com/oauth2/default');
     await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
     assert.equal(calls.filter(c=>c.endpoint==='/api/providers'&&c.method==='POST').at(-1).body.domain,'https://example.okta.com/oauth2/default');
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'OIDC'});
+    await fill(page.getByRole('textbox',{name:'OIDC issuer base',exact:true}),'https://identity.example/issuer');
+    await fill(page.getByRole('textbox',{name:'OAuth authorization URL',exact:true}),'');await fill(page.getByRole('textbox',{name:'OAuth token URL',exact:true}),'');await fill(page.getByRole('textbox',{name:'OAuth user info URL',exact:true}),'');
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+    const oidcWrite=calls.filter(c=>c.endpoint==='/api/providers'&&c.method==='POST').at(-1).body;assert.equal(oidcWrite.type,'OIDC');assert.equal(oidcWrite.domain,'https://identity.example/issuer');assert.equal(oidcWrite.custom_auth_url,'');
     await page.getByRole('combobox',{name:'Category',exact:true}).selectOption({label:'Email'});
     await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'SMTP'});
     await fill(page.getByRole('textbox',{name:'From address',exact:true}),'sender@example.test');
@@ -513,6 +555,12 @@ async function main() {
     await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
     const emailWrite=calls.filter(c=>c.endpoint==='/api/providers'&&c.method==='POST').at(-1).body;
     assert.equal(emailWrite.client_id2,'sender@example.test');assert.equal(emailWrite.client_secret2,'Browser Sender');assert.equal(emailWrite.disable_ssl,true);
+    await page.getByRole('combobox',{name:'SMTP SSL mode',exact:true}).selectOption({label:'Enable (require implicit TLS on this port)'});
+    await page.getByRole('checkbox',{name:'Allow plaintext SMTP',exact:true}).waitFor({state:'hidden'});
+    assert.equal(await page.getByRole('checkbox',{name:'Allow plaintext SMTP',exact:true}).isVisible(),false);
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+    assert.equal(calls.filter(c=>c.endpoint==='/api/providers'&&c.method==='POST').at(-1).body.ssl_mode,'Enable');
+
 
     await page.getByRole('button',{name:'Pricings',exact:true}).click();
     await fill(page.getByRole('textbox',{name:'Owner',exact:true}),'built-in');

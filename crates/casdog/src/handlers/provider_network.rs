@@ -42,7 +42,20 @@ fn no_store(res: &mut Response) {
         .insert("cache-control", "no-store".parse().expect("static header"));
 }
 
-#[endpoint(tags("providers"), summary = "Get private OAuth network approval")]
+/// Runs before typed request extraction, so malformed approval bodies receive
+/// the same cache policy as successful and authorization-denied requests.
+#[handler]
+pub async fn no_store_hoop(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) {
+    no_store(res);
+    ctrl.call_next(req, depot, res).await;
+}
+
+#[endpoint(tags("providers"), summary = "Get private provider network approval")]
 pub async fn get(
     depot: &mut Depot,
     id: PathParam<String>,
@@ -57,7 +70,7 @@ pub async fn get(
 
 #[endpoint(
     tags("providers"),
-    summary = "Approve current custom OAuth endpoints for private networks"
+    summary = "Approve current custom provider endpoints for private networks"
 )]
 pub async fn approve(
     depot: &mut Depot,
@@ -77,7 +90,10 @@ pub async fn approve(
     ))
 }
 
-#[endpoint(tags("providers"), summary = "Revoke private OAuth network approval")]
+#[endpoint(
+    tags("providers"),
+    summary = "Revoke private provider network approval"
+)]
 pub async fn revoke(
     depot: &mut Depot,
     id: PathParam<String>,

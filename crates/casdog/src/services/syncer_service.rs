@@ -60,6 +60,15 @@ impl SyncerService {
         .await?
         .ok_or_else(|| AppError::NotFound("Syncer not found".into()))
     }
+    /// Fence competing runs and configuration writes while allowing an
+    /// independently reviewed grant's FK check during a long source request.
+    pub(crate) async fn get_run_conn(conn: &mut PgConnection, id: &str) -> AppResult<Syncer> {
+        sqlx::query_as(&format!("{SYNCER_SELECT} WHERE id=$1 FOR NO KEY UPDATE"))
+            .bind(id)
+            .fetch_optional(conn)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Syncer not found".into()))
+    }
     pub(crate) async fn validate(conn: &mut PgConnection, s: &Syncer) -> AppResult<()> {
         crate::handlers::parity_resources::service::identity(&s.owner, &s.name)?;
         if !(1..=65535).contains(&s.port)
@@ -85,15 +94,24 @@ impl SyncerService {
         }
         if !matches!(
             s.syncer_type.as_str(),
-            "Database" | "LDAP" | "Active Directory" | "Keycloak" | "SCIM"
+            "Database"
+                | "LDAP"
+                | "Active Directory"
+                | "Keycloak"
+                | "SCIM"
+                | "Azure AD"
+                | "Google Workspace"
         ) {
             return Err(AppError::Validation("Unsupported syncer type".into()));
         }
         if !s.is_read_only && s.syncer_type != "Database" {
             return Err(AppError::Validation(
-                "LDAP, Active Directory, Keycloak and SCIM writeback are unsupported; enable read-only synchronization"
+                "LDAP, Active Directory, Keycloak, SCIM and cloud-directory writeback are unsupported; enable read-only synchronization"
                     .into(),
             ));
+        }
+        if matches!(s.syncer_type.as_str(), "Azure AD" | "Google Workspace") {
+            return super::syncer_cloud::CloudSource::validate(s);
         }
         if s.syncer_type == "SCIM" {
             return super::syncer_scim::ScimSource::validate(s);
@@ -286,7 +304,8 @@ impl SyncerService {
     }
     pub async fn delete(pool: &PgPool, id: &str) -> AppResult<()> {
         let mut tx = pool.begin().await?;
-        Self::get_conn(&mut tx, id, true).await?;
+        let record = Self::get_conn(&mut tx, id, true).await?;
+        super::syncer_cloud::CloudSource::detach(&mut tx, &record).await?;
         sqlx::query("UPDATE syncer_operations SET status='cancelled',last_error='Syncer deleted',updated_at=clock_timestamp() WHERE syncer_id=$1 AND status='pending'")
             .bind(id).execute(&mut *tx).await?;
         if sqlx::query("DELETE FROM syncers WHERE id=$1")

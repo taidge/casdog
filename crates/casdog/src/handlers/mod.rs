@@ -47,6 +47,7 @@ pub mod site;
 pub mod social_login;
 pub mod subscription;
 pub mod syncer;
+pub mod syncer_network;
 pub mod system;
 pub mod ticket;
 pub mod token;

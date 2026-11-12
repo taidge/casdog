@@ -16,6 +16,7 @@ pub struct SmtpEmailProvider {
     password: String,
     from_address: String,
     use_ssl: bool,
+    ssl_mode: Option<String>,
 }
 
 impl SmtpEmailProvider {
@@ -34,7 +35,16 @@ impl SmtpEmailProvider {
             password,
             from_address,
             use_ssl,
+            ssl_mode: None,
         }
+    }
+
+    /// An explicit mode follows upstream gomail; None/empty retains the safer
+    /// pre-existing disable_ssl behavior for records which never opted in.
+    pub fn with_ssl_mode(mut self, mode: Option<&str>) -> AppResult<Self> {
+        smtp_tls_mode(mode, !self.use_ssl, self.port)?;
+        self.ssl_mode = mode.map(str::to_owned);
+        Ok(self)
     }
 
     pub fn from_provider_record(
@@ -80,30 +90,19 @@ impl EmailProviderTrait for SmtpEmailProvider {
 
         let creds = Credentials::new(self.username.clone(), self.password.clone());
 
-        let mailer = if self.use_ssl && self.port == 465 {
-            AsyncSmtpTransport::<Tokio1Executor>::relay(&self.host)
-                .map_err(|e| AppError::Internal(format!("SMTP connection failed: {}", e)))?
-                .port(self.port)
-                .credentials(creds)
-                .build()
-        } else if self.use_ssl {
-            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.host)
-                .map_err(|_| AppError::Config("Invalid SMTP TLS configuration".into()))?
-                .port(self.port)
-                .credentials(creds)
-                .build()
-        } else {
-            // The deprecated disable_ssl setting disables implicit TLS, not an
-            // advertised STARTTLS upgrade. Plaintext is permitted only for this
-            // explicit compatibility choice when STARTTLS is unavailable.
-            let parameters = TlsParameters::new(self.host.clone())
-                .map_err(|_| AppError::Config("Invalid SMTP TLS configuration".into()))?;
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.host)
-                .port(self.port)
-                .tls(Tls::Opportunistic(parameters))
-                .credentials(creds)
-                .build()
+        let mode = smtp_tls_mode(self.ssl_mode.as_deref(), !self.use_ssl, self.port)?;
+        let parameters = TlsParameters::new(self.host.clone())
+            .map_err(|_| AppError::Config("Invalid SMTP TLS configuration".into()))?;
+        let tls = match mode {
+            SmtpTlsMode::Implicit => Tls::Wrapper(parameters),
+            SmtpTlsMode::RequiredStarttls => Tls::Required(parameters),
+            SmtpTlsMode::OpportunisticStarttls => Tls::Opportunistic(parameters),
         };
+        let mailer = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.host)
+            .port(self.port)
+            .tls(tls)
+            .credentials(creds)
+            .build();
 
         mailer
             .send(email)
@@ -111,5 +110,34 @@ impl EmailProviderTrait for SmtpEmailProvider {
             .map_err(|e| AppError::Internal(format!("Failed to send email: {}", e)))?;
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmtpTlsMode {
+    Implicit,
+    RequiredStarttls,
+    OpportunisticStarttls,
+}
+
+pub fn smtp_tls_mode(mode: Option<&str>, disable_ssl: bool, port: u16) -> AppResult<SmtpTlsMode> {
+    match mode {
+        Some("Enable") => Ok(SmtpTlsMode::Implicit),
+        Some("Disable") => Ok(SmtpTlsMode::OpportunisticStarttls),
+        Some("Auto") => Ok(if port == 465 {
+            SmtpTlsMode::Implicit
+        } else {
+            SmtpTlsMode::OpportunisticStarttls
+        }),
+        None | Some("") => Ok(if disable_ssl {
+            SmtpTlsMode::OpportunisticStarttls
+        } else if port == 465 {
+            SmtpTlsMode::Implicit
+        } else {
+            SmtpTlsMode::RequiredStarttls
+        }),
+        _ => Err(AppError::Validation(
+            "SMTP ssl_mode must be Auto, Enable, Disable or an empty legacy value".into(),
+        )),
     }
 }

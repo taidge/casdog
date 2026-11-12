@@ -20,11 +20,11 @@ pub struct NetworkApproval {
 
 fn denied() -> AppError {
     AppError::Authorization(
-        "Private OAuth network approval requires a current global administrator".into(),
+        "Private provider network approval requires a current global administrator".into(),
     )
 }
 
-async fn administrator(conn: &mut PgConnection, actor: &Principal) -> AppResult<()> {
+pub(crate) async fn administrator(conn: &mut PgConnection, actor: &Principal) -> AppResult<()> {
     if actor.is_application() || !actor.global_admin() {
         return Err(denied());
     }
@@ -56,6 +56,28 @@ async fn provider(conn: &mut PgConnection, id: &str, write: bool) -> AppResult<P
 }
 
 fn eligible(record: &Provider) -> AppResult<()> {
+    if super::providers::http_delivery::is_custom_http(record) {
+        return super::provider_configuration_service::validate(record);
+    }
+    if record.category.eq_ignore_ascii_case("OAuth") && record.provider_type == "OIDC" {
+        let issuer = record
+            .domain
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .or(record
+                .issuer_url
+                .as_deref()
+                .filter(|v| !v.trim().is_empty()));
+        if let Some(issuer) = issuer {
+            let url = super::providers::oauth_provider::validate_url(issuer)?;
+            if url.query().is_some() {
+                return Err(AppError::Validation(
+                    "OIDC issuer cannot have a query".into(),
+                ));
+            }
+            return super::providers::oauth_provider::validate_oauth_configuration(record);
+        }
+    }
     if record.category.eq_ignore_ascii_case("OAuth") && record.provider_type == "Okta" {
         if ![&record.domain, &record.issuer_url, &record.custom_auth_url]
             .iter()
@@ -88,6 +110,27 @@ fn eligible(record: &Provider) -> AppResult<()> {
     crate::services::providers::oauth_provider::validate_oauth_configuration(record)
 }
 
+/// Durable exceptions follow the effective transport configuration, never the
+/// display name or owner spelling. The existing OAuth stamp remains unchanged.
+pub fn configuration_stamp(record: &Provider) -> String {
+    if record.category.eq_ignore_ascii_case("OAuth") {
+        return super::providers::oauth_provider::configuration_stamp(record);
+    }
+    let value = serde_json::json!({
+        "v": 1, "id": record.id, "owner": record.owner, "name": record.name,
+        "category": record.category, "type": record.provider_type,
+        "endpoint": record.endpoint, "provider_url": record.provider_url,
+        "client_id": record.client_id, "client_secret": record.client_secret,
+        "client_id2": record.client_id2, "client_secret2": record.client_secret2,
+        "method": record.method, "issuer_url": record.issuer_url,
+        "user_mapping": record.user_mapping, "http_headers": record.http_headers,
+        "metadata": record.metadata, "receiver": record.receiver, "title": record.title,
+        "app_id": record.app_id, "sign_name": record.sign_name,
+        "template_code": record.template_code,
+    });
+    super::system_gap_service::digest(value.to_string().as_bytes())
+}
+
 async fn status(conn: &mut PgConnection, record: &Provider) -> AppResult<NetworkApproval> {
     let approval: Option<(String, String, DateTime<Utc>)> = sqlx::query_as(
         "SELECT configuration_stamp,approved_by,approved_at \
@@ -98,7 +141,7 @@ async fn status(conn: &mut PgConnection, record: &Provider) -> AppResult<Network
     .await?;
     let (allow_private, stale, approved_by, approved_at) = match approval {
         Some((stamp, actor, time)) => {
-            let current = stamp == super::providers::oauth_provider::configuration_stamp(record);
+            let current = stamp == configuration_stamp(record);
             (current, !current, Some(actor), Some(time))
         }
         None => (false, false, None, None),
@@ -115,7 +158,7 @@ async fn status(conn: &mut PgConnection, record: &Provider) -> AppResult<Network
 /// Call after loading/locking the current provider inside the caller's login
 /// transaction. Approval is never cached across callback or MFA checkpoints.
 pub async fn allowed_conn(conn: &mut PgConnection, record: &Provider) -> AppResult<bool> {
-    let stamp = super::providers::oauth_provider::configuration_stamp(record);
+    let stamp = configuration_stamp(record);
     Ok(sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM oauth_provider_network_approvals \
          WHERE provider_id=$1 AND configuration_stamp=$2)",
@@ -140,7 +183,7 @@ pub async fn approve(pool: &PgPool, actor: &Principal, id: &str) -> AppResult<Ne
     administrator(&mut tx, actor).await?;
     let record = provider(&mut tx, id, true).await?;
     eligible(&record)?;
-    let stamp = super::providers::oauth_provider::configuration_stamp(&record);
+    let stamp = configuration_stamp(&record);
     sqlx::query(
         "INSERT INTO oauth_provider_network_approvals(provider_id,configuration_stamp,generation,approved_by) \
          VALUES($1,$2,$3,$4) ON CONFLICT(provider_id) DO UPDATE SET \

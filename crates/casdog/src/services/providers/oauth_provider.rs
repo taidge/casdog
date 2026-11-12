@@ -86,6 +86,14 @@ pub fn validate_oauth_configuration(provider: &Provider) -> AppResult<()> {
         return Ok(());
     }
     let mapped = mapping(provider.user_mapping.as_deref())?;
+    let headers = oauth_headers(provider)?;
+    if builtin(&provider.provider_type) && provider.method.as_deref().is_some_and(|v| !v.is_empty())
+    {
+        return Err(invalid());
+    }
+    if builtin(&provider.provider_type) && !headers.is_empty() {
+        return Err(invalid());
+    }
     if builtin(&provider.provider_type) && !mapped.is_empty() {
         return Err(invalid());
     }
@@ -101,13 +109,7 @@ pub fn validate_oauth_configuration(provider: &Provider) -> AppResult<()> {
         }
     }
     if !builtin(&provider.provider_type) {
-        for value in [
-            &provider.custom_auth_url,
-            &provider.custom_token_url,
-            &provider.custom_user_info_url,
-        ] {
-            validate_url(value.as_deref().ok_or_else(invalid)?)?;
-        }
+        super::generic_oauth::validate_endpoint_configuration(provider)?;
     } else {
         for value in [
             &provider.custom_auth_url,
@@ -125,6 +127,56 @@ pub fn validate_oauth_configuration(provider: &Provider) -> AppResult<()> {
         }
     }
     Ok(())
+}
+pub fn oauth_headers(provider: &Provider) -> AppResult<reqwest::header::HeaderMap> {
+    let mut result = reqwest::header::HeaderMap::new();
+    let Some(raw) = provider.http_headers.as_deref().filter(|v| !v.is_empty()) else {
+        return Ok(result);
+    };
+    if raw.len() > 32768 {
+        return Err(invalid());
+    }
+    let fields: BTreeMap<String, String> = serde_json::from_str(raw).map_err(|_| invalid())?;
+    if fields.len() > 64 {
+        return Err(invalid());
+    }
+    for (name, value) in fields {
+        if name.len() > 256 || value.len() > 16384 {
+            return Err(invalid());
+        }
+        let name =
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| invalid())?;
+        if matches!(
+            name.as_str(),
+            "host"
+                | "authorization"
+                | "cookie"
+                | "set-cookie"
+                | "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "proxy-authorization"
+                | "proxy-authenticate"
+                | "proxy-connection"
+                | "upgrade"
+                | "trailer"
+                | "te"
+                | "content-type"
+                | "accept"
+                | "origin"
+                | "referer"
+        ) || name.as_str().starts_with("x-forwarded-")
+            || name.as_str().starts_with("sec-")
+            || name.as_str() == "forwarded"
+            || result.contains_key(&name)
+        {
+            return Err(invalid());
+        }
+        let mut value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| invalid())?;
+        value.set_sensitive(true);
+        result.insert(name, value);
+    }
+    Ok(result)
 }
 pub fn validate_url(value: &str) -> AppResult<reqwest::Url> {
     if value.len() > 4096 {
@@ -173,7 +225,7 @@ pub fn okta_base(provider: &Provider) -> AppResult<String> {
 pub fn configuration_stamp(provider: &Provider) -> String {
     crate::services::social_state_service::proof_hash(
         &json!([
-            "casdog.oauth.configuration.v1",
+            "casdog.oauth.configuration.v3",
             provider.id,
             provider.owner,
             provider.name,
@@ -181,13 +233,17 @@ pub fn configuration_stamp(provider: &Provider) -> String {
             provider.provider_type,
             provider.client_id,
             provider.client_secret,
+            provider.client_id2,
+            provider.client_secret2,
+            provider.method,
             provider.custom_auth_url,
             provider.custom_token_url,
             provider.custom_user_info_url,
             provider.scopes,
             provider.user_mapping,
             provider.issuer_url,
-            provider.domain
+            provider.domain,
+            provider.http_headers
         ])
         .to_string(),
     )
@@ -310,6 +366,26 @@ pub fn map_user_info(
 pub fn create_oauth_provider_record(provider: &Provider) -> AppResult<Box<dyn OAuthProviderTrait>> {
     create_oauth_provider_record_with_policy(provider, false)
 }
+pub fn create_oauth_provider_resolved(
+    provider: &Provider,
+    allow_private: bool,
+    endpoints: Option<&super::generic_oauth::ResolvedOAuthEndpoints>,
+) -> AppResult<Box<dyn OAuthProviderTrait>> {
+    validate_oauth_configuration(provider)?;
+    if !builtin(&provider.provider_type) {
+        let endpoints = endpoints.ok_or_else(|| {
+            AppError::Authentication("OAuth endpoints missing; restart sign-in".into())
+        })?;
+        return Ok(Box::new(
+            super::generic_oauth::GenericOAuthProvider::from_resolved(
+                provider,
+                endpoints,
+                allow_private,
+            )?,
+        ));
+    }
+    create_oauth_provider_record_with_policy(provider, allow_private)
+}
 /// The caller must derive private access from a persisted global-admin approval,
 /// never from provider ownership or request metadata.
 pub fn create_oauth_provider_record_with_policy(
@@ -340,21 +416,29 @@ pub fn create_oauth_provider_record_with_policy(
         );
     }
     if !builtin(&provider.provider_type) {
+        if super::generic_oauth::oidc_issuer(provider)?.is_some() {
+            return Err(AppError::Validation(
+                "Resolve OIDC discovery before constructing its provider".into(),
+            ));
+        }
+        let endpoints = super::generic_oauth::ResolvedOAuthEndpoints {
+            issuer: None,
+            auth_url: provider.custom_auth_url.clone().unwrap_or_default(),
+            token_url: provider.custom_token_url.clone().unwrap_or_default(),
+            user_info_url: provider.custom_user_info_url.clone().unwrap_or_default(),
+            pkce_s256: false,
+            jwks_url: None,
+            signing_algorithms: Vec::new(),
+            client_auth: super::generic_oauth::configured_client_auth(provider)?
+                .unwrap_or("client_secret_post")
+                .into(),
+        };
         return Ok(Box::new(
-            super::generic_oauth::GenericOAuthProvider::new(
-                provider.provider_type.clone(),
-                provider.client_id.clone().unwrap_or_default(),
-                provider.client_secret.clone().unwrap_or_default(),
-                provider.custom_auth_url.clone().unwrap_or_default(),
-                provider.custom_token_url.clone().unwrap_or_default(),
-                provider.custom_user_info_url.clone().unwrap_or_default(),
-                provider
-                    .scopes
-                    .clone()
-                    .filter(|v| !v.trim().is_empty())
-                    .unwrap_or_else(|| "openid profile email".into()),
-            )
-            .with_configuration(mapping(provider.user_mapping.as_deref())?, allow_private),
+            super::generic_oauth::GenericOAuthProvider::from_resolved(
+                provider,
+                &endpoints,
+                allow_private,
+            )?,
         ));
     }
     create_oauth_provider_with_policy(
@@ -405,6 +489,40 @@ impl OAuthProviderTrait for ScopedProvider {
     async fn get_user_info(&self, token: &str) -> AppResult<ProviderUserInfo> {
         self.inner.get_user_info(token).await
     }
+    async fn exchange_code_token(
+        &self,
+        code: &str,
+        redirect: &str,
+        context: &OAuthExchangeContext,
+    ) -> AppResult<OAuthToken> {
+        self.inner
+            .exchange_code_token(code, redirect, context)
+            .await
+    }
+    async fn get_user_info_token(
+        &self,
+        token: &OAuthToken,
+        context: &OAuthExchangeContext,
+    ) -> AppResult<ProviderUserInfo> {
+        self.inner.get_user_info_token(token, context).await
+    }
+    async fn verify_identity(
+        &self,
+        token: &OAuthToken,
+        context: &OAuthExchangeContext,
+    ) -> AppResult<Option<Value>> {
+        self.inner.verify_identity(token, context).await
+    }
+    async fn get_user_info_verified(
+        &self,
+        token: &OAuthToken,
+        context: &OAuthExchangeContext,
+        identity: Option<Value>,
+    ) -> AppResult<ProviderUserInfo> {
+        self.inner
+            .get_user_info_verified(token, context, identity)
+            .await
+    }
     fn provider_type(&self) -> &str {
         self.inner.provider_type()
     }
@@ -422,8 +540,61 @@ pub trait OAuthProviderTrait: Send + Sync {
     /// Get user info from the provider using the access token
     async fn get_user_info(&self, access_token: &str) -> AppResult<ProviderUserInfo>;
 
+    /// Request-local token envelope: never a process-local side cache. Existing
+    /// built-in adapters retain their String methods through these defaults.
+    async fn exchange_code_token(
+        &self,
+        code: &str,
+        redirect_uri: &str,
+        _context: &OAuthExchangeContext,
+    ) -> AppResult<OAuthToken> {
+        let access_token = self.exchange_code(code, redirect_uri).await?;
+        Ok(OAuthToken {
+            extra: json!({"access_token":access_token}),
+            access_token,
+        })
+    }
+    async fn get_user_info_token(
+        &self,
+        token: &OAuthToken,
+        _context: &OAuthExchangeContext,
+    ) -> AppResult<ProviderUserInfo> {
+        self.get_user_info(&token.access_token).await
+    }
+    /// Separate network checkpoint lets HTTP handlers re-read approval between
+    /// token, JWKS and UserInfo requests. The verified claims remain request-local.
+    async fn verify_identity(
+        &self,
+        _token: &OAuthToken,
+        _context: &OAuthExchangeContext,
+    ) -> AppResult<Option<Value>> {
+        Ok(None)
+    }
+    async fn get_user_info_verified(
+        &self,
+        token: &OAuthToken,
+        context: &OAuthExchangeContext,
+        _identity: Option<Value>,
+    ) -> AppResult<ProviderUserInfo> {
+        self.get_user_info_token(token, context).await
+    }
+
     /// Provider type name
     fn provider_type(&self) -> &str;
+}
+
+// Deliberately no Debug implementation: provider token extras can contain
+// refresh tokens and other credentials that must never enter diagnostics.
+pub struct OAuthToken {
+    pub access_token: String,
+    pub extra: Value,
+}
+#[derive(Default)]
+pub struct OAuthExchangeContext {
+    pub state: String,
+    pub code_verifier: Option<String>,
+    pub nonce: Option<String>,
+    pub started_at: Option<i64>,
 }
 
 /// Factory function to create a provider from database Provider record fields

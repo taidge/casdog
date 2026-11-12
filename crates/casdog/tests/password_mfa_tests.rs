@@ -1,4 +1,6 @@
 //! Real PostgreSQL password-first MFA regressions (migration 020).
+#[path = "support/provider_network.rs"]
+mod fixture_network;
 use casdog::{
     config::AppConfig,
     diesel_pool::create_diesel_pool,
@@ -123,6 +125,7 @@ impl Fixture {
         .bind(&user).bind(&owner).bind(hash).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO providers(id,owner,name,display_name,category,type,endpoint) VALUES($1,$2,'mail','Mail','Email','Custom HTTP',$3)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&owner).bind(endpoint).execute(&pool).await.unwrap();
+        fixture_network::approve_owner(&pool, &owner).await;
         sqlx::query("INSERT INTO applications(id,owner,name,display_name,organization,client_id,client_secret,redirect_uris,enable_password,providers,grant_types) VALUES($1,$2,'app','App',$2,$1,'secret','https://example.test/callback',true,$3,$4)")
         .bind(&app).bind(&owner).bind(json!([{"name":format!("{owner}/mail"),"rule":"mfa"}])).bind(json!(["authorization_code"])).execute(&pool).await.unwrap();
         Self {

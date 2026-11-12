@@ -1,5 +1,7 @@
 //! Real PostgreSQL recovery tests. Mail is captured by an ephemeral loopback server.
 //! Run with CASDOG_TEST_DATABASE_URL and `--ignored`; no external mail is sent.
+#[path = "support/provider_network.rs"]
+mod fixture_network;
 use casdog::services::{
     PasswordService,
     password_reset_service::{CompletePasswordReset, PasswordResetService, RequestPasswordReset},
@@ -86,6 +88,7 @@ impl Fixture {
             .bind(&user).bind(&owner).bind(&email).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO providers (id,owner,name,display_name,category,type,endpoint) VALUES ($1,$2,'mail','Mail','Email','Custom HTTP',$3)")
             .bind(Uuid::new_v4().to_string()).bind(&owner).bind(endpoint).execute(&pool).await.unwrap();
+        fixture_network::approve_owner(&pool, &owner).await;
         Self {
             pool,
             owner,

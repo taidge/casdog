@@ -133,7 +133,7 @@ impl SyncerExecutor {
             sqlx::query("SET LOCAL statement_timeout='30s'")
                 .execute(&mut *tx)
                 .await?;
-            let syncer = SyncerService::get_conn(&mut tx, syncer_id, true).await?;
+            let syncer = SyncerService::get_run_conn(&mut tx, syncer_id).await?;
             let owned:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM syncer_runtime_state WHERE syncer_id=$1 AND lease_token=$2 AND lease_until>clock_timestamp())")
                 .bind(syncer_id).bind(&token).fetch_one(&mut *tx).await?;
             if !owned || !syncer.is_enabled {
@@ -148,8 +148,14 @@ impl SyncerExecutor {
                 "Database" | "Keycloak" => Self::execute_database_sync(&mut tx, &syncer).await?,
                 "LDAP" | "Active Directory" => Self::execute_ldap_sync(&mut tx, &syncer).await?,
                 "SCIM" => Self::execute_scim_sync(&mut tx, &syncer).await?,
+                "Azure AD" | "Google Workspace" => {
+                    Self::execute_cloud_sync(&mut tx, &syncer).await?
+                }
                 _ => return Err(AppError::Validation("Unsupported syncer type".into())),
             };
+            if !matches!(syncer.syncer_type.as_str(), "Azure AD" | "Google Workspace") {
+                super::syncer_cloud::CloudSource::detach(&mut tx, &syncer).await?;
+            }
             tx.commit().await?;
             exported += Self::flush_operations(pool, syncer_id, &token).await?;
             run.records_exported = exported;
@@ -695,6 +701,34 @@ impl SyncerExecutor {
         Self::reconcile_rows(conn, syncer, &columns, prepared, &HashMap::new()).await
     }
 
+    async fn execute_cloud_sync(
+        conn: &mut PgConnection,
+        syncer: &Syncer,
+    ) -> AppResult<SyncRunResult> {
+        use super::syncer_cloud::CloudSource;
+        let columns = CloudSource::columns(syncer)?;
+        let snapshot = CloudSource::snapshot(conn, syncer).await?;
+        let mut prepared = Vec::with_capacity(snapshot.rows.len());
+        for row in &snapshot.rows {
+            let incoming = Self::map_database_row(syncer, &columns, row)?;
+            prepared.push((
+                Self::source_projection(syncer, &columns, row)?,
+                row.clone(),
+                incoming,
+            ));
+        }
+        let run = Self::reconcile_rows(conn, syncer, &columns, prepared, &HashMap::new()).await?;
+        CloudSource::apply_groups(conn, syncer, &snapshot).await?;
+        let binding = super::syncer_network_service::network_binding_conn(conn, syncer).await?;
+        if snapshot.used_binding != binding {
+            return Err(AppError::Authorization(
+                "Cloud directory approval revoked before commit; all local changes rolled back"
+                    .into(),
+            ));
+        }
+        Ok(run)
+    }
+
     pub(crate) fn parse_table_columns(syncer: &Syncer) -> AppResult<Vec<TableColumn>> {
         let raw = syncer
             .table_columns
@@ -1014,7 +1048,10 @@ impl SyncerExecutor {
                 ));
             }
             if matches!(target.as_str(), "properties" | "createdtime")
-                && syncer.syncer_type != "Active Directory"
+                && !matches!(
+                    syncer.syncer_type.as_str(),
+                    "Active Directory" | "Azure AD" | "Google Workspace"
+                )
             {
                 return Err(AppError::Validation(
                     "Directory metadata mappings require an AD source".into(),
@@ -1390,12 +1427,22 @@ impl SyncerExecutor {
                     Self::validate_address(&address)?;
                     user.address = Some(address);
                 }
-                "properties" if syncer.syncer_type == "Active Directory" => {
+                "properties"
+                    if matches!(
+                        syncer.syncer_type.as_str(),
+                        "Active Directory" | "Azure AD" | "Google Workspace"
+                    ) =>
+                {
                     let v: Value = serde_json::from_str(&value)
                         .map_err(|_| AppError::Validation("Invalid AD properties".into()))?;
                     user.properties = Some(v);
                 }
-                "createdtime" if syncer.syncer_type == "Active Directory" => {
+                "createdtime"
+                    if matches!(
+                        syncer.syncer_type.as_str(),
+                        "Active Directory" | "Azure AD" | "Google Workspace"
+                    ) =>
+                {
                     user.created_at = Some(
                         chrono::DateTime::parse_from_rfc3339(&value)
                             .map_err(|_| AppError::Validation("Invalid AD creation time".into()))?

@@ -1,7 +1,9 @@
+use base64::Engine;
 use salvo::oapi::{ToSchema, endpoint};
 use salvo::prelude::*;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::Digest;
 use sqlx::{PgConnection, PgPool};
 
 pub use super::social_link::{
@@ -13,8 +15,8 @@ use crate::error::{AppError, AppResult};
 use crate::models::{Application, Provider, User};
 use crate::services::check_service::CheckService;
 use crate::services::providers::oauth_provider::{
-    OAuthProviderTrait, configuration_stamp, create_oauth_provider_record,
-    create_oauth_provider_record_with_policy,
+    OAuthExchangeContext, OAuthProviderTrait, builtin, configuration_stamp,
+    create_oauth_provider_resolved, validate_oauth_configuration,
 };
 use crate::services::social_state_service::{
     self, COMPLETION_TTL_SECONDS, NewCompletion, NewOAuthFlow,
@@ -121,11 +123,79 @@ fn allowed_provider(app: &Application, provider: &Provider) -> Option<bool> {
         )
     })
 }
-pub(crate) fn oauth_provider(provider: &Provider) -> AppResult<Box<dyn OAuthProviderTrait>> {
-    if provider.category != "OAuth" {
-        return Err(AppError::Validation("OAuth provider required".into()));
+pub(crate) async fn prepare_oauth(
+    pool: &PgPool,
+    provider: &Provider,
+    user_agent: &str,
+    wechat_transport: Option<&crate::services::wechat_flow::WeChatTestTransport>,
+) -> AppResult<(Box<dyn OAuthProviderTrait>, Value)> {
+    validate_oauth_configuration(provider)?;
+    let network = network_binding(&mut *pool.acquire().await?, provider, false).await?;
+    let endpoints = if builtin(&provider.provider_type) {
+        None
+    } else {
+        Some(
+            crate::services::providers::generic_oauth::resolve_endpoints(
+                provider,
+                network != "unapproved",
+            )
+            .await?,
+        )
+    };
+    let verifier = endpoints.as_ref().filter(|e| e.pkce_s256).map(|_| {
+        format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        )
+    });
+    let nonce = endpoints.as_ref().filter(|e| e.issuer.is_some()).map(|_| {
+        format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        )
+    });
+    let context = json!({"provider_stamp":configuration_stamp(provider),"network_binding":network,"oauth_endpoints":endpoints,"oauth_code_verifier":verifier,"oauth_nonce":nonce,"oauth_started_at":chrono::Utc::now().timestamp(),"wechat_flow":crate::services::wechat_flow::prepare(provider,user_agent)?});
+    let oauth = checked_oauth_provider(pool, provider, &context, wechat_transport).await?;
+    Ok((oauth, context))
+}
+pub(crate) fn authorization_url(
+    oauth: &dyn OAuthProviderTrait,
+    context: &Value,
+    redirect: &str,
+    state: &str,
+) -> AppResult<String> {
+    let original = oauth.get_auth_url(redirect, state, None);
+    let verifier = context["oauth_code_verifier"].as_str();
+    let nonce = context["oauth_nonce"].as_str();
+    if verifier.is_none() && nonce.is_none() {
+        return Ok(original);
     }
-    create_oauth_provider_record(provider)
+    let mut url = reqwest::Url::parse(&original)
+        .map_err(|_| AppError::Authentication("Invalid OAuth authorization endpoint".into()))?;
+    let pairs: Vec<_> = url
+        .query_pairs()
+        .filter(|(k, _)| {
+            !matches!(
+                k.as_ref(),
+                "code_challenge" | "code_challenge_method" | "nonce"
+            )
+        })
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+    if let Some(verifier) = verifier {
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(verifier.as_bytes()));
+        url.query_pairs_mut()
+            .append_pair("code_challenge", &challenge)
+            .append_pair("code_challenge_method", "S256");
+    }
+    if let Some(nonce) = nonce {
+        url.query_pairs_mut().append_pair("nonce", nonce);
+    }
+    Ok(url.into())
 }
 pub(crate) fn require_provider_stamp(context: &Value, provider: &Provider) -> AppResult<()> {
     if context["provider_stamp"].as_str() != Some(configuration_stamp(provider).as_str()) {
@@ -160,6 +230,7 @@ async fn checked_oauth_provider(
     pool: &PgPool,
     provider: &Provider,
     context: &Value,
+    wechat_transport: Option<&crate::services::wechat_flow::WeChatTestTransport>,
 ) -> AppResult<Box<dyn OAuthProviderTrait>> {
     let mut conn = pool.acquire().await?;
     let current: Provider = sqlx::query_as("SELECT * FROM providers WHERE id=$1")
@@ -174,7 +245,22 @@ async fn checked_oauth_provider(
             "OAuth network approval changed; restart sign-in".into(),
         ));
     }
-    create_oauth_provider_record_with_policy(&current, network != "unapproved")
+    if let Some(oauth) =
+        crate::services::wechat_flow::provider(&current, &context["wechat_flow"], wechat_transport)?
+    {
+        return Ok(oauth);
+    }
+    let endpoints = context
+        .get("oauth_endpoints")
+        .filter(|v| !v.is_null())
+        .map(|v| {
+            serde_json::from_value::<
+                crate::services::providers::generic_oauth::ResolvedOAuthEndpoints,
+            >(v.clone())
+            .map_err(|_| AppError::Authentication("Invalid OAuth endpoint proof".into()))
+        })
+        .transpose()?;
+    create_oauth_provider_resolved(&current, network != "unapproved", endpoints.as_ref())
 }
 pub(crate) async fn lock_provider_stamp(
     conn: &mut PgConnection,
@@ -242,7 +328,7 @@ pub async fn list_social_providers(depot: &mut Depot, req: &mut Request) -> AppR
             .await?;
     let data: Vec<Value> = providers
         .iter()
-        .filter(|p| allowed_provider(&app, p).is_some() && oauth_provider(p).is_ok())
+        .filter(|p| allowed_provider(&app, p).is_some() && validate_oauth_configuration(p).is_ok())
         .map(|p| json!({"name": p.name, "display_name": p.display_name, "type": p.provider_type}))
         .collect();
     Ok(Json(
@@ -266,8 +352,6 @@ pub async fn get_provider_auth_url(
         .ok_or_else(|| AppError::Validation("application is required".into()))?;
     let app = application(&pool, &reference).await?;
     let provider = provider_for_application(&pool, &app, &name).await?;
-    let oauth = oauth_provider(&provider)?;
-    let network = network_binding(&mut *pool.acquire().await?, &provider, false).await?;
     let origin = public_origin()?;
     let redirect_uri = format!("{origin}/api/auth/{}/callback", urlencoding::encode(&name));
     // A client-supplied redirect can never alter the code exchange destination.
@@ -277,6 +361,17 @@ pub async fn get_provider_auth_url(
     {
         return Err(AppError::Validation("OAuth callback URI mismatch".into()));
     }
+    let user_agent = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let transport = depot
+        .obtain::<std::sync::Arc<crate::services::wechat_flow::WeChatTestTransport>>()
+        .ok()
+        .cloned();
+    let (oauth, context) =
+        prepare_oauth(&pool, &provider, user_agent, transport.as_deref()).await?;
     let (state, browser) = social_state_service::create_flow(
         &pool,
         &NewOAuthFlow {
@@ -286,11 +381,11 @@ pub async fn get_provider_auth_url(
             organization: app.organization,
             redirect_uri: redirect_uri.clone(),
             purpose: "signin".into(),
-            context: json!({"provider_stamp":configuration_stamp(&provider),"network_binding":network}),
+            context: context.clone(),
         },
     )
     .await?;
-    let url = oauth.get_auth_url(&redirect_uri, &state, None);
+    let url = authorization_url(oauth.as_ref(), &context, &redirect_uri, &state)?;
     set_cookie(
         res,
         BROWSER_COOKIE,
@@ -331,13 +426,32 @@ pub async fn provider_callback(
         ));
     }
     require_provider_stamp(&flow.context, &provider)?;
-    let oauth = checked_oauth_provider(&pool, &provider, &flow.context).await?;
-    let token = oauth.exchange_code(&code, &flow.redirect_uri).await?;
+    let transport = depot
+        .obtain::<std::sync::Arc<crate::services::wechat_flow::WeChatTestTransport>>()
+        .ok()
+        .cloned();
+    let oauth =
+        checked_oauth_provider(&pool, &provider, &flow.context, transport.as_deref()).await?;
+    let exchange = OAuthExchangeContext {
+        state: state.clone(),
+        code_verifier: flow.context["oauth_code_verifier"]
+            .as_str()
+            .map(str::to_owned),
+        nonce: flow.context["oauth_nonce"].as_str().map(str::to_owned),
+        started_at: flow.context["oauth_started_at"].as_i64(),
+    };
+    let token = oauth
+        .exchange_code_token(&code, &flow.redirect_uri, &exchange)
+        .await?;
     // Re-read the persisted grant and configuration between the two requests;
     // revocation must not permit a second request using cached private access.
-    let info = checked_oauth_provider(&pool, &provider, &flow.context)
+    let identity = checked_oauth_provider(&pool, &provider, &flow.context, transport.as_deref())
         .await?
-        .get_user_info(&token)
+        .verify_identity(&token, &exchange)
+        .await?;
+    let info = checked_oauth_provider(&pool, &provider, &flow.context, transport.as_deref())
+        .await?
+        .get_user_info_verified(&token, &exchange, identity)
         .await?;
     if info.id.trim().is_empty() || info.id == "unknown" {
         return Err(AppError::Authentication(

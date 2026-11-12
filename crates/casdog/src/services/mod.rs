@@ -33,6 +33,7 @@ pub mod session_service;
 pub mod site_service;
 pub mod spnego_service;
 pub mod syncer_service;
+pub mod syncer_network_service;
 pub mod token_service;
 pub mod user_service;
 pub mod verification_service;
@@ -114,3 +115,6 @@ pub mod runtime_settings_service;
 pub mod subscription_renewal_service;
 pub mod syncer_scim;
 pub mod telemetry_service;
+pub mod wechat_flow;
+
+pub mod syncer_cloud;

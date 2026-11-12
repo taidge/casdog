@@ -201,6 +201,7 @@ impl ProviderService {
             "host",
             "port",
             "disable_ssl",
+            "ssl_mode",
             "title",
             "receiver",
             "endpoint",

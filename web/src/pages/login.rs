@@ -5,6 +5,7 @@ use crate::{
 };
 use glory::prelude::*;
 use serde_json::{Value, json};
+use std::{cell::Cell, rc::Rc};
 
 fn accept(
     app: AppState,
@@ -88,6 +89,7 @@ pub fn page(app: AppState) -> Element {
         let busy = scope.cage(false);
         let message = scope.cage(String::new());
         let providers = scope.cage(Vec::<Value>::new());
+        let provider_generation = Rc::new(Cell::new(0u64));
         let refresh = scope.clone();
         scope.effect(move || {
             let reference = application.get();
@@ -96,13 +98,26 @@ pub fn page(app: AppState) -> Element {
             } else {
                 reference
             };
+            let _ = app.api_base.get();
+            provider_generation.set(provider_generation.get() + 1);
+            let version = provider_generation.get();
+            let generation = provider_generation.clone();
+            providers.set(Vec::new());
             let path = format!(
                 "/api/auth/providers?application={}",
                 query_component(&reference)
             );
             let _ = refresh.spawn(async move {
                 if let Ok(value) = app.request("GET", &path, None).await {
-                    providers.set(api::extract_collection(value));
+                    let current = application.get();
+                    let current = if current.is_empty() {
+                        "admin/app-built-in".into()
+                    } else {
+                        current
+                    };
+                    if generation.get() == version && current == reference {
+                        providers.set(api::extract_collection(value));
+                    }
                 }
             });
         });
