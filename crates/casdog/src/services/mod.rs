@@ -95,6 +95,8 @@ pub use webhook_executor::{WebhookExecutor, WebhookPayload};
 
 pub mod password_reset_service;
 
+pub mod key_credentials_service;
+pub mod primary_auth_service;
+pub mod protocol_gap_service;
 pub mod social_state_service;
 pub mod system_gap_service;
-pub mod protocol_gap_service;

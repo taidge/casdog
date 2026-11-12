@@ -11,9 +11,7 @@ use crate::models::{
     CreateGroupRequest, CreatePermissionRequest, CreateRoleRequest, CreateUserRequest,
 };
 use crate::services::providers::storage_provider::{StorageProvider, get_storage_provider};
-use crate::services::{
-    GroupService, PermissionService, ResourceService, RoleService, UserService,
-};
+use crate::services::{GroupService, PermissionService, ResourceService, RoleService, UserService};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UploadResponse {
@@ -436,6 +434,15 @@ pub async fn upload_resource(
         .get::<String>("user_owner")
         .cloned()
         .unwrap_or_default();
+
+    // Parse within the upload contract's explicit bound. Salvo's default form
+    // limit is 64 KiB, which otherwise rejects valid large transcripts before
+    // the per-file 32 MiB check can run. Reserve 64 KiB for multipart fields.
+    req.form_data_max_size(32 * 1024 * 1024 + 64 * 1024)
+        .await
+        .map_err(|_| {
+            AppError::Validation("Invalid multipart upload or upload exceeds 32 MiB".into())
+        })?;
 
     // Get the uploaded file from multipart form
     let file = req

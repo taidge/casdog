@@ -1,0 +1,249 @@
+{
+  "date": "2026-11-12",
+  "base_commit": "efc7ecef2f83ec0e38105ec45f07cfe6d95ee6f4",
+  "reference_revision": "47da539f886d5b09d2c35cf6ae78d8b6b5f30a43",
+  "scope": "Implemented behaviors and regression evidence; broad Casdoor equivalence remains incomplete.",
+  "flat_route_declarations": {
+    "matched": 299,
+    "expected": 299,
+    "meaning": "Static declarations, not overall functional completion."
+  },
+  "implementation": {
+    "authentication": [
+      "PostgreSQL atomic TOTP step consumption across setup, legacy, password and social challenges, with caller-transaction rollback.",
+      "FaceID nonce consumption, tenant/account/application checks and shared extra MFA; legacy FaceID response receipt preserved."
+    ],
+    "storage": [
+      "AWS SigV4 static-key S3 PUT/GET/DELETE with encoded object keys and checked/pinned endpoint clients.",
+      "Normal multipart upload/resource/transcript APIs support Local and S3, 32 MiB file bound and 2 MiB preview bound.",
+      "Range, ignored Range, unknown length, failure atomicity, old version preservation and repeated tenant boundary checks."
+    ],
+    "commerce": [
+      "Durable inventory reservations before remote checkout; order locks and payment reuse across instances.",
+      "Verified callbacks and authorized administrator settlement share idempotent inventory, ledger and coupon finalization.",
+      "Immutable terminal states and checkout snapshots enforced for REST and compatibility CRUD with named database constraints.",
+      "Public callback routes verify provider signatures, references, amounts and currency; manual state changes require a matching tenant administrator.",
+      "Own-order pay/cancel permissions allow buyers while rejecting peer users and foreign tenants.",
+      "Pending remote payments cannot be canceled locally without confirmed void; reservations remain available for verified late payment.",
+      "Migration 028 atomically validates and reserves historical pending stock or rolls back all DDL and inventory."
+    ],
+    "frontend": [
+      "Marketplace provider client credentials and optional application binding; preview changes clear secrets.",
+      "Real browser application/provider installation, persisted linkage and uninstall through a checksummed local HTTP catalog."
+    ]
+  },
+  "validation": {
+    "backend_command": "cargo test --workspace --tests --no-fail-fast --jobs 2 -- --include-ignored --test-threads=1",
+    "test_programs": 24,
+    "executions_passed": 409,
+    "failed": 0,
+    "ignored": 0,
+    "postgresql_scenarios_passed": 97,
+    "new_postgresql_scenarios": 16,
+    "counting_note": "lib/main each run the same 38 unit tests; executions are not a count of unique business scenarios. PostgreSQL scenario count is enabled ignored test functions; one migration test includes nine invalid-data subcases.",
+    "program_results": [
+      {
+        "program": "unittests src\\lib.rs",
+        "passed": 38,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "unittests src\\main.rs",
+        "passed": 38,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\api_parity_tests.rs",
+        "passed": 179,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\auth_security_tests.rs",
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\authorization_tests.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\commerce_checkout_tests.rs",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\legacy_crud_tests.rs",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\mfa_replay_tests.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\parity_operations_tests.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\parity_resources_tests.rs",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\parity_system_tests.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\password_mfa_tests.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\password_reset_tests.rs",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\protocol_gaps_tests.rs",
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\saml_signing_tests.rs",
+        "passed": 23,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\social_link_tests.rs",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\social_login_tests.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\social_mfa_tests.rs",
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\social_state_tests.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\spnego_tests.rs",
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\storage_phase6_tests.rs",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\system_gaps_tests.rs",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\verification_security_tests.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "program": "tests\\webauthn_tests.rs",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "migrations": "001-028, including fresh release and browser databases",
+    "frontend_native_tests_passed": 6,
+    "wasm_check": "passed",
+    "trunk_release_build": "passed",
+    "frontend_api_fixture_browser_check": "passed",
+    "backend_log": "target/phase6/backend-tests-final.log",
+    "browser_e2e_log": "target/phase6/browser-e2e-final.log",
+    "frontend_logs": [
+      "web/target/phase6-native-tests.log",
+      "web/target/phase6-wasm-check.log",
+      "web/target/phase6-trunk-build.log",
+      "web/target/phase6-browser-fixtures.log"
+    ],
+    "local_format_check": "passed",
+    "final_compiler_check": "passed",
+    "final_compiler_command": "cargo check --offline -p casdog --tests --jobs 2",
+    "final_compiler_log": "target/phase6/final-check.log",
+    "real_backend_browser_e2e": {
+      "passed": true,
+      "checks": [
+        "Marketplace UI fetched checksummed local catalog, installed real application/provider, linked and uninstalled both transactionally",
+        "Browser signup and password login persisted a real user/session",
+        "Profile changes persisted through the authenticated API",
+        "Cancelling a native WebAuthn request leaves no enrolled credential and permits retry",
+        "Native navigator.credentials.create attestation verified and persisted by PostgreSQL",
+        "Native navigator.credentials.get assertion completed a real passkey login",
+        "Device browser approval, real OAuth token issuance, single-use completion and cancellation persisted",
+        "Passkey sign-in through the UI enforces enrolled MFA before issuing a browser session",
+        "Credential deletion persisted and refreshed the browser list",
+        "TOTP enrollment, failed proof rejection and password MFA login completed in the browser",
+        "Password recovery delivered through a local HTTP email provider and new password login succeeded"
+      ],
+      "runtimeErrors": [],
+      "apiInterception": false
+    },
+    "remote_ci": "not_run",
+    "strict_clippy": "not_run",
+    "screenshots": [
+      "target/phase6/browser-e2e/marketplace-installed.png",
+      "target/phase6/browser-e2e/webauthn-registered.png",
+      "web/target/browser-check/marketplace-mobile.png"
+    ]
+  },
+  "deployment_contract": [
+    "Apply migrations 027 and 028 before serving this version. Stop old application writers during rollout; they do not participate in checkout lifecycle enforcement.",
+    "Migration 028 locks orders, payments and products, validates pending order/payment/product snapshots and aggregate stock, and fails atomically when existing data requires reconciliation. It does not silently remove pending purchases.",
+    "A TOTP setup proof cannot be reused during the same accepted step to log in. Use a later authenticator step or a distinct recovery code.",
+    "Configure Stripe webhook secret or PayPal verification webhook ID for real notifications. Unsigned/unconfigured verification does not settle payments."
+  ],
+  "remaining": [
+    "LDAP and email/SMS-code primary authentication, trusted FaceID capture/liveness and real Kerberos verification.",
+    "Key application/service principals and API credential authentication, Agent proxy execution, full OpenClaw/OTLP.",
+    "Priced plans and recharge purchasing, auto-renewal scheduler, cart and dedicated commerce UI.",
+    "Remote void/refund, automatic reconciliation and recovery of unknown checkout outcomes, and PayPal capture.",
+    "Specialized CRUD/import side effects including imported password hashes, complete pagination/filtering semantics.",
+    "Runtime application of operational settings, additional storage/payment/messaging/synchronization providers.",
+    "Marketplace theme installation/cache/fallback catalog, broader dedicated UI, localization and organizational customization.",
+    "Real cloud storage/vendors, hardware/browser matrix, SAML interoperability and production multi-host/deployment acceptance."
+  ]
+}

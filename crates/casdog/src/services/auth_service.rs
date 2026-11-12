@@ -65,6 +65,8 @@ pub struct LoginRequest {
     pub login_type: Option<String>,
     // Verification code for code-based login
     pub code: Option<String>,
+    #[serde(alias = "codeMethod")]
+    pub code_method: Option<String>,
     // Social provider name
     pub provider: Option<String>,
     // Captcha
@@ -111,7 +113,8 @@ struct LoginRequestInput {
     organization: Option<String>,
     name: Option<String>,
     username: Option<String>,
-    password: String,
+    #[serde(default)]
+    password: Option<String>,
     // OAuth context fields
     #[serde(alias = "responseType")]
     response_type: Option<String>,
@@ -129,8 +132,12 @@ struct LoginRequestInput {
     // Login type: "password", "code", "provider", "ldap", "face"
     #[serde(alias = "type")]
     login_type: Option<String>,
+    #[serde(alias = "signinMethod")]
+    signin_method: Option<String>,
     // Verification code for code-based login
     code: Option<String>,
+    #[serde(alias = "codeMethod")]
+    code_method: Option<String>,
     // Social provider name
     provider: Option<String>,
     // Captcha
@@ -176,6 +183,34 @@ impl TryFrom<LoginRequestInput> for LoginRequest {
     type Error = &'static str;
 
     fn try_from(input: LoginRequestInput) -> Result<Self, Self::Error> {
+        let requested = input.login_type.as_deref().unwrap_or("password");
+        let requested = match requested {
+            "" | "login" | "password" => "password",
+            "code" => "code",
+            "ldap" => "ldap",
+            _ => return Err("unsupported login type"),
+        };
+        let method = match input.signin_method.as_deref() {
+            None | Some("") => requested,
+            Some("Password") => "password",
+            Some("LDAP") => "ldap",
+            Some("Verification code") => "code",
+            _ => return Err("unsupported sign-in method"),
+        };
+        if !matches!(input.login_type.as_deref(), None | Some("" | "login")) && requested != method
+        {
+            return Err("conflicting login type and sign-in method");
+        }
+        if input
+            .code_method
+            .as_deref()
+            .is_some_and(|method| !matches!(method, "email" | "sms"))
+        {
+            return Err("unsupported code sign-in method");
+        }
+        if method == "password" && input.password.is_none() {
+            return Err("missing field `password`");
+        }
         Ok(Self {
             owner: input
                 .owner
@@ -185,7 +220,7 @@ impl TryFrom<LoginRequestInput> for LoginRequest {
                 .username
                 .or(input.name)
                 .ok_or("missing field `name` or `username`")?,
-            password: input.password,
+            password: input.password.unwrap_or_default(),
             response_type: input.response_type,
             client_id: input.client_id,
             redirect_uri: input.redirect_uri,
@@ -194,8 +229,9 @@ impl TryFrom<LoginRequestInput> for LoginRequest {
             nonce: input.nonce,
             code_challenge: input.code_challenge,
             code_challenge_method: input.code_challenge_method,
-            login_type: input.login_type,
+            login_type: Some(method.to_owned()),
             code: input.code,
+            code_method: input.code_method,
             provider: input.provider,
             captcha_type: input.captcha_type,
             captcha_token: input.captcha_token,
@@ -406,6 +442,14 @@ impl AuthService {
     }
 
     pub async fn login(&self, pool: &DieselPool, req: LoginRequest) -> AppResult<LoginResponse> {
+        if !matches!(
+            req.login_type.as_deref(),
+            None | Some("" | "password" | "login")
+        ) {
+            return Err(AppError::Authentication(
+                "Complete this first factor through the browser login endpoint".into(),
+            ));
+        }
         let pg_pool = self
             .pg_pool
             .as_ref()
@@ -434,7 +478,12 @@ impl AuthService {
         };
 
         if let Some(app) = &application {
-            if app.is_deleted || app.organization != req.owner {
+            if app.is_deleted
+                || app.organization != req.owner
+                || !crate::services::primary_auth_service::PrimaryAuthService::method_enabled(
+                    app, "password",
+                )
+            {
                 return Err(AppError::Authentication(
                     "Application organization mismatch".into(),
                 ));

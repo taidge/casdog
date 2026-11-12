@@ -88,6 +88,32 @@ async fn ensure_service_auth(
                 "Messaging requires administrator or application credentials".into(),
             ));
         }
+        if principal.is_application() {
+            use crate::services::key_credentials_service::CredentialIdentity;
+            let application_id = match depot.obtain::<CredentialIdentity>() {
+                Ok(CredentialIdentity::Application { application_id, .. }) => {
+                    application_id.clone()
+                }
+                _ => {
+                    return Err(AppError::Authentication(
+                        "Missing application identity".into(),
+                    ));
+                }
+            };
+            let pool = depot
+                .obtain::<Pool<Postgres>>()
+                .map_err(|_| AppError::Internal("Database pool not available".into()))?;
+            let (id, name, providers): (String, String, Option<serde_json::Value>) = sqlx::query_as(
+                "SELECT id,name,providers FROM applications WHERE id=$1 AND organization=$2 AND NOT is_deleted",
+            )
+            .bind(&application_id).bind(&principal.owner)
+            .fetch_optional(pool).await?
+            .ok_or_else(|| AppError::Authentication("Application unavailable".into()))?;
+            depot.insert("messaging_global", false);
+            depot.insert("messaging_owner", principal.owner);
+            depot.insert("messaging_providers", providers);
+            return Ok(Some((id, name)));
+        }
         depot.insert("messaging_global", principal.global_admin());
         depot.insert("messaging_owner", principal.owner);
         return Ok(None);

@@ -305,6 +305,21 @@ async fn validate(conn: &mut PgConnection, kind: Kind, document: &Value) -> AppR
         if scope != "General" && org.is_empty() {
             return Err(AppError::Validation("Scoped key needs organization".into()));
         }
+        if !app.is_empty() || !text(document, "user").is_empty() {
+            if org != owner {
+                return Err(AppError::Validation(
+                    "Subject-bound key needs its owner's organization".into(),
+                ));
+            }
+            let active: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM organizations WHERE name=$1 AND NOT is_deleted AND NOT disable_signin)",
+            ).bind(org).fetch_one(&mut *conn).await?;
+            if !active {
+                return Err(AppError::Validation(
+                    "Key organization is unavailable".into(),
+                ));
+            }
+        }
         if scope == "Application" && app.is_empty() {
             return Err(AppError::Validation(
                 "Application key needs application".into(),

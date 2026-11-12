@@ -1,4 +1,4 @@
-# Casdoor 改写复核（更新至 2026-11-11）
+# Casdoor 改写复核（更新至 2026-11-12）
 
 ## 基线与结论
 
@@ -14,7 +14,7 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 
 运行 `python scripts/check-casdoor-parity.py --reference E:/Repos/casdoor --output docs/casdoor-route-inventory.json`。
 
-| 指标 | 复核前 | 当前（第五阶段） | 边界 |
+| 指标 | 复核前 | 当前（第六阶段） | 边界 |
 | --- | ---: | ---: | --- |
 | 上游显式路由唯一路径 | 336 | 336 | 含协议和非 API 路径 |
 | 可比较的扁平 API 路径＋HTTP 方法 | 299 | 299 | 排除嵌套协议和通配方法 |
@@ -84,11 +84,11 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 | P0 | 授权与租户隔离 | 第二阶段已实现统一拒绝策略及 REST、SCIM、MCP、消息提供商租户检查，新增正反向数据库回归已通过。后续新增接口仍需显式授权规则；尚未穷举所有资源、业务角色与策略组合。 |
 | P0 | 认证协议 | Kerberos 没有真实票据验证；SAML 签名/验证及全部协议仍需标准一致性和部署测试。OAuth state、回调、令牌撤销/退出已有第二阶段实现和回归用例，不能据此宣称所有协议完成。 |
 | P1 | 社交登录 | 第三阶段已实现 PostgreSQL 共享 state/完成凭证、MFA 补验、已有账户显式绑定及安全解绑。真实 GitHub/Google 等提供商、真实浏览器和生产集群验收仍未完成；本机独立连接池回归不能代替生产部署验收。 |
-| P1 | 找回密码 | 前后端闭环已实现；模拟邮件、租户/应用绑定、错误/过期/重放、并发消费与会话撤销的数据库回归已通过。真实 SMTP/云邮件环境和完整浏览器流程尚未验收。 |
-| P1 | MFA | 社交登录已增加短信/邮件验证码发送与补验 UI；普通密码登录发送挑战 UI 已在第四阶段补齐；第五阶段已补 WebAuthn 浏览器注册、登录与额外 MFA；FaceID 独立集成及 TOTP 跨挑战重放保护仍需完善；未覆盖其他登录方式的统一 MFA 强制策略。 |
+| P1 | 找回密码 | 前后端、本机邮件 HTTP 及真实后端浏览器闭环已验证；租户/应用绑定、错误/过期/重放、并发消费与会话撤销已有数据库回归。真实 SMTP/云邮件环境仍需部署验收。 |
+| P1 | MFA | 密码、社交、Passkey 和 FaceID 均已接入补验；第六阶段增加 PostgreSQL TOTP 时间步原子消费与 FaceID nonce 原子消费。FaceID 仍是现有 embedding 接口，可信摄像头采集和活体检查未实现；LDAP/code 首因子还不是独立的完整登录实现。 |
 | P1 | 兼容业务语义 | 通用 CRUD 绕过部分资源 service 校验和副作用；导入时上游 password 是哈希，而普通更新是明文，仍需专用导入契约；分页过滤只有已实现子集。 |
-| P1 | 上游新模块 | 第四阶段已补 Agent/Server/Entry/Key 管理、Integration/Marketplace 子集和 OpenClaw 基础图；代理执行、Key 凭证认证、完整集成/会话存储、OTLP 及专用管理页面仍有缺口。 |
-| P1 | 商业流程 | 第四阶段已补优惠券、普通商品购买和续费标志；定价计划/充值、异步库存预留、自动续费调度、购物车及专用页面仍缺。支付工厂仍仅 Stripe、PayPal、Balance、Dummy。 |
+| P1 | 上游新模块 | 已补 Agent/Server/Entry/Key 管理、Marketplace 应用/提供商安装页面、OpenClaw 基础图及 Local/S3 transcript；代理执行、Key API 凭证身份、theme 集成、OTLP 及更多专用页面仍有缺口。 |
+| P1 | 商业流程 | 普通商品购买已增加异步持久库存预留、通知验签/终态/幂等、管理员手工履约及 CRUD 约束。定价计划/充值、自动续费调度、购物车、远端 void/refund、超时后的 checkout 恢复和专用页面仍缺；PayPal approval 不再误记已付款，但 capture 流程仍需补齐。 |
 | P2 | 运维功能 | 第四阶段已补首次管理员密码、设置保存、Dashboard 热图/MFA/提供商与 Webhook 历史/重放；设置运行时应用仍缺；第五阶段已补配置化系统升级与持久化设备授权流程，部署验收边界见末尾。 |
 | P2 | 提供商 | 当前存储工厂仅 Local/S3，上游列出 11 类；同步器仅 Database(PostgreSQL)/LDAP/Keycloak；上游大量云目录、支付和消息提供商未覆盖。 |
 | P2 | 前端 | 105 个上游页面组件无法由 29 个通用 JSON 资源编辑器替代；复杂字段、验证、批量操作、关系选择、主题/i18n、组织应用定制需要逐场景验收。 |
@@ -222,3 +222,45 @@ Windows 本次构建使用已安装 PostgreSQL 18 附带的 OpenSSL 3 头文件/
 升级 manifest 为 `{version,url,sha256,size,target}`，`target` 如 `windows-x86_64`。运维通过 `CASDOG_UPGRADE_MANIFEST_URL`、`CASDOG_UPGRADE_MANIFEST_SHA256`、`CASDOG_UPGRADE_INSTALL_PATH`、`CASDOG_UPGRADE_RESTART_PROGRAM` 和可选 JSON 数组 `CASDOG_UPGRADE_RESTART_ARGS` 配置部署；多主机可设置 `CASDOG_UPGRADE_INSTANCE_ID` 区分机器。旧 journal 的安装路径变更需要运维恢复对应配置后处理。回归仅操作专用测试文件及本机子进程。
 
 身份核验 HTTP 适配器向提供商 POST `{idCardType,idCard,realName}`，可使用提供商 secret 作 Bearer 凭据，要求成功响应 `verified=true`；提供商必须在用户注册应用允许的名单中。各云厂商专属签名协议仍需适配。会话原文上传与预览当前支持 Local，S3 预览及真实云存储验收保留。MCP 同步支持 Streamable HTTP；stdio 和旧版 HTTP+SSE 传输仍待实现。指纹扫描会明确列出未评估的复杂 CVE 版本规则。真实硬件、其他浏览器、真实 GitHub/Google、云邮件短信、生产升级与集群切换仍需部署验收；前述协议、提供商、商业流程和专用页面差距继续保留。当前 299/299 只表示本次静态比较范围的路由声明覆盖。
+
+## 第六阶段：认证重放、S3 与异步支付（2026-11-12）
+
+- 认证：迁移 027 保存按账号和 authenticator secret 摘要区分的已消费时间步，使用数据库时间和原子条件更新防止 TOTP 跨 setup、legacy、密码和社交挑战重放，支持调用方事务回滚。FaceID 在账号锁内消费 nonce，复核组织、账号、应用权限和 enrollment 摘要，再进入已有 MFA 流程；失败匹配也消费该次 nonce。保留 FaceID 旧响应契约及管理员 impersonation 语义。
+- 存储：S3 从 Basic 认证改为 AWS SigV4，覆盖 PUT/GET/DELETE、UTF-8 对象键编码与签名 Range。正常 `upload-resource`、resource 和 transcript API 已支持 S3，继续使用租户检查及 DNS 固定。预览最多保存 2 MiB，覆盖服务器忽略 Range、chunked 未知长度及异常响应；未知总长时 `fileSize` 返回 null，保留 `loadedSize`、`truncated`。修复 multipart 默认 64 KiB 解析限制，保留单文件 32 MiB 上限；上传失败不会替换原有资源版本。
+- 支付：订单行锁串行创建 checkout，先持久保存付款和库存预留，再调用远端；同一订单复用同一付款。验签通知和管理员手工通知共用履约事务，库存、优惠券和账单只处理一次，终态不可逆。数据库约束阻止 REST/通用兼容 CRUD 修改 checkout 金额、归属和生命周期，冲突返回 409。买家可操作自己的付款/取消入口，同租户其他用户及跨租户请求仍拒绝。
+- 回调：三个通知入口允许实际网关无 JWT 回调，但要求提供商验签、付款引用、金额和币种匹配；手工修改状态必须是对应租户管理员。Stripe、PayPal 缺少验签配置时拒绝结算。Stripe 的事件 ID 不再被误用为付款 ID；PayPal approval 仅记待处理，只有 capture 已付款事件才可能结算。
+- 取消：尚未确认远端 void 的待支付订单返回 409，保留库存等待已验签的成功/过期结果，避免本地取消后用户仍能付款却丢失履约。远端 void/refund、PayPal capture 发起与超时/crash 后自动恢复 checkout 仍是缺口。
+- Marketplace：新增提供商 client ID/secret 和可选应用关联输入；切换预览清除旧凭据。应用与提供商安装、关联及卸载已通过实际后端浏览器流程；目录由本机 HTTP 提供，服务端仍校验 bundle 摘要。390px 页面布局与凭据清除另有浏览器夹具检查。
+
+### 第六阶段验证
+
+- 全新专用 PostgreSQL 已顺序执行 001–028。迁移 028 在单条 DO 语句内锁定订单、付款和商品，验证并原子回填历史待支付库存；有限库存按聚合需求扣减，无限库存、sold 和终态历史保持。缺货、无效数量、缺商品、缺失/删除/跨租户付款、分以下金额、金额或币种不匹配均整份回滚，真实隔离 schema 回归检查 DDL、库存和订单无漂移。
+- `cargo test --workspace --tests --no-fail-fast --jobs 2 -- --include-ignored --test-threads=1` 已通过：**24 个测试程序，409 次执行，0 失败、0 忽略**。lib/main 各运行相同 38 项单元测试；执行数不是独立业务场景数。
+- **97 个真实 PostgreSQL 测试场景通过**，比第五阶段增加 16 个：认证 7、S3 正常 API 2、商业流程与迁移 7。迁移失败测试函数内还包含 9 类异常数据子场景。原先 4 个数据库端到端场景仍全部通过。S3 另外 3 个非数据库真实 HTTP 测试与 AWS 已发布签名向量单元测试通过。
+- 前端 6 个原生测试、WASM 编译、Trunk release、API 夹具浏览器回归通过。**11 项真实后端浏览器检查通过**，使用全新专用数据库及编译后的 Glory/Sapid WASM，未拦截 API；新增 Marketplace 应用/提供商安装、持久关联与卸载，保留 WebAuthn、设备授权、MFA、注册和找回密码。TOTP 设置后使用不同恢复码登录，符合新增重放限制。桌面与 Marketplace 移动截图已检查。
+- 本机后端 `cargo check --offline -p casdog --tests --jobs 2`、Rust 格式检查及 Git/新增文件空白检查通过；未运行远端 CI 或严格 Clippy。构建遵循正常配置，backend target 为 `D:/Works/taidge/casdog/target`，frontend target 为 `D:/Works/taidge/casdog/web/target`，数据库仍使用项目内 PostgreSQL 集群，未使用 Docker。
+- 完整后端日志：`target/phase6/backend-tests-final.log`；浏览器日志及结果：`target/phase6/browser-e2e-final.log`、`target/phase6/browser-e2e/results.json`；前端日志：`web/target/phase6-native-tests.log`、`phase6-wasm-check.log`、`phase6-trunk-build.log`、`phase6-browser-fixtures.log`。逐程序统计、部署契约与缺口见 [phase6-gap-assessment.json](phase6-gap-assessment.json)。
+
+### 第六阶段部署与剩余工作
+
+先停止旧版本写入，再应用迁移 027、028 并启动新版本；旧代码没有 checkout 事务标记，不能在迁移后继续处理付款写入。028 会锁相关表；历史待付款的库存或关联数据有问题时明确失败，需先对账再重试，不会静默丢弃待支付订单。TOTP 设置时使用的验证码不能在同一已接受时间步内再次用于登录，可使用后续时间步或独立恢复码。真实支付通知需要配置 Stripe webhook secret 或 PayPal verification webhook ID。
+
+整体功能尚未达到 Casdoor 等价：LDAP/验证码首因子、真实 Kerberos、SAML 互操作、Key API 凭证与应用虚拟身份、Agent 代理执行、完整 OpenClaw/OTLP、计划购买/充值/自动续费/购物车、远端退款和支付恢复、专用导入语义、运行时设置、更多云提供商及专用前端仍需开发。FaceID embedding 比对不代表可信采集或活体检测；S3 本轮仅验证静态密钥签名，不含 STS、预签名 URL、Azure/GCS 或真实云验收。Marketplace theme、缓存和备用源仍缺。静态路由复核仍为 299/299，不能换算为整体完成率。
+
+
+## 第七阶段：首因子登录、API 凭证与购买权益（2026-11-12）
+
+- 新增邮件/短信验证码首因子与真实 LDAP service bind、搜索和 user bind，复用既有额外 MFA 及 OAuth 完成流程。验证码挑战保存摘要、绑定浏览器 cookie 和登录上下文，限制尝试与重发；全局密码/验证码开关优先于 signin_methods，验证码首因子不能再次充当同渠道第二因子。
+- Key 支持实际 Basic/query 凭证认证与即时状态复核；用户与应用使用内部类型标记区分。静态应用凭证的组织管理权限要求服务端来源记录或真实管理员显式审核，动态注册应用不可升级为可信静态来源；历史应用默认为未审核。新增 API keys 管理及审核页面。
+- 计划购买按权威价格生成不可变权益快照，付款后按日历月份/年份延长订阅；有效付费角色即时参与应用、角色及 Casbin 授权，不写永久 user_roles 或临时 Casbin 分组。授权决策重新读取数据库策略，跨实例撤销立即生效。充值按原始用户 UUID 一次入账，保留归档商品与付款历史，覆盖单连接池事务。
+- Stripe 区分零小数币种及 ISK/UGX 特殊计量，使用真实 HTTP checkout 与签名回调回归；内部账本仍为两位小数，三位小数币种明确拒绝。自动续费调度、远端 void/refund、PayPal capture 发起及未知支付结果自动恢复仍保留为缺口。
+- 修复审计表 actor 列映射、长应用主体与时间类型兼容；HTTP 请求日志只记录路径，避免 query 凭证泄漏。前端新增验证码/LDAP 登录，修正商品、计划与定价表单的实际字段和序列化契约。
+
+部署前应用迁移 029–032（此前版本也需先完成 027–028 的停写与对账要求）。历史应用凭证在显式审核前不会自动获得组织管理员权限。测试使用本机 LDAP、邮件、Stripe/S3 协议服务；生产目录、支付及云提供商仍需真实部署验收。整体 Casdoor 等价仍未完成，299/299 静态路由覆盖不代表业务完成率。
+
+
+### 第七阶段验证
+
+- 全量后端回归执行 27 个测试程序：438 通过、1 失败、0 忽略；套件包含 121 个显式启用的 PostgreSQL 测试函数。该失败暴露应用消息身份丢失提供商白名单；已修复并将旧夹具补齐真实组织及静态应用信任，授权 7 项与 Key 7 项定向复跑全部通过。最后这处局部修复后没有重复全量命令，保留原始失败日志而不替换记录。
+- 前端 6 项原生测试、WASM 检查、Trunk release 及浏览器夹具通过。15 项真实后端浏览器检查通过，使用新数据库、迁移 001–032 和实际 Glory/Sapid WASM，没有拦截 API。新增验证码、真实 LDAP、Key 管理与即时撤销、静态应用审核；保留 WebAuthn、设备、MFA、注册和找回密码。此浏览器执行早于最终消息处理局部修复，该修复由授权和 Key 定向回归覆盖。
+- Rust 格式检查和 Git 空白检查通过，未运行远端 CI 或严格 Clippy。原始日志与执行边界见 [phase7-gap-assessment.json](phase7-gap-assessment.json)。浏览器服务启动另报告既有 syncer 查询缺少 user 列，调度器 schema 修复保留为待办。

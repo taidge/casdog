@@ -868,6 +868,26 @@ async fn legacy_add(
     authorize_legacy_object(depot, req, resource, &body, "add").await?;
     let object = prepare_body(resource, body, &columns)?;
     let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    if resource.table == "applications"
+        && (principal.is_application()
+            || !principal.admin
+            || object
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.starts_with("dcr_"))
+            || object
+                .get("tags")
+                .and_then(Value::as_array)
+                .is_some_and(|tags| {
+                    tags.iter()
+                        .any(|tag| matches!(tag.as_str(), Some("dcr" | "cimd")))
+                }))
+    {
+        return Err(AppError::Authorization(
+            "Static application creation requires a real administrator and a non-dynamic identity"
+                .into(),
+        ));
+    }
     crate::hoops::authz::validate_resource_references(
         &pool,
         &principal,
@@ -896,7 +916,19 @@ async fn legacy_add(
     query.push(resource.table);
     query.push(")");
 
-    let data: Value = query.build_query_scalar().fetch_one(&pool).await?;
+    let mut tx = pool.begin().await?;
+    let data: Value = query.build_query_scalar().fetch_one(&mut *tx).await?;
+    if resource.table == "applications" {
+        crate::services::key_credentials_service::mark_static_application_conn(
+            &mut tx,
+            data["id"]
+                .as_str()
+                .ok_or_else(|| AppError::Internal("Application ID missing".into()))?,
+            &principal,
+        )
+        .await?;
+    }
+    tx.commit().await?;
     let object = resource_response(resource, data);
     Ok(Json(json!({
         "status": "ok",

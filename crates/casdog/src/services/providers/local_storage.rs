@@ -2,10 +2,12 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::{AppError, AppResult};
-use crate::services::providers::storage_provider::StorageProvider;
+use crate::services::providers::storage_provider::{
+    ObjectPreview, StorageProvider, validate_object_key,
+};
 
 /// Local file system storage provider
 pub struct LocalStorageProvider {
@@ -77,6 +79,43 @@ impl StorageProvider for LocalStorageProvider {
             .map_err(|e| AppError::Internal(format!("Failed to read file: {}", e)))?;
 
         Ok(data)
+    }
+
+    async fn preview(&self, key: &str, limit: usize) -> AppResult<ObjectPreview> {
+        validate_object_key(key)?;
+        // Canonicalize both sides on every read: an existing resource must not
+        // turn a later symlink/reparse-point replacement into a root escape.
+        let root = fs::canonicalize(&self.base_dir)
+            .await
+            .map_err(|_| AppError::NotFound("Storage directory unavailable".into()))?;
+        let path = fs::canonicalize(self.get_file_path(key))
+            .await
+            .map_err(|_| AppError::NotFound("Transcript object not found".into()))?;
+        if !path.starts_with(&root) {
+            return Err(AppError::Authorization(
+                "Transcript path escapes storage root".into(),
+            ));
+        }
+        let file = fs::File::open(path)
+            .await
+            .map_err(|_| AppError::NotFound("Transcript object unavailable".into()))?;
+        let size = file
+            .metadata()
+            .await
+            .map_err(|_| AppError::Internal("Cannot read transcript size".into()))?
+            .len();
+        let mut bytes = Vec::new();
+        file.take(limit.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| AppError::Internal("Cannot read transcript".into()))?;
+        let truncated = bytes.len() > limit || size > bytes.len() as u64;
+        bytes.truncate(limit);
+        Ok(ObjectPreview {
+            bytes,
+            size: Some(size),
+            truncated,
+        })
     }
 
     async fn delete(&self, key: &str) -> AppResult<()> {

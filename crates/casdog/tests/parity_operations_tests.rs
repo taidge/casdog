@@ -392,11 +392,14 @@ async fn webhook_replay_records_real_http_failure_success_and_tenant_scope() {
                     continue;
                 };
                 let headers = String::from_utf8_lossy(&bytes[..header_end]);
-                let length = headers.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap())
-                }).expect("Webhook request must declare its body length");
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .expect("Webhook request must declare its body length");
                 if bytes.len() >= header_end + 4 + length {
                     break header_end + 4;
                 }

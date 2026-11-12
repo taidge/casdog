@@ -145,10 +145,12 @@ impl PricingService {
     }
 
     pub async fn delete(pool: &PgPool, id: &str) -> AppResult<()> {
-        let result = sqlx::query("DELETE FROM pricings WHERE id = $1")
-            .bind(id)
-            .execute(pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE pricings SET is_deleted=true,updated_at=NOW() WHERE id=$1 AND is_deleted=false",
+        )
+        .bind(id)
+        .execute(pool)
+        .await?;
 
         if result.rows_affected() == 0 {
             return Err(AppError::NotFound("Pricing not found".to_string()));

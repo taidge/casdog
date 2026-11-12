@@ -7,6 +7,7 @@ const net = require('node:net');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 const { chromium } = require('../web/node_modules/playwright');
+const { startDirectory } = require('./ldap-browser-fixture.cjs');
 
 const project = path.resolve(__dirname, '..');
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {
@@ -14,7 +15,7 @@ const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--f
   encoding: 'utf8',
   windowsHide: true,
 }));
-const artifacts = path.join(metadata.target_directory, 'phase5', 'browser-e2e');
+const artifacts = path.join(metadata.target_directory, 'phase7', 'browser-e2e');
 const origin = process.env.CASDOG_E2E_BASE_URL || 'http://localhost:18085';
 const database = process.env.CASDOG_TEST_DATABASE_URL;
 assert.ok(database, 'CASDOG_TEST_DATABASE_URL must identify a migrated disposable database');
@@ -36,7 +37,20 @@ function totp(secret) {
 async function main() {
   await fs.mkdir(artifacts, { recursive: true });
   const mail = [];
+  const appBundle = Buffer.from(JSON.stringify({manifest:{id:'browser-portal',type:'app',version:'1.0',variables:[{name:'appUrl',label:{en:'Application URL'},type:'url',required:true}]},files:{'application.json':{redirectUris:['{{appUrl}}/callback']}}}));
+  const providerBundle = Buffer.from(JSON.stringify({manifest:{id:'browser-provider',type:'provider',version:'1.0',variables:[]},files:{'provider.json':{category:'OAuth',type:'GitHub',scopes:'user:email'}}}));
+  const registry = {integrations:[
+    {id:'browser-portal',name:{en:'Browser portal'},type:'app',latest:'1.0',versions:[{version:'1.0',url:'app.json',sha256:crypto.createHash('sha256').update(appBundle).digest('hex')}]},
+    {id:'browser-provider',name:{en:'Browser provider'},type:'provider',latest:'1.0',versions:[{version:'1.0',url:'provider.json',sha256:crypto.createHash('sha256').update(providerBundle).digest('hex')}]},
+  ]};
   const mailServer = http.createServer(async (request, response) => {
+    const pathname = new URL(request.url, 'http://localhost').pathname;
+    if (request.method === 'GET') {
+      const body = {'/marketplace/index.json':JSON.stringify(registry),'/marketplace/app.json':appBundle,'/marketplace/provider.json':providerBundle}[pathname];
+      response.writeHead(body ? 200 : 404, {'Content-Type':'application/json'});
+      response.end(body || '{}');
+      return;
+    }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     mail.push(JSON.parse(Buffer.concat(chunks).toString()));
@@ -45,10 +59,13 @@ async function main() {
   });
   await new Promise(resolve => mailServer.listen(0, '127.0.0.1', resolve));
   const mailEndpoint = `http://127.0.0.1:${mailServer.address().port}/mail`;
+  let directoryUsername='';
+  const directory=await startDirectory(()=>directoryUsername);
   let server, browser, page, runtimeImage;
   const serverOutput = [];
   const checks = [];
   const runtimeErrors = [];
+  const secretsThatMustNotBeLogged=[];
   try {
     if (!process.env.CASDOG_E2E_BASE_URL) {
       const url = new URL(origin);
@@ -68,6 +85,7 @@ async function main() {
           CASDOG__SERVER__PORT: url.port,
           CASDOG__SERVER__PUBLIC_URL: origin,
           CASDOG__JWT__SECRET: crypto.randomBytes(32).toString('hex'),
+          CASDOG_MARKETPLACE_URL: `http://127.0.0.1:${mailServer.address().port}/marketplace`,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -119,9 +137,10 @@ async function main() {
     }
     const suffix = crypto.randomBytes(5).toString('hex');
     const username = `browser-${suffix}`;
+    directoryUsername=username;
     const email = `${username}@example.test`;
     const password = 'BrowserPassword42!';
-    const admin = await api('POST', '/api/login', { owner: 'built-in', name: 'admin', password: '123' });
+    let admin = await api('POST', '/api/login', { owner: 'built-in', name: 'admin', password: '123' });
     assert.ok(admin.token, 'Disposable database admin must be initialized');
     await api('POST', '/api/providers', {
       owner: 'built-in', name: `browser-mail-${suffix}`, display_name: 'Browser mail fixture',
@@ -129,6 +148,81 @@ async function main() {
     }, admin.token);
 
     await page.goto(origin);
+    await navigate('Sign in', 'Sign in');
+    await fill('Username', 'admin');
+    await fill('Password', '123', true);
+    await page.getByRole('button', {name:'Sign in', exact:true}).last().click();
+    await page.getByRole('heading', {name:'Identity and access management'}).waitFor();
+    await navigate('API keys','API keys');
+    await fill('Key name',`user-key-${suffix}`);
+    await page.getByRole('button',{name:'Save API key',exact:true}).click();
+    await page.getByText('API key saved.',{exact:true}).waitFor();
+    const accessKey=await page.getByRole('textbox',{name:'Access key',exact:true}).inputValue();
+    const accessSecret=await page.getByLabel('Access secret',{exact:true}).inputValue();
+    secretsThatMustNotBeLogged.push(accessSecret);
+    const keyHeaders={Authorization:`Basic ${Buffer.from(`${accessKey}:${accessSecret}`).toString('base64')}`};
+    assert.ok((await context.request.get(`${origin}/api/users`,{headers:keyHeaders})).ok());
+    assert.ok((await context.request.get(`${origin}/api/users?${new URLSearchParams({accessKey,accessSecret})}`)).ok());
+    const disabled=page.waitForResponse(response=>response.url().endsWith('/api/update-key'));
+    await page.getByRole('combobox',{name:'Key state',exact:true}).selectOption('Inactive');
+    await page.getByRole('button',{name:'Save API key',exact:true}).click();
+    assert.ok((await disabled).ok());
+    await page.waitForFunction(()=>Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='Save API key'&&button.getAttribute('aria-busy')==='false'));
+    assert.equal((await context.request.get(`${origin}/api/users`,{headers:keyHeaders})).status(),401);
+    const enabled=page.waitForResponse(response=>response.url().endsWith('/api/update-key'));
+    await page.getByRole('combobox',{name:'Key state',exact:true}).selectOption('Active');
+    await page.getByRole('button',{name:'Save API key',exact:true}).click();
+    assert.ok((await enabled).ok());
+    await page.waitForFunction(()=>Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='Save API key'&&button.getAttribute('aria-busy')==='false'));
+    assert.ok((await context.request.get(`${origin}/api/users`,{headers:keyHeaders})).ok());
+    await page.getByRole('button',{name:'Delete API key',exact:true}).click();
+    await page.getByText('API key deleted.',{exact:true}).waitFor();
+    assert.equal((await context.request.get(`${origin}/api/users`,{headers:keyHeaders})).status(),401);
+    checks.push('API key UI creates real credentials; Basic/query authenticate without JWT and disable/delete revoke immediately');
+    await navigate('Marketplace', 'Marketplace integrations');
+    await page.getByRole('button', {name:'Load marketplace',exact:true}).click();
+    await page.getByRole('button', {name:'Preview Browser portal',exact:true}).click();
+    await fill('Application URL', 'https://browser.example.test');
+    await fill('Installation name', `market-app-${suffix}`);
+    await page.getByRole('button', {name:'Install integration',exact:true}).click();
+    await page.getByText('Integration installed.',{exact:true}).waitFor();
+    const installedApp = await api('GET', `/api/get-application?id=built-in/market-app-${suffix}`, undefined, admin.token);
+    assert.ok(installedApp.data.id);
+    assert.deepEqual(JSON.parse(installedApp.data.redirectUris || installedApp.data.redirect_uris), ['https://browser.example.test/callback']);
+    await navigate('API keys','API keys');
+    await fill('Reviewed application ID or owner/name',`built-in/market-app-${suffix}`);
+    await page.getByRole('button',{name:'Trust static application',exact:true}).click();
+    await page.getByText('Static application credentials trusted.',{exact:true}).waitFor();
+    const applicationHeaders={Authorization:`Basic ${Buffer.from(`${installedApp.data.clientId}:${installedApp.data.clientSecret}`).toString('base64')}`};
+    assert.ok((await context.request.get(`${origin}/api/get-global-users`,{headers:applicationHeaders})).ok());
+    assert.equal((await context.request.get(`${origin}/api/get-account`,{headers:applicationHeaders})).status(),403);
+    checks.push('Reviewed static application authenticates its virtual administrator while user-session endpoints reject it');
+    await navigate('Marketplace','Marketplace integrations');
+    await page.getByRole('button',{name:'Load marketplace',exact:true}).click();
+    await page.getByRole('button', {name:'Preview Browser provider',exact:true}).click();
+    await fill('Provider client ID', 'browser-oauth-client');
+    await fill('Installation name', `market-provider-${suffix}`);
+    await fill('Provider client secret', 'browser-oauth-secret', true);
+    await fill('Link to application (optional)', `market-app-${suffix}`);
+    await page.getByRole('button', {name:'Install integration',exact:true}).click();
+    await page.getByText('Integration installed.',{exact:true}).waitFor();
+    const linkedApp = await api('GET', `/api/get-application?id=built-in/market-app-${suffix}`, undefined, admin.token);
+    assert.ok(linkedApp.data.providers.some(value => value.name === `market-provider-${suffix}`));
+    await page.screenshot({path:path.join(artifacts, 'marketplace-installed.png'), fullPage:true});
+    await page.getByRole('button', {name:`Uninstall built-in/market-provider-${suffix}`,exact:true}).click();
+    await page.getByText('Integration uninstalled.',{exact:true}).waitFor();
+    const unlinkedApp = await api('GET', `/api/get-application?id=built-in/market-app-${suffix}`, undefined, admin.token);
+    assert.deepEqual(unlinkedApp.data.providers, []);
+    const appDeletion = page.waitForResponse(response => response.url().endsWith('/api/delete-integration') && response.request().postDataJSON().name === `market-app-${suffix}`);
+    await page.getByRole('button', {name:`Uninstall built-in/market-app-${suffix}`,exact:true}).click();
+    assert.ok((await appDeletion).ok());
+    await page.getByText('Integration uninstalled.',{exact:true}).waitFor();
+    assert.equal((await api('GET', `/api/get-integrations?owner=built-in`, undefined, admin.token)).data.some(value=>value.name===`market-app-${suffix}`||value.name===`market-provider-${suffix}`),false);
+    checks.push('Marketplace UI fetched checksummed local catalog, installed real application/provider, linked and uninstalled both transactionally');
+    await page.getByRole('button', {name:'Sign out',exact:true}).click();
+    await page.getByRole('heading', {name:'Sign in',exact:true}).waitFor();
+    // Browser logout revokes the administrator's earlier API session too.
+    admin = await api('POST', '/api/login', { owner:'built-in', name:'admin', password:'123' });
     await navigate('Sign up', 'Create account');
     await fill('Username', username);
     await fill('Display name', 'Browser user');
@@ -150,6 +244,48 @@ async function main() {
     await page.getByText('Profile saved.', { exact: true }).waitFor();
     assert.equal((await api('GET', '/api/get-account', undefined, token)).display_name, 'Browser profile saved');
     checks.push('Profile changes persisted through the authenticated API');
+
+    const loginApplication=await api('POST','/api/applications',{
+      owner:'admin',name:`browser-login-${suffix}`,display_name:'Browser primary login',organization:'built-in',
+      enable_password:true,enable_code_signin:true,signin_methods:[{name:'Password',rule:'All'},{name:'LDAP',rule:'All'},{name:'Verification code',rule:'Email only'}],
+      providers:[{name:`built-in/browser-mail-${suffix}`,rule:'All',canSignIn:true}],
+    },admin.token);
+    const directoryProvider=await api('POST','/api/providers',{
+      owner:'built-in',name:`browser-directory-${suffix}`,display_name:'Browser LDAP fixture',category:'LDAP',type:'LDAP',
+      host:directory.url,disable_ssl:true,client_id:'cn=service,dc=example,dc=test',client_secret:'search-password',
+      metadata:JSON.stringify({base_dn:'dc=example,dc=test',filter:'(objectClass=person)',filter_fields:['uid']}),
+    },admin.token);
+    await api('POST','/api/update-user',{owner:'built-in',name:username,ldap:directoryProvider.id},admin.token);
+    await page.getByRole('button',{name:'Sign out',exact:true}).click();
+    await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
+    await page.getByRole('combobox',{name:'Sign-in method',exact:true}).selectOption('email');
+    await fill('Username',username);await fill('Application',`admin/browser-login-${suffix}`);
+    await page.getByRole('button',{name:'Send sign-in code',exact:true}).click();
+    await page.getByText('Sign-in code sent to your enrolled contact.',{exact:true}).waitFor();
+    const signInDelivery=mail.find(value=>value.to===email&&value.subject==='Sign-in verification');
+    assert.ok(signInDelivery);
+    const signInCode=signInDelivery.body.match(/\b\d{6}\b/)[0];
+    await fill('Sign-in code','wrong');
+    const rejectedCode=page.waitForResponse(response=>response.url().endsWith('/api/login')&&response.request().method()==='POST');
+    await page.getByRole('button',{name:'Sign in',exact:true}).last().click();
+    assert.equal((await rejectedCode).status(),401);
+    assert.equal(await page.evaluate(()=>localStorage.getItem('casdog.auth.token')),null);
+    await fill('Sign-in code',signInCode);
+    await page.getByRole('button',{name:'Sign in',exact:true}).last().click();
+    await page.getByRole('heading',{name:'Identity and access management'}).waitFor();
+    checks.push('Passwordless email first factor delivers to enrolled contact and rejects wrong proof before real browser login');
+    await page.getByRole('button',{name:'Sign out',exact:true}).click();
+    await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
+    await page.getByRole('combobox',{name:'Sign-in method',exact:true}).selectOption('ldap');
+    await fill('Username',username);await fill('Application',`admin/browser-login-${suffix}`);
+    await fill('Password','DirectoryPassword42!',true);
+    await page.getByRole('button',{name:'Sign in',exact:true}).last().click();
+    await page.getByRole('heading',{name:'Identity and access management'}).waitFor();
+    assert.ok(directory.metrics.searches>0&&directory.metrics.userBinds>0&&directory.metrics.errors===0);
+    token=await page.evaluate(()=>JSON.parse(localStorage.getItem('casdog.auth.token')));
+    assert.equal((await api('GET','/api/get-account',undefined,token)).name,username);
+    checks.push('LDAP browser login uses real ldap3 service bind, directory search and distinct user password');
+    await navigate('Account','Account settings');
 
     const cdp = await context.newCDPSession(page);
     await cdp.send('WebAuthn.enable');
@@ -242,8 +378,11 @@ async function main() {
     await fill('Authenticator code', 'invalid');
     await page.getByRole('button', { name: 'Verify and enable MFA' }).click();
     await page.getByText('The verification code is invalid or expired. Try the current code from your authenticator.').waitFor();
+    const confirmationResponse = page.waitForResponse(response => response.url().endsWith('/api/mfa/verify'));
     await fill('Authenticator code', totp(setup.secret));
     await page.getByRole('button', { name: 'Verify and enable MFA' }).click();
+    const confirmation = await (await confirmationResponse).json();
+    assert.ok(confirmation.recovery_codes.length >= 2);
     await page.getByText('MFA enabled. Save your one-use recovery codes.', { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Sign out', exact: true }).click();
     await page.getByRole('heading', { name: 'Sign in', exact: true }).waitFor();
@@ -251,7 +390,8 @@ async function main() {
     await page.getByRole('button', { name: 'Sign in with passkey', exact: true }).click();
     await page.getByRole('combobox', { name: 'Verification method' }).waitFor();
     assert.equal(await page.evaluate(() => localStorage.getItem('casdog.auth.token')), null);
-    await fill('Verification code', totp(setup.secret));
+    await page.getByRole('combobox', {name:'Verification method'}).selectOption('recovery');
+    await fill('Verification code', confirmation.recovery_codes[0]);
     await page.getByRole('button', { name: 'Sign in', exact: true }).last().click();
     await page.getByRole('heading', { name: 'Identity and access management' }).waitFor();
     checks.push('Passkey sign-in through the UI enforces enrolled MFA before issuing a browser session');
@@ -272,7 +412,8 @@ async function main() {
     const badProof = page.waitForResponse(response => response.url().endsWith('/api/auth/password/session') && response.request().postData()?.includes('invalid'));
     await page.getByRole('button', { name: 'Sign in', exact: true }).last().click();
     assert.equal((await badProof).ok(), false);
-    await fill('Verification code', totp(setup.secret));
+    await page.getByRole('combobox', {name:'Verification method'}).selectOption('recovery');
+    await fill('Verification code', confirmation.recovery_codes[1]);
     await page.getByRole('button', { name: 'Sign in', exact: true }).last().click();
     await page.getByRole('heading', { name: 'Identity and access management' }).waitFor();
     token = await page.evaluate(() => JSON.parse(localStorage.getItem('casdog.auth.token')));
@@ -292,7 +433,7 @@ async function main() {
     for (let attempt = 0; attempt < 100 && !mail.some(value => value.to === email); attempt++) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    const delivery = mail.find(value => value.to === email);
+    const delivery = mail.find(value => value.to === email && value.subject === 'Reset your password');
     assert.ok(delivery, 'Local email provider must receive the recovery proof');
     const proof = delivery.body.split('\n')[1];
     await fill('Reset code', proof);
@@ -305,6 +446,7 @@ async function main() {
     await page.getByRole('heading', { name: 'Identity and access management' }).waitFor();
     checks.push('Password recovery delivered through a local HTTP email provider and new password login succeeded');
     assert.deepEqual(runtimeErrors, []);
+    for(const secret of secretsThatMustNotBeLogged)assert.ok(!serverOutput.join('').includes(secret),'Request tracing must omit query secrets');
     await fs.writeFile(path.join(artifacts, 'results.json'), JSON.stringify({ passed: true, checks, runtimeErrors, apiInterception: false }, null, 2));
     console.log(`Real backend browser E2E passed (${checks.length} checks)`);
   } catch (error) {
@@ -324,6 +466,7 @@ async function main() {
     if (runtimeImage) await fs.unlink(runtimeImage).catch(() => {});
     await fs.writeFile(path.join(artifacts, 'server.log'), serverOutput.join(''));
     await new Promise(resolve => mailServer.close(resolve));
+    await directory.close();
   }
 }
 

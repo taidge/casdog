@@ -51,6 +51,7 @@ async-trait.workspace = true
 rsa.workspace = true
 p256.workspace = true
 sha2.workspace = true
+hmac = "0.12"
 sha1.workspace = true
 reqwest.workspace = true
 lettre.workspace = true

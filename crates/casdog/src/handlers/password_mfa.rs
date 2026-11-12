@@ -10,6 +10,7 @@ use crate::{
         AuthService, CheckService, ProviderDispatchService, UserService,
         auth_service::LoginRequest,
         mfa_service::{MfaService, UserMfa},
+        primary_auth_service::PrimaryAuthService,
         social_state_service::proof_hash,
     },
 };
@@ -88,7 +89,13 @@ async fn load(conn: &mut PgConnection, secret: &str) -> AppResult<Challenge> {
 async fn policy(
     conn: &mut PgConnection,
     c: &Challenge,
-) -> AppResult<(User, Organization, Option<Application>, Vec<UserMfa>, Vec<String>)> {
+) -> AppResult<(
+    User,
+    Organization,
+    Option<Application>,
+    Vec<UserMfa>,
+    Vec<String>,
+)> {
     let user: User = sqlx::query_as(
         "SELECT * FROM users WHERE id=$1 AND owner=$2 AND NOT is_deleted AND NOT is_forbidden FOR UPDATE",
     )
@@ -97,23 +104,30 @@ async fn policy(
     .fetch_optional(&mut *conn)
     .await?
     .ok_or_else(denied)?;
-    let live: bool =
-        sqlx::query_scalar("SELECT $1::timestamptz>clock_timestamp()").bind(c.expires_at).fetch_one(&mut *conn).await?;
+    let live: bool = sqlx::query_scalar("SELECT $1::timestamptz>clock_timestamp()")
+        .bind(c.expires_at)
+        .fetch_one(&mut *conn)
+        .await?;
     if !live || c.attempts >= 5 || stamp(&user) != c.credential_stamp {
         return Err(denied());
     }
-    let org: Organization =
-        sqlx::query_as("SELECT * FROM organizations WHERE name=$1 AND NOT is_deleted AND NOT disable_signin")
-            .bind(&user.owner)
-            .fetch_optional(&mut *conn)
-            .await?
-            .ok_or_else(denied)?;
+    let org: Organization = sqlx::query_as(
+        "SELECT * FROM organizations WHERE name=$1 AND NOT is_deleted AND NOT disable_signin",
+    )
+    .bind(&user.owner)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(denied)?;
     if c.context.get("master_stamp").and_then(Value::as_str)
         != Some(proof_hash(org.master_password.as_deref().unwrap_or_default()).as_str())
     {
         return Err(denied());
     }
-    if let Some(changed) = user.last_change_password_time.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(changed) = user
+        .last_change_password_time
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
         if c.created_at <= DateTime::parse_from_rfc3339(changed).map_err(|_| denied())? {
             return Err(denied());
         }
@@ -126,11 +140,22 @@ async fn policy(
     if invalid_before.is_some_and(|t| c.created_at <= t) {
         return Err(denied());
     }
-    CheckService::check_signin_lockout(user.signin_wrong_times, user.last_signin_wrong_time.as_deref(), None, None)?;
+    CheckService::check_signin_lockout(
+        user.signin_wrong_times,
+        user.last_signin_wrong_time.as_deref(),
+        None,
+        None,
+    )?;
     let app = if let Some(id) = &c.application_id {
         let app = application_conn(conn, id).await?;
         if app.organization != user.owner
-            || (c.context["primary_factor"].as_str() != Some("webauthn") && !app.enable_password)
+            || (match c.context["primary_factor"].as_str() {
+                Some("webauthn" | "face") => false,
+                Some(method @ ("ldap" | "code_email" | "code_sms")) => {
+                    !PrimaryAuthService::method_enabled(&app, method)
+                }
+                _ => !PrimaryAuthService::method_enabled(&app, "password"),
+            })
         {
             return Err(denied());
         }
@@ -140,25 +165,64 @@ async fn policy(
         None
     };
     if c.context["primary_factor"].as_str() == Some("webauthn") {
-        let credential_id = c.context["webauthn_credential_id"].as_str().ok_or_else(denied)?;
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_webauthn_credentials WHERE id=$1 AND user_id=$2)")
-                .bind(credential_id)
-                .bind(&user.id)
-                .fetch_one(&mut *conn)
-                .await?;
+        let credential_id = c.context["webauthn_credential_id"]
+            .as_str()
+            .ok_or_else(denied)?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM user_webauthn_credentials WHERE id=$1 AND user_id=$2)",
+        )
+        .bind(credential_id)
+        .bind(&user.id)
+        .fetch_one(&mut *conn)
+        .await?;
         if !exists {
             return Err(denied());
         }
     }
-    let factors: Vec<UserMfa> =
-        sqlx::query_as("SELECT * FROM user_mfa WHERE user_id=$1 AND is_enabled ORDER BY id FOR UPDATE")
-            .bind(&user.id)
-            .fetch_all(&mut *conn)
-            .await?;
+    if c.context["primary_factor"].as_str() == Some("face")
+        && c.context["face_stamp"].as_str()
+            != Some(
+                crate::services::face_service::FaceService::credential_stamp(
+                    user.properties.as_ref(),
+                    user.custom.as_ref(),
+                )
+                .as_str(),
+            )
+    {
+        return Err(denied());
+    }
+    match c.context["primary_factor"].as_str() {
+        Some("code_email" | "code_sms") => {
+            let receiver = if c.context["primary_factor"] == "code_email" {
+                user.email.as_deref()
+            } else {
+                user.phone.as_deref()
+            };
+            if receiver != c.context["primary_receiver"].as_str() {
+                return Err(denied());
+            }
+        }
+        Some("ldap") => {
+            let provider = PrimaryAuthService::ldap_provider(conn, &user).await?;
+            if c.context["ldap_stamp"].as_str()
+                != Some(PrimaryAuthService::ldap_stamp(&provider, &user).as_str())
+            {
+                return Err(denied());
+            }
+        }
+        _ => (),
+    }
+    let factors: Vec<UserMfa> = sqlx::query_as(
+        "SELECT * FROM user_mfa WHERE user_id=$1 AND is_enabled ORDER BY id FOR UPDATE",
+    )
+    .bind(&user.id)
+    .fetch_all(&mut *conn)
+    .await?;
     let mut methods = Vec::new();
     if user.mfa_enabled && user.totp_secret.as_ref().is_some_and(|s| !s.is_empty())
-        || factors.iter().any(|f| matches!(f.mfa_type.as_str(), "app" | "totp"))
+        || factors
+            .iter()
+            .any(|f| matches!(f.mfa_type.as_str(), "app" | "totp"))
     {
         methods.push("app".to_string());
     }
@@ -176,28 +240,48 @@ async fn policy(
     }) {
         methods.push("recovery".to_string());
     }
+    if let Some(excluded) = match c.context["primary_factor"].as_str() {
+        Some("code_email") => Some("email"),
+        Some("code_sms") => Some("sms"),
+        _ => None,
+    } {
+        methods.retain(|method| method != excluded);
+    }
     Ok((user, org, app, factors, methods))
 }
 
 /// Initial password login. The service verifies the password before any browser
 /// proof exists; the response never contains the proof cookie's raw secret.
 #[endpoint(tags("Authentication"))]
-pub async fn login(depot: &mut Depot, req: &mut Request, res: &mut Response) -> AppResult<Json<Value>> {
-    let mut request: LoginRequest =
-        req.parse_json().await.map_err(|_| AppError::Validation("Invalid login request".into()))?;
+pub async fn login(
+    depot: &mut Depot,
+    req: &mut Request,
+    res: &mut Response,
+) -> AppResult<Json<Value>> {
+    let mut request: LoginRequest = req
+        .parse_json()
+        .await
+        .map_err(|_| AppError::Validation("Invalid login request".into()))?;
+    if matches!(request.login_type.as_deref(), Some("code" | "ldap")) {
+        return super::primary_auth::login(depot, req, res, request).await;
+    }
     let pg = pg_pool(depot)?;
-    let before: Option<User> = sqlx::query_as("SELECT * FROM users WHERE owner=$1 AND name=$2 AND NOT is_deleted")
-        .bind(&request.owner)
-        .bind(&request.name)
-        .fetch_optional(&pg)
-        .await?;
-    let issued: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()").fetch_one(&pg).await?;
-    let org_master: Option<String> =
-        sqlx::query_scalar("SELECT master_password FROM organizations WHERE name=$1 AND NOT is_deleted")
+    let before: Option<User> =
+        sqlx::query_as("SELECT * FROM users WHERE owner=$1 AND name=$2 AND NOT is_deleted")
             .bind(&request.owner)
+            .bind(&request.name)
             .fetch_optional(&pg)
-            .await?
-            .flatten();
+            .await?;
+    let issued: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pg)
+        .await?;
+    let org_master: Option<String> = sqlx::query_scalar(
+        "SELECT master_password FROM organizations WHERE name=$1 AND NOT is_deleted",
+    )
+    .bind(&request.owner)
+    .fetch_optional(&pg)
+    .await?
+    .flatten();
     let application = request.application.as_ref().map(|reference| {
         if reference.contains('/') {
             reference.clone()
@@ -208,23 +292,28 @@ pub async fn login(depot: &mut Depot, req: &mut Request, res: &mut Response) -> 
     let client_id = request.client_id.clone();
     let context = json!({"response_type":request.response_type,"redirect_uri":request.redirect_uri,"scope":request.scope,"state":request.state,"nonce":request.nonce,"code_challenge":request.code_challenge,"code_challenge_method":request.code_challenge_method,"master_stamp":proof_hash(org_master.as_deref().unwrap_or_default()),"client_id":client_id});
     request.passcode = None;
-    let diesel =
-        depot.obtain::<DieselPool>().cloned().map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
+    let diesel = depot
+        .obtain::<DieselPool>()
+        .cloned()
+        .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let auth = AuthService::new(UserService::new(diesel.clone())).with_pg_pool(pg.clone());
     let result = auth.login(&diesel, request).await?;
     if result.mfa_required != Some(true) {
         set_cookie(res, COOKIE, "", 0, public_origin()?.starts_with("https://"));
-        return Ok(Json(serde_json::to_value(result).map_err(|e| AppError::Internal(e.to_string()))?));
+        return Ok(Json(
+            serde_json::to_value(result).map_err(|e| AppError::Internal(e.to_string()))?,
+        ));
     }
     origin(req)?;
     let before = before.ok_or_else(denied)?;
     let mut tx = pg.begin().await?;
     let app_id: Option<String> = if let Some(client) = client_id {
-        let id: String = sqlx::query_scalar("SELECT id FROM applications WHERE client_id=$1 AND NOT is_deleted")
-            .bind(client)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(denied)?;
+        let id: String =
+            sqlx::query_scalar("SELECT id FROM applications WHERE client_id=$1 AND NOT is_deleted")
+                .bind(client)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(denied)?;
         if let Some(reference) = application {
             if application_conn(&mut tx, &reference).await?.id != id {
                 return Err(denied());
@@ -236,10 +325,19 @@ pub async fn login(depot: &mut Depot, req: &mut Request, res: &mut Response) -> 
     } else {
         None
     };
-    let (secret, methods) = create_primary_factor_challenge(&mut tx, &before, issued, app_id, context).await?;
+    let (secret, methods) =
+        create_primary_factor_challenge(&mut tx, &before, issued, app_id, context).await?;
     tx.commit().await?;
-    set_cookie(res, COOKIE, &secret, 300, public_origin()?.starts_with("https://"));
-    Ok(Json(json!({"mfa_required":true,"mfa_types":methods,"token":"","expires_in":0})))
+    set_cookie(
+        res,
+        COOKIE,
+        &secret,
+        300,
+        public_origin()?.starts_with("https://"),
+    );
+    Ok(Json(
+        json!({"mfa_required":true,"mfa_types":methods,"token":"","expires_in":0}),
+    ))
 }
 /// Called only after a server-verified first factor. Request bodies never set
 /// the primary_factor context used by passkey login.
@@ -268,6 +366,16 @@ pub(crate) async fn create_primary_factor_challenge(
         expires_at: issued + chrono::Duration::minutes(5),
     };
     let (_, _, _, _, methods) = policy(&mut *conn, &c).await?;
+    if matches!(
+        c.context["primary_factor"].as_str(),
+        Some("code_email" | "code_sms")
+    ) && methods.is_empty()
+    {
+        return Err(AppError::Authentication(
+            "This account needs an independent MFA factor; sign in with password or LDAP instead"
+                .into(),
+        ));
+    }
     // Account lock serializes creation/rate checks across application instances.
     sqlx::query(
         "DELETE FROM password_mfa_challenges WHERE secret_hash IN (SELECT secret_hash FROM password_mfa_challenges WHERE expires_at<clock_timestamp()-INTERVAL '1 hour' LIMIT 100 FOR UPDATE SKIP LOCKED)",
@@ -277,7 +385,9 @@ pub(crate) async fn create_primary_factor_challenge(
     let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM password_mfa_challenges WHERE user_id=$1 AND created_at>clock_timestamp()-INTERVAL '1 minute'")
         .bind(&user.id).fetch_one(&mut *conn).await?;
     if count >= 5 {
-        return Err(AppError::Validation("Wait before starting another MFA challenge".into()));
+        return Err(AppError::Validation(
+            "Wait before starting another MFA challenge".into(),
+        ));
     }
     sqlx::query("INSERT INTO password_mfa_challenges(secret_hash,user_id,organization,application_id,credential_stamp,context,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
         .bind(&hash).bind(&c.user_id).bind(&c.organization).bind(&c.application_id).bind(&c.credential_stamp).bind(&c.context).bind(c.created_at).bind(c.expires_at).execute(&mut *conn).await?;
@@ -310,22 +420,26 @@ async fn verify(
                     }
                 });
             match secret {
-                Some(s) => MfaService::verify_totp(s, code),
+                Some(s) => MfaService::consume_totp(conn, &user.id, s, code).await,
                 None => Ok(false),
             }
         }
         "recovery" => {
             for factor in factors {
-                if let Some(mut codes) =
-                    factor.recovery_codes.as_ref().and_then(|v| serde_json::from_str::<Vec<String>>(v).ok())
+                if let Some(mut codes) = factor
+                    .recovery_codes
+                    .as_ref()
+                    .and_then(|v| serde_json::from_str::<Vec<String>>(v).ok())
                 {
                     if let Some(i) = codes.iter().position(|v| v == code) {
                         codes.remove(i);
-                        sqlx::query("UPDATE user_mfa SET recovery_codes=$1,updated_at=NOW() WHERE id=$2")
-                            .bind(json!(codes).to_string())
-                            .bind(&factor.id)
-                            .execute(&mut *conn)
-                            .await?;
+                        sqlx::query(
+                            "UPDATE user_mfa SET recovery_codes=$1,updated_at=NOW() WHERE id=$2",
+                        )
+                        .bind(json!(codes).to_string())
+                        .bind(&factor.id)
+                        .execute(&mut *conn)
+                        .await?;
                         return Ok(true);
                     }
                 }
@@ -344,7 +458,8 @@ async fn verify(
                 && receiver == c.receiver.as_deref()
                 && c.code_method.as_deref() == Some(method)
                 && c.code_hash.as_deref() == Some(proof_hash(&format!("{secret}:{code}")).as_str())
-                && c.sent_at.is_some_and(|t| Utc::now() - t < chrono::Duration::minutes(5)))
+                && c.sent_at
+                    .is_some_and(|t| Utc::now() - t < chrono::Duration::minutes(5)))
         }
         _ => Ok(false),
     }
@@ -367,16 +482,17 @@ pub async fn consume_password_session(
     let code = input.passcode.as_deref().unwrap_or_default().trim();
     if code.is_empty() {
         tx.commit().await?;
-        res.headers_mut().insert("cache-control", "no-store".parse().unwrap());
-        return Ok(Json(json!({"mfa_required":true,"mfa_types":methods,"token":"","expires_in":0})));
+        res.headers_mut()
+            .insert("cache-control", "no-store".parse().unwrap());
+        return Ok(Json(
+            json!({"mfa_required":true,"mfa_types":methods,"token":"","expires_in":0}),
+        ));
     }
     let method = input.mfa_type.as_deref().unwrap_or("app");
-    let normalized = if method == "totp" {
-        "app"
-    } else {
-        method
-    };
-    if !methods.iter().any(|m| m == normalized) || !verify(&mut tx, &c, &user, &factors, &secret, method, code).await? {
+    let normalized = if method == "totp" { "app" } else { method };
+    if !methods.iter().any(|m| m == normalized)
+        || !verify(&mut tx, &c, &user, &factors, &secret, method, code).await?
+    {
         sqlx::query("UPDATE password_mfa_challenges SET attempts=attempts+1 WHERE secret_hash=$1 AND attempts<5")
             .bind(&c.secret_hash)
             .execute(&mut *tx)
@@ -387,9 +503,20 @@ pub async fn consume_password_session(
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        return Err(AppError::Authentication("Invalid second-factor proof".into()));
+        return Err(AppError::Authentication(
+            "Invalid second-factor proof".into(),
+        ));
     }
-    let result = primary_login_result(depot, &mut tx, &user, &org, app.as_ref(), c.created_at, &c.context).await?;
+    let result = primary_login_result(
+        depot,
+        &mut tx,
+        &user,
+        &org,
+        app.as_ref(),
+        c.created_at,
+        &c.context,
+    )
+    .await?;
     let consumed = sqlx::query(
         "DELETE FROM password_mfa_challenges WHERE secret_hash=$1 AND expires_at>clock_timestamp() AND attempts<5",
     )
@@ -417,8 +544,10 @@ pub(crate) async fn primary_login_result(
             user.last_change_password_time.as_deref(),
             (org.password_expire_days > 0).then_some(org.password_expire_days),
         )?;
-    let diesel =
-        depot.obtain::<DieselPool>().cloned().map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
+    let diesel = depot
+        .obtain::<DieselPool>()
+        .cloned()
+        .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let auth = AuthService::new(UserService::new(diesel));
     let response: UserResponse = user.clone().into();
     let mut claims = auth.claims_for_user(&response);
@@ -433,9 +562,15 @@ pub(crate) async fn primary_login_result(
             return Err(denied());
         }
         if app.grant_types.as_ref().is_some_and(|v| {
-            !v.as_array().is_some_and(|types| types.iter().any(|g| g.as_str() == Some("authorization_code")))
+            !v.as_array().is_some_and(|types| {
+                types
+                    .iter()
+                    .any(|g| g.as_str() == Some("authorization_code"))
+            })
         }) {
-            return Err(AppError::Authorization("Authorization code grant is disabled".into()));
+            return Err(AppError::Authorization(
+                "Authorization code grant is disabled".into(),
+            ));
         }
         if !app
             .redirect_uris
@@ -455,10 +590,14 @@ pub(crate) async fn primary_login_result(
         if let Some(challenge) = pkce {
             let valid = if pkce_method.unwrap_or("plain") == "S256" {
                 challenge.len() == 43
-                    && challenge.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                    && challenge
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
             } else {
                 (43..=128).contains(&challenge.len())
-                    && challenge.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+                    && challenge.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
+                    })
             };
             if !valid {
                 return Err(AppError::Validation("Invalid PKCE challenge".into()));
@@ -483,17 +622,29 @@ async fn delivery_provider(
     category: &str,
 ) -> AppResult<Provider> {
     if let Some(app) = app {
-        for item in app.providers.as_ref().and_then(Value::as_array).into_iter().flatten() {
+        for item in app
+            .providers
+            .as_ref()
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let Some(reference) = item["name"].as_str() else {
                 continue;
             };
             let rule = item["rule"].as_str().unwrap_or_default().trim();
-            if !rule.is_empty() && !rule.eq_ignore_ascii_case("all") && !rule.eq_ignore_ascii_case("mfa") {
+            if !rule.is_empty()
+                && !rule.eq_ignore_ascii_case("all")
+                && !rule.eq_ignore_ascii_case("mfa")
+            {
                 continue;
             }
             if category == "SMS"
                 && item["countryCodes"].as_array().is_some_and(|codes| {
-                    !codes.is_empty() && !codes.iter().any(|code| code.as_str() == user.country_code.as_deref())
+                    !codes.is_empty()
+                        && !codes
+                            .iter()
+                            .any(|code| code.as_str() == user.country_code.as_deref())
                 })
             {
                 continue;
@@ -513,17 +664,20 @@ async fn delivery_provider(
     } else {
         // No application context means only an unambiguous provider owned by
         // this organization is eligible; never fall back to another tenant.
-        let mut providers: Vec<Provider> =
-            sqlx::query_as("SELECT * FROM providers WHERE owner=$1 AND category=$2 ORDER BY name LIMIT 2")
-                .bind(&user.owner)
-                .bind(category)
-                .fetch_all(&mut *conn)
-                .await?;
+        let mut providers: Vec<Provider> = sqlx::query_as(
+            "SELECT * FROM providers WHERE owner=$1 AND category=$2 ORDER BY name LIMIT 2",
+        )
+        .bind(&user.owner)
+        .bind(category)
+        .fetch_all(&mut *conn)
+        .await?;
         if providers.len() == 1 {
             return Ok(providers.remove(0));
         }
     }
-    Err(AppError::Authorization("Configure an MFA delivery provider for this application".into()))
+    Err(AppError::Authorization(
+        "Configure an MFA delivery provider for this application".into(),
+    ))
 }
 #[endpoint(tags("Authentication"))]
 pub async fn send_password_mfa_code(
@@ -535,7 +689,9 @@ pub async fn send_password_mfa_code(
     let input = input(req).await?;
     let method = input.mfa_type.as_deref().unwrap_or_default();
     if !matches!(method, "email" | "sms") {
-        return Err(AppError::Validation("Select an enrolled email or SMS factor".into()));
+        return Err(AppError::Validation(
+            "Select an enrolled email or SMS factor".into(),
+        ));
     }
     let pg = pg_pool(depot)?;
     let mut tx = pg.begin().await?;
@@ -555,17 +711,15 @@ pub async fn send_password_mfa_code(
     let recent:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM password_mfa_challenges WHERE user_id=$1 AND sent_at>clock_timestamp()-INTERVAL '60 seconds')")
         .bind(&user.id).fetch_one(&mut *tx).await?;
     if recent {
-        return Err(AppError::Validation("Wait before requesting another verification code".into()));
+        return Err(AppError::Validation(
+            "Wait before requesting another verification code".into(),
+        ));
     }
     let provider = delivery_provider(
         &mut tx,
         &user,
         app.as_ref(),
-        if method == "email" {
-            "Email"
-        } else {
-            "SMS"
-        },
+        if method == "email" { "Email" } else { "SMS" },
     )
     .await?;
     let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
@@ -581,11 +735,20 @@ pub async fn send_password_mfa_code(
     let sent = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         if method == "email" {
             dispatch
-                .send_email_with_provider(&provider, &[receiver], "Sign-in verification", &message, None)
+                .send_email_with_provider(
+                    &provider,
+                    &[receiver],
+                    "Sign-in verification",
+                    &message,
+                    None,
+                )
                 .await
                 .map(|_| ())
         } else {
-            dispatch.send_sms_with_provider(&provider, &[receiver], &message).await.map(|_| ())
+            dispatch
+                .send_sms_with_provider(&provider, &[receiver], &message)
+                .await
+                .map(|_| ())
         }
     })
     .await;
@@ -595,10 +758,15 @@ pub async fn send_password_mfa_code(
             .bind(code_hash)
             .execute(&pg)
             .await?;
-        return Err(AppError::Internal("Verification delivery failed; request a new code".into()));
+        return Err(AppError::Internal(
+            "Verification delivery failed; request a new code".into(),
+        ));
     }
-    res.headers_mut().insert("cache-control", "no-store".parse().unwrap());
-    Ok(Json(json!({"status":"ok","msg":"Verification code sent to your enrolled contact"})))
+    res.headers_mut()
+        .insert("cache-control", "no-store".parse().unwrap());
+    Ok(Json(
+        json!({"status":"ok","msg":"Verification code sent to your enrolled contact"}),
+    ))
 }
 #[endpoint(tags("Authentication"))]
 pub async fn cancel_password_session(

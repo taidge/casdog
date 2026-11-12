@@ -16,6 +16,10 @@ pub struct Product {
     pub price: f64,
     pub quantity: i32,
     pub sold: i32,
+    pub is_recharge: bool,
+    pub recharge_options: serde_json::Value,
+    pub disable_custom_recharge: bool,
+    pub plan_id: Option<String>,
     pub tag: Option<String>,
     pub state: String,
     pub is_deleted: bool,
@@ -34,6 +38,14 @@ pub struct CreateProductRequest {
     pub currency: Option<String>,
     pub price: Option<f64>,
     pub quantity: Option<i32>,
+    #[serde(alias = "isRecharge")]
+    pub is_recharge: Option<bool>,
+    #[serde(alias = "rechargeOptions")]
+    pub recharge_options: Option<Vec<f64>>,
+    #[serde(alias = "disableCustomRecharge")]
+    pub disable_custom_recharge: Option<bool>,
+    #[serde(alias = "planId")]
+    pub plan_id: Option<String>,
     pub tag: Option<String>,
     pub state: Option<String>,
 }
@@ -47,6 +59,14 @@ pub struct UpdateProductRequest {
     pub currency: Option<String>,
     pub price: Option<f64>,
     pub quantity: Option<i32>,
+    #[serde(alias = "isRecharge")]
+    pub is_recharge: Option<bool>,
+    #[serde(alias = "rechargeOptions")]
+    pub recharge_options: Option<Vec<f64>>,
+    #[serde(alias = "disableCustomRecharge")]
+    pub disable_custom_recharge: Option<bool>,
+    #[serde(alias = "planId")]
+    pub plan_id: Option<String>,
     pub tag: Option<String>,
     pub state: Option<String>,
 }
@@ -64,6 +84,10 @@ pub struct ProductResponse {
     pub price: f64,
     pub quantity: i32,
     pub sold: i32,
+    pub is_recharge: bool,
+    pub recharge_options: serde_json::Value,
+    pub disable_custom_recharge: bool,
+    pub plan_id: Option<String>,
     pub tag: Option<String>,
     pub state: String,
     pub created_at: DateTime<Utc>,
@@ -84,6 +108,10 @@ impl From<Product> for ProductResponse {
             price: p.price,
             quantity: p.quantity,
             sold: p.sold,
+            is_recharge: p.is_recharge,
+            recharge_options: p.recharge_options,
+            disable_custom_recharge: p.disable_custom_recharge,
+            plan_id: p.plan_id,
             tag: p.tag,
             state: p.state,
             created_at: p.created_at,

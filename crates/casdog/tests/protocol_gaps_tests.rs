@@ -70,6 +70,7 @@ impl Fixture {
         let claims = auth.claims_for_user(&UserResponse::from(account));
         let bearer = auth.generate_token_from_claims(&claims).unwrap();
         let principal = Principal {
+            application_identity: false,
             id: user,
             owner: owner.clone(),
             name: "alice".into(),
@@ -260,6 +261,7 @@ async fn device_approval_enforces_tenant_client_and_enabled_grant() {
     let f = Fixture::new().await;
     let proof = f.begin().await;
     let foreign = Principal {
+        application_identity: false,
         owner: "another-tenant".into(),
         ..f.principal.clone()
     };
@@ -416,6 +418,7 @@ async fn transcript_reads_real_storage_bounds_preview_and_rejects_tenant_or_path
     assert_eq!(result["loadedSize"], 2 * 1024 * 1024);
     assert_eq!(result["truncated"], true);
     let foreign = Principal {
+        application_identity: false,
         owner: "foreign".into(),
         ..f.principal.clone()
     };
@@ -514,6 +517,7 @@ async fn mcp_sync_negotiates_http_session_sse_pagination_and_preserves_denials()
     );
     assert!(requests.lock().unwrap().is_empty());
     let global = Principal {
+        application_identity: false,
         owner: "built-in".into(),
         ..f.principal.clone()
     };
@@ -557,6 +561,7 @@ async fn mcp_sync_negotiates_http_session_sse_pagination_and_preserves_denials()
     .unwrap();
     assert_eq!(unchanged, saved);
     let foreign = Principal {
+        application_identity: false,
         owner: "foreign".into(),
         ..f.principal.clone()
     };
@@ -650,6 +655,7 @@ async fn transcript_http_upload_and_preview_use_provider_entry_and_resource_apis
                 salvo::affix_state::AffixList::new()
                     .inject(f.pool.clone())
                     .inject(Principal {
+                        application_identity: false,
                         admin: false,
                         ..f.principal.clone()
                     }),
@@ -833,6 +839,7 @@ async fn ordinary_upload_download_delete_preserves_legacy_references_and_denies_
         .await
         .unwrap();
     let principal = Principal {
+        application_identity: false,
         admin: false,
         ..f.principal.clone()
     };
@@ -840,6 +847,7 @@ async fn ordinary_upload_download_delete_preserves_legacy_references_and_denies_
     let foreign = file_service(
         f.pool.clone(),
         Principal {
+            application_identity: false,
             id: uuid::Uuid::new_v4().to_string(),
             owner: "foreign".into(),
             name: "alice".into(),
@@ -1004,12 +1012,14 @@ async fn local_owner_namespaces_distinguish_case_and_reject_external_buckets() {
     let upper = format!("Org-{suffix}");
     let lower = format!("org-{suffix}");
     let upper_principal = Principal {
+        application_identity: false,
         id: "user".into(),
         owner: upper.clone(),
         name: "user".into(),
         admin: true,
     };
     let lower_principal = Principal {
+        application_identity: false,
         owner: lower.clone(),
         ..upper_principal.clone()
     };
@@ -1047,6 +1057,7 @@ async fn implicit_local_upload_is_resolved_from_resource_owner_for_global_and_or
     };
     let f = Fixture::new().await;
     let principal = Principal {
+        application_identity: false,
         admin: false,
         ..f.principal.clone()
     };
@@ -1054,6 +1065,7 @@ async fn implicit_local_upload_is_resolved_from_resource_owner_for_global_and_or
     let global = file_service(
         f.pool.clone(),
         Principal {
+            application_identity: false,
             owner: "built-in".into(),
             admin: true,
             ..f.principal.clone()

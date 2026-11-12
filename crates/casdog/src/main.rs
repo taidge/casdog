@@ -11,7 +11,6 @@ mod services;
 use salvo::affix_state::AffixList;
 use salvo::cors::Cors;
 use salvo::http::Method;
-use salvo::logging::Logger;
 use salvo::prelude::*;
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::layer::SubscriberExt;
@@ -63,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Ensure uploads directory exists for local file storage
     std::fs::create_dir_all("./uploads").ok();
 
-    let casbin_service = CasbinService::new().await?;
+    let casbin_service = CasbinService::with_pool(pool.clone()).await?;
     tracing::info!("Casbin authorization service initialized");
 
     let syncer_pool = pool.clone();
@@ -86,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = routes::create_router();
 
     let service = Service::new(router)
-        .hoop(Logger::new())
+        .hoop(hoops::record_filter::RequestLogger)
         .hoop(cors)
         .hoop(
             AffixList::new()

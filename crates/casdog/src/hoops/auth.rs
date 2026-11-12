@@ -105,6 +105,18 @@ fn validate_credential_epoch(claims: &Claims, changed: Option<String>) -> AppRes
 }
 
 pub fn insert_claims(depot: &mut Depot, claims: Claims) {
+    super::authz::set_application_identity(depot, false);
+    depot.inject(
+        crate::services::key_credentials_service::CredentialIdentity::User(
+            super::authz::Principal {
+                id: claims.sub.clone(),
+                owner: claims.owner.clone(),
+                name: claims.name.clone(),
+                admin: claims.is_admin,
+                application_identity: false,
+            },
+        ),
+    );
     depot.insert("user_id", claims.sub.clone());
     depot.insert("user_owner", claims.owner.clone());
     depot.insert("user_name", claims.name.clone());
@@ -130,6 +142,29 @@ pub fn insert_claims(depot: &mut Depot, claims: Claims) {
 }
 
 pub struct JwtAuth;
+/// Shared credential selection for required and optional authentication. A
+/// malformed or failed explicit source is an error, never an anonymous retry.
+pub async fn authenticate_request(req: &Request, depot: &mut Depot) -> AppResult<bool> {
+    use crate::services::key_credentials_service::{self as credentials, CredentialSource};
+    let Some(source) = credentials::source(req)? else {
+        return Ok(false);
+    };
+    let pool = depot
+        .obtain::<PgPool>()
+        .cloned()
+        .map_err(|_| AppError::Authentication("Credential validation unavailable".into()))?;
+    match source {
+        CredentialSource::Bearer(token) => {
+            let claims = validate_session_claims(&pool, &token).await?;
+            insert_claims(depot, claims);
+        }
+        source => {
+            credentials::insert_identity(depot, credentials::authenticate(&pool, &source).await?)
+        }
+    }
+    Ok(true)
+}
+
 #[async_trait]
 impl Handler for JwtAuth {
     async fn handle(
@@ -139,32 +174,16 @@ impl Handler for JwtAuth {
         res: &mut Response,
         ctrl: &mut FlowCtrl,
     ) {
-        let token = req
-            .header::<String>("Authorization")
-            .and_then(|s| s.strip_prefix("Bearer ").map(str::to_owned));
-        let Some(token) = token else {
-            res.status_code(StatusCode::UNAUTHORIZED);
-            res.render(Json(ErrorResponse::new(
-                401,
-                "Missing authorization header",
-            )));
-            ctrl.skip_rest();
-            return;
-        };
-        let result = match depot.obtain::<PgPool>() {
-            Ok(pool) => validate_session_claims(pool, &token).await,
-            Err(_) => Err(AppError::Authentication(
-                "Session validation unavailable".into(),
-            )),
-        };
-        match result {
-            Ok(claims) => {
-                insert_claims(depot, claims);
+        match authenticate_request(req, depot).await {
+            Ok(true) => {
                 ctrl.call_next(req, depot, res).await;
             }
-            Err(_) => {
+            Ok(false) | Err(_) => {
                 res.status_code(StatusCode::UNAUTHORIZED);
-                res.render(Json(ErrorResponse::new(401, "Invalid or expired session")));
+                res.render(Json(ErrorResponse::new(
+                    401,
+                    "Missing, invalid or expired credentials",
+                )));
                 ctrl.skip_rest();
             }
         }
@@ -181,15 +200,28 @@ impl Handler for OptionalJwtAuth {
         res: &mut Response,
         ctrl: &mut FlowCtrl,
     ) {
-        if let Some(token) = req
-            .header::<String>("Authorization")
-            .and_then(|s| s.strip_prefix("Bearer ").map(str::to_owned))
+        if authenticate_request(req, depot).await.is_err() {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            res.render(Json(ErrorResponse::new(
+                401,
+                "Invalid or expired credentials",
+            )));
+            ctrl.skip_rest();
+            return;
+        }
+        if crate::services::key_credentials_service::application_identity(depot)
+            && matches!(
+                req.uri().path().trim_end_matches('/'),
+                "/api/send-verification-code" | "/api/verify-code"
+            )
         {
-            if let Ok(pool) = depot.obtain::<PgPool>() {
-                if let Ok(claims) = validate_session_claims(pool, &token).await {
-                    insert_claims(depot, claims);
-                }
-            }
+            res.status_code(StatusCode::FORBIDDEN);
+            res.render(Json(ErrorResponse::new(
+                403,
+                "Application credentials cannot authenticate an interactive user",
+            )));
+            ctrl.skip_rest();
+            return;
         }
         ctrl.call_next(req, depot, res).await;
     }

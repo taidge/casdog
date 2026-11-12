@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use subtle::ConstantTimeEq;
 
 use crate::error::{AppError, AppResult};
 use crate::services::providers::payment_provider::{
@@ -14,6 +15,7 @@ pub struct StripePaymentProvider {
     client: Client,
     secret_key: String,
     webhook_secret: Option<String>,
+    api_base: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -69,24 +71,55 @@ impl StripePaymentProvider {
             client: Client::new(),
             secret_key,
             webhook_secret,
+            api_base: "https://api.stripe.com/v1".into(),
         }
+    }
+
+    /// Supply an HTTPS gateway or loopback transport for embedded integrations
+    /// and transport regression tests. The provider factory uses Stripe's
+    /// official endpoint; requests cannot override it through provider metadata.
+    pub fn with_api_base(mut self, base: &str) -> AppResult<Self> {
+        let parsed = reqwest::Url::parse(base)
+            .map_err(|_| AppError::Config("Invalid Stripe gateway URL".into()))?;
+        let loopback = parsed.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !(parsed.scheme() == "https" || (parsed.scheme() == "http" && loopback))
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(AppError::Config(
+                "Stripe gateway requires HTTPS or a loopback HTTP transport".into(),
+            ));
+        }
+        self.api_base = parsed.as_str().trim_end_matches('/').to_owned();
+        Ok(self)
     }
 
     /// Get Stripe API base URL
     fn get_api_url(&self) -> &str {
-        "https://api.stripe.com/v1"
+        &self.api_base
     }
 
     fn verify_signature(&self, headers: &HashMap<String, String>, body: &[u8]) -> AppResult<()> {
-        let Some(secret) = self.webhook_secret.as_deref() else {
-            return Ok(());
-        };
+        let secret = self
+            .webhook_secret
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                AppError::Authentication("Stripe webhook verification is not configured".into())
+            })?;
 
         let signature_header = headers.get("stripe-signature").ok_or_else(|| {
             AppError::Authentication("Missing Stripe-Signature header".to_string())
         })?;
         let mut timestamp = None;
-        let mut signature = None;
+        let mut signatures = Vec::new();
 
         for part in signature_header.split(',') {
             let mut parts = part.trim().splitn(2, '=');
@@ -94,7 +127,7 @@ impl StripePaymentProvider {
             let value = parts.next().unwrap_or_default().trim();
             match key {
                 "t" => timestamp = Some(value.to_string()),
-                "v1" => signature = Some(value.to_string()),
+                "v1" => signatures.push(value.to_string()),
                 _ => {}
             }
         }
@@ -102,9 +135,14 @@ impl StripePaymentProvider {
         let timestamp = timestamp.ok_or_else(|| {
             AppError::Authentication("Invalid Stripe-Signature header".to_string())
         })?;
-        let signature = signature.ok_or_else(|| {
-            AppError::Authentication("Invalid Stripe-Signature header".to_string())
-        })?;
+        let signed_at = timestamp
+            .parse::<i64>()
+            .map_err(|_| AppError::Authentication("Invalid Stripe signature timestamp".into()))?;
+        if chrono::Utc::now().timestamp().abs_diff(signed_at) > 300 {
+            return Err(AppError::Authentication(
+                "Stripe webhook signature timestamp is outside the allowed window".into(),
+            ));
+        }
 
         let mut payload = Vec::with_capacity(timestamp.len() + 1 + body.len());
         payload.extend_from_slice(timestamp.as_bytes());
@@ -112,7 +150,10 @@ impl StripePaymentProvider {
         payload.extend_from_slice(body);
 
         let expected = compute_hmac_sha256_hex(secret.as_bytes(), &payload);
-        if expected != signature {
+        if !signatures
+            .iter()
+            .any(|signature| bool::from(expected.as_bytes().ct_eq(signature.as_bytes())))
+        {
             return Err(AppError::Authentication(
                 "Stripe webhook signature verification failed".to_string(),
             ));
@@ -120,6 +161,59 @@ impl StripePaymentProvider {
 
         Ok(())
     }
+}
+
+/// Stripe charge units differ from payout units and sometimes from ISO units.
+/// Source: https://docs.stripe.com/currencies#zero-decimal and #special-cases.
+/// The local ledger stores hundredths. Three-decimal currencies need a separate
+/// precision migration and are rejected explicitly, never guessed as cents.
+fn stripe_charge_scale(currency: &str) -> AppResult<(i64, bool)> {
+    if currency.len() != 3 || !currency.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return Err(AppError::Validation(
+            "Stripe currency must be a three-letter code".into(),
+        ));
+    }
+    match currency.to_ascii_uppercase().as_str() {
+        "BHD"|"IQD"|"JOD"|"KWD"|"LYD"|"OMR"|"TND"=>Err(AppError::Validation("Three-decimal Stripe currencies are not supported by the current two-decimal account ledger".into())),
+        "BIF"|"CLP"|"DJF"|"GNF"|"JPY"|"KMF"|"KRW"|"MGA"|"PYG"|"RWF"|"VND"|"VUV"|"XAF"|"XOF"|"XPF"=>Ok((1,true)),
+        // Both currencies require API values ending in 00, despite having no
+        // fractional major units. HUF/TWD remain ordinary two-decimal charges;
+        // their whole-unit restrictions apply only to payouts.
+        "ISK"|"UGX"=>Ok((100,true)),
+        _=>Ok((100,false)),
+    }
+}
+
+fn stripe_amount_to_minor(amount: f64, currency: &str) -> AppResult<i64> {
+    let (scale, whole) = stripe_charge_scale(currency)?;
+    let minor = amount * scale as f64;
+    if !amount.is_finite()
+        || !(0.0..=9_000_000_000_000.0).contains(&amount)
+        || (whole && (amount.round() - amount).abs() > 0.000001)
+        || (minor.round() - minor).abs() > 0.000001
+    {
+        return Err(AppError::Validation(format!(
+            "Amount cannot be represented exactly in Stripe {} charge units",
+            currency.to_ascii_uppercase()
+        )));
+    }
+    Ok(minor.round() as i64)
+}
+
+fn stripe_amount_from_minor(minor: i64, currency: &str) -> AppResult<f64> {
+    let (scale, whole) = stripe_charge_scale(currency)?;
+    if minor < 0 || (whole && minor % scale != 0) {
+        return Err(AppError::Authentication(
+            "Stripe notification contains an invalid fractional or negative amount".into(),
+        ));
+    }
+    let amount = minor as f64 / scale as f64;
+    if amount > 9_000_000_000_000.0 {
+        return Err(AppError::Authentication(
+            "Stripe notification amount exceeds the supported ledger range".into(),
+        ));
+    }
+    Ok(amount)
 }
 
 fn compute_hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
@@ -154,8 +248,12 @@ impl PaymentProvider for StripePaymentProvider {
     async fn pay(&self, req: &PayRequest) -> AppResult<PayResponse> {
         let url = format!("{}/checkout/sessions", self.get_api_url());
 
-        // Convert price to cents
-        let unit_amount = (req.price * 100.0) as i64;
+        if req.quantity <= 0 {
+            return Err(AppError::Validation(
+                "Payment quantity must be positive".into(),
+            ));
+        }
+        let unit_amount = stripe_amount_to_minor(req.price, &req.currency)?;
 
         let mut params = vec![
             ("payment_method_types[0]".to_string(), "card".to_string()),
@@ -193,6 +291,7 @@ impl PaymentProvider for StripePaymentProvider {
             .client
             .post(&url)
             .bearer_auth(&self.secret_key)
+            .header("Idempotency-Key", &req.order_id)
             .form(&params)
             .send()
             .await
@@ -204,10 +303,12 @@ impl PaymentProvider for StripePaymentProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(AppError::Internal(format!(
-                "Stripe API failed with status {}: {}",
-                status, body
-            )));
+            let message = format!("Stripe API failed with status {}: {}", status, body);
+            return Err(if status.is_client_error() && status.as_u16() != 409 {
+                AppError::Validation(message)
+            } else {
+                AppError::Internal(message)
+            });
         }
 
         let session: CheckoutSession = response
@@ -265,15 +366,23 @@ impl PaymentProvider for StripePaymentProvider {
             _ => "Pending",
         };
 
+        let amount = match (
+            event.data.object.amount_total,
+            event.data.object.currency.as_deref(),
+        ) {
+            (Some(amount), Some(currency)) => Some(stripe_amount_from_minor(amount, currency)?),
+            (Some(_), None) => {
+                return Err(AppError::Authentication(
+                    "Stripe amount requires a currency".into(),
+                ));
+            }
+            _ => None,
+        };
         Ok(NotifyResult {
             order_id: event.data.object.id,
             payment_status: payment_status.to_string(),
             payment_name: "Stripe".to_string(),
-            amount: event
-                .data
-                .object
-                .amount_total
-                .map(|value| value as f64 / 100.0),
+            amount,
             currency: event.data.object.currency.map(|value| value.to_uppercase()),
             invoice_url: event.data.object.invoice,
             raw_state: event

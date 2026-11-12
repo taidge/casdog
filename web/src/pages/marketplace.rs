@@ -41,6 +41,9 @@ fn administrator_page(app: AppState) -> Element {
         let message = scope.cage(String::new());
         let revision = scope.cage(0u64);
         let preview_revision = scope.cage(0u64);
+        let client_id = scope.cage(String::new());
+        let client_secret = scope.cage(String::new());
+        let application = scope.cage(String::new());
         let tasks = scope.clone();
         scope.effect(move || {
             let _ = revision.get();
@@ -95,6 +98,9 @@ fn administrator_page(app: AppState) -> Element {
                             bundle.set(response["data"].clone());
                             selected.set(item);
                             variables.set(json!({}));
+                            client_id.set(String::new());
+                            client_secret.set(String::new());
+                            application.set(String::new());
                             preview_revision.set(preview_revision.get() + 1);
                             name.set(id);
                             Ok(String::new())
@@ -210,6 +216,15 @@ fn administrator_page(app: AppState) -> Element {
             }),
             field(scope, "Installation name", name),
             fields,
+            when(scope.bond(move || bundle.get()["manifest"]["type"] == "provider"), move || {
+                widget(move |scope| {
+                    stack((
+                        field(scope, "Provider client ID", client_id),
+                        password("Provider client secret", client_secret),
+                        field(scope, "Link to application (optional)", application),
+                    )).build(scope)
+                })
+            }),
             action(
                 scope,
                 "Install integration",
@@ -221,13 +236,20 @@ fn administrator_page(app: AppState) -> Element {
                     if owner.get().trim().is_empty() || name.get().trim().is_empty() {
                         return Err("Enter an owner and installation name.".into());
                     }
+                    if bundle.get()["manifest"]["type"] == "provider" && (client_id.get().trim().is_empty() || client_secret.get().is_empty()) {
+                        return Err("Enter the provider client ID and secret.".into());
+                    }
                     app.request("POST", "/api/install-integration", Some(json!({
                     "owner":owner.get(), "name":name.get(), "integrationId":id,
-                    "version":bundle.get()["manifest"]["version"], "variables":variables.get()
+                    "version":bundle.get()["manifest"]["version"], "variables":variables.get(),
+                    "clientId":client_id.get(), "clientSecret":client_secret.get(), "application":application.get()
                 }))).await?;
                     variables.set(json!({}));
                     bundle.set(Value::Null);
                     selected.set(Value::Null);
+                    client_id.set(String::new());
+                    client_secret.set(String::new());
+                    application.set(String::new());
                     revision.set(revision.get() + 1);
                     Ok("Integration installed.".into())
                 },

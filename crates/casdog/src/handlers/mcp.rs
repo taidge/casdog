@@ -73,6 +73,7 @@ async fn handle_tool_call(
         Err(_) => return Ok(mcp_error(id, -32001, "insufficient_scope", None)),
     };
     let principal = Principal {
+        application_identity: false,
         id: claims.sub,
         owner: claims.owner,
         name: claims.name,

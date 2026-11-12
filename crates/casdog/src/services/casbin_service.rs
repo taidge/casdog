@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use casbin::{CoreApi, DefaultModel, Enforcer, MgmtApi, RbacApi};
+use casbin::{Assertion, CoreApi, DefaultModel, Enforcer, MemoryAdapter, MgmtApi, Model, RbacApi};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use sqlx_adapter::SqlxAdapter;
 use tokio::sync::RwLock;
 
@@ -14,19 +15,31 @@ use crate::models::{
 #[derive(Clone)]
 pub struct CasbinService {
     enforcer: Arc<RwLock<Enforcer>>,
+    pool: PgPool,
 }
 
 impl CasbinService {
     pub async fn new() -> AppResult<Self> {
         let config = AppConfig::get();
-        let model_path = config.casbin.model_path.clone();
-        let db_url = config.database.url.clone();
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&config.database.url)
+            .await?;
+        Self::with_pool(pool).await
+    }
+
+    pub async fn with_pool(pool: PgPool) -> AppResult<Self> {
+        let model_path = AppConfig::get().casbin.model_path;
 
         let model = DefaultModel::from_file(&model_path)
             .await
             .map_err(|e| AppError::Casbin(format!("Failed to load casbin model: {}", e)))?;
 
-        let adapter = SqlxAdapter::new(&db_url, 8)
+        Self::with_model_and_pool(model, pool).await
+    }
+
+    pub async fn with_model_and_pool(model: DefaultModel, pool: PgPool) -> AppResult<Self> {
+        let adapter = SqlxAdapter::new_with_pool(pool.clone())
             .await
             .map_err(|e| AppError::Casbin(format!("Failed to create adapter: {}", e)))?;
 
@@ -36,19 +49,86 @@ impl CasbinService {
 
         Ok(Self {
             enforcer: Arc::new(RwLock::new(enforcer)),
+            pool,
         })
     }
 
-    pub async fn enforce(&self, req: EnforceRequest) -> AppResult<EnforceResponse> {
-        let enforcer = self.enforcer.read().await;
-        let allowed = enforcer
-            .enforce((&req.sub, &req.obj, &req.act))
-            .map_err(|e| AppError::Casbin(format!("Enforce error: {}", e)))?;
+    /// Add paid roles to an isolated policy snapshot. Never persist temporary
+    /// grouping rules or share their role managers with the base enforcer.
+    /// Evaluating once with all memberships preserves the model's deny effect.
+    async fn subscription_enforcer(
+        &self,
+        subject: &str,
+        alias: Option<&str>,
+    ) -> AppResult<Option<Enforcer>> {
+        let Some((owner, name)) = subject.split_once('/') else {
+            return Ok(None);
+        };
+        let base = self.enforcer.read().await;
+        let mut model = DefaultModel::default();
+        for (section, assertions) in base.get_model().get_model() {
+            for (key, assertion) in assertions {
+                model
+                    .get_mut_model()
+                    .entry(section.clone())
+                    .or_default()
+                    .insert(
+                        key.clone(),
+                        Assertion {
+                            key: assertion.key.clone(),
+                            value: assertion.value.clone(),
+                            tokens: assertion.tokens.clone(),
+                            policy: assertion.policy.clone(),
+                            ..Default::default()
+                        },
+                    );
+            }
+        }
+        drop(base);
+        // Read after the policy lock, so waiting for a policy update cannot
+        // retain subscription grants that expired while the lock was held.
+        let roles = super::SubscriptionService::active_role_names(&self.pool, owner, name).await?;
+        if roles.is_empty() {
+            return Ok(None);
+        }
+        for role in roles {
+            if !model.add_policy("g", "g", vec![subject.into(), role]) {
+                // An existing grouping is valid too; a model without g is not.
+                if !model
+                    .get_model()
+                    .get("g")
+                    .is_some_and(|g| g.contains_key("g"))
+                {
+                    return Err(AppError::Casbin(
+                        "Subscription roles require an RBAC g definition".into(),
+                    ));
+                }
+            }
+        }
+        if let Some(alias) = alias.filter(|alias| *alias != subject) {
+            model.add_policy("g", "g", vec![alias.into(), subject.into()]);
+        }
+        let mut enforcer = Enforcer::new_raw(model, MemoryAdapter::default())
+            .await
+            .map_err(|error| AppError::Casbin(error.to_string()))?;
+        enforcer
+            .build_role_links()
+            .map_err(|error| AppError::Casbin(error.to_string()))?;
+        Ok(Some(enforcer))
+    }
 
+    pub async fn enforce(&self, req: EnforceRequest) -> AppResult<EnforceResponse> {
+        let allowed = self.check_permission(&req.sub, &req.obj, &req.act).await?;
         Ok(EnforceResponse { allowed })
     }
 
     pub async fn check_permission(&self, sub: &str, obj: &str, act: &str) -> AppResult<bool> {
+        self.reload().await?;
+        if let Some(enforcer) = self.subscription_enforcer(sub, None).await? {
+            return enforcer
+                .enforce((sub, obj, act))
+                .map_err(|error| AppError::Casbin(error.to_string()));
+        }
         let enforcer = self.enforcer.read().await;
         let allowed = enforcer
             .enforce((sub, obj, act))
@@ -116,6 +196,7 @@ impl CasbinService {
     }
 
     pub async fn get_policies(&self) -> AppResult<PolicyListResponse> {
+        self.reload().await?;
         let enforcer = self.enforcer.read().await;
 
         let policies = enforcer.get_policy();
@@ -171,6 +252,10 @@ impl CasbinService {
     }
 
     pub async fn get_roles_for_user(&self, user: &str) -> AppResult<Vec<String>> {
+        self.reload().await?;
+        if let Some(enforcer) = self.subscription_enforcer(user, None).await? {
+            return Ok(enforcer.get_roles_for_user(user, None));
+        }
         let enforcer = self.enforcer.read().await;
         let roles = enforcer.get_roles_for_user(user, None);
         Ok(roles)
@@ -189,13 +274,10 @@ impl CasbinService {
         &self,
         reqs: Vec<EnforceRequestItem>,
     ) -> AppResult<BatchEnforceResponse> {
-        let enforcer = self.enforcer.read().await;
         let mut results = Vec::with_capacity(reqs.len());
 
         for req in reqs {
-            let allowed = enforcer
-                .enforce((&req.sub, &req.obj, &req.act))
-                .map_err(|e| AppError::Casbin(format!("Batch enforce error: {}", e)))?;
+            let allowed = self.check_permission(&req.sub, &req.obj, &req.act).await?;
             results.push(EnforceResultItem {
                 sub: req.sub,
                 obj: req.obj,
@@ -256,8 +338,7 @@ impl CasbinService {
     ///
     /// If the enforcer's model does not support a 6-tuple (e.g. only 3 values),
     /// the method falls back to a 3-tuple check `(sub_name, url_path, method)`.
-    /// If the enforcer is not available or not configured, this returns `Ok(true)`
-    /// (allow) to avoid blocking requests when authorization is not set up.
+    /// Configuration and enforcement errors are propagated to the caller.
     pub async fn enforce_ex(
         &self,
         sub_owner: &str,
@@ -267,8 +348,30 @@ impl CasbinService {
         obj_owner: &str,
         obj_name: &str,
     ) -> AppResult<bool> {
+        self.reload().await?;
+        if let Some(enforcer) = self
+            .subscription_enforcer(&format!("{sub_owner}/{sub_name}"), Some(sub_name))
+            .await?
+        {
+            return Self::enforce_tuple(
+                &enforcer, sub_owner, sub_name, method, url_path, obj_owner, obj_name,
+            );
+        }
         let enforcer = self.enforcer.read().await;
+        Self::enforce_tuple(
+            &enforcer, sub_owner, sub_name, method, url_path, obj_owner, obj_name,
+        )
+    }
 
+    fn enforce_tuple(
+        enforcer: &Enforcer,
+        sub_owner: &str,
+        sub_name: &str,
+        method: &str,
+        url_path: &str,
+        obj_owner: &str,
+        obj_name: &str,
+    ) -> AppResult<bool> {
         // Try 6-tuple enforcement first (matches Casdoor's model)
         let result = enforcer.enforce((sub_owner, sub_name, method, url_path, obj_owner, obj_name));
 

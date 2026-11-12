@@ -56,7 +56,8 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                 FieldKind::Select(options) => {
                     // Semantic option keys are ASCII tokens. API values can
                     // contain spaces or other characters, so retain them separately.
-                    let values: Vec<String> = options.iter().map(|option| option.value.clone()).collect();
+                    let values: Vec<String> =
+                        options.iter().map(|option| option.value.clone()).collect();
                     let selected_values = values.clone();
                     boxed(
                         sapid::native_select(key)
@@ -68,12 +69,9 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                                     .position(|value| current.as_str() == Some(value.as_str()))
                                     .map(|index| index.to_string())
                             }))
-                            .options(
-                                options
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(index, option)| sapid::select_option(index.to_string(), option.label)),
-                            )
+                            .options(options.into_iter().enumerate().map(|(index, option)| {
+                                sapid::select_option(index.to_string(), option.label)
+                            }))
                             .on_value_change(move |selected| {
                                 let value = selected
                                     .and_then(|key| key.parse::<usize>().ok())
@@ -96,7 +94,12 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                         } else if is_tags {
                             value
                                 .as_array()
-                                .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(Value::as_str)
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                })
                                 .unwrap_or_default()
                         } else {
                             value.as_str().map(str::to_string).unwrap_or_else(|| {
@@ -117,7 +120,12 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                                 .map(Value::Number)
                                 .map_err(|_| "Enter a finite number".to_string())
                         } else if is_tags {
-                            Ok(json!(next.split(',').map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>()))
+                            Ok(json!(
+                                next.split(',')
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .collect::<Vec<_>>()
+                            ))
                         } else {
                             Ok(json!(next))
                         };
@@ -127,9 +135,20 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                         }
                     };
                     if matches!(kind, FieldKind::Json | FieldKind::TextArea) {
-                        boxed(sapid::textarea().name(name).value(draft).on_value_change(change).rows(5))
+                        boxed(
+                            sapid::textarea()
+                                .name(name)
+                                .value(draft)
+                                .on_value_change(change)
+                                .rows(5),
+                        )
                     } else if matches!(kind, FieldKind::Password) {
-                        boxed(sapid::password_input().name(name).value(draft).on_value_change(change))
+                        boxed(
+                            sapid::password_input()
+                                .name(name)
+                                .value(draft)
+                                .on_value_change(change),
+                        )
                     } else {
                         boxed(
                             sapid::text_field()
@@ -145,7 +164,9 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
         }
         let structured = stack(widgets);
         stack((
-            sapid::button().label("Switch structured / JSON editor").on_press(move || raw.set(!raw.get())),
+            sapid::button()
+                .label("Switch structured / JSON editor")
+                .on_press(move || raw.set(!raw.get())),
             // Both editors keep their identities, including selection and draft state.
             glory::ui::view()
                 .class_fn(move || {
@@ -158,14 +179,7 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                 })
                 .fill(structured),
             glory::ui::view()
-                .class_fn(move || {
-                    if raw.get() {
-                        "json-editor"
-                    } else {
-                        "hidden"
-                    }
-                    .into()
-                })
+                .class_fn(move || if raw.get() { "json-editor" } else { "hidden" }.into())
                 .fill(
                     sapid::textarea()
                         .name("Resource JSON")
@@ -1892,7 +1906,7 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 key: "display_name",
                 label: "Display name",
                 kind: FieldKind::Text,
-                required: false,
+                required: true,
             },
             FieldDef {
                 key: "description",
@@ -1907,6 +1921,12 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 required: false,
             },
             FieldDef {
+                key: "detail",
+                label: "Product detail",
+                kind: FieldKind::TextArea,
+                required: false,
+            },
+            FieldDef {
                 key: "tag",
                 label: "Tag",
                 kind: FieldKind::Text,
@@ -1914,7 +1934,7 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
             },
             FieldDef {
                 key: "quantity",
-                label: "Quantity",
+                label: "Quantity (-1 for unlimited)",
                 kind: FieldKind::Number,
                 required: false,
             },
@@ -1931,9 +1951,33 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 required: false,
             },
             FieldDef {
-                key: "is_enabled",
-                label: "Enabled",
+                key: "state",
+                label: "State",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "is_recharge",
+                label: "Recharge product",
                 kind: FieldKind::Toggle,
+                required: false,
+            },
+            FieldDef {
+                key: "recharge_options",
+                label: "Recharge amounts (JSON array)",
+                kind: FieldKind::Json,
+                required: false,
+            },
+            FieldDef {
+                key: "disable_custom_recharge",
+                label: "Only preset recharge amounts",
+                kind: FieldKind::Toggle,
+                required: false,
+            },
+            FieldDef {
+                key: "plan_id",
+                label: "Bound plan ID or owner/name",
+                kind: FieldKind::Text,
                 required: false,
             },
         ],
@@ -1954,12 +1998,6 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 key: "display_name",
                 label: "Display name",
                 kind: FieldKind::Text,
-                required: false,
-            },
-            FieldDef {
-                key: "product",
-                label: "Product",
-                kind: FieldKind::Text,
                 required: true,
             },
             FieldDef {
@@ -1969,27 +2007,14 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 required: false,
             },
             FieldDef {
-                key: "period",
-                label: "Period",
-                kind: FieldKind::Select(vec![
-                    SelectOption {
-                        value: "Monthly".into(),
-                        label: "Monthly".into(),
-                    },
-                    SelectOption {
-                        value: "Yearly".into(),
-                        label: "Yearly".into(),
-                    },
-                    SelectOption {
-                        value: "Weekly".into(),
-                        label: "Weekly".into(),
-                    },
-                ]),
+                key: "price_per_month",
+                label: "Monthly price",
+                kind: FieldKind::Number,
                 required: false,
             },
             FieldDef {
-                key: "price",
-                label: "Price",
+                key: "price_per_year",
+                label: "Yearly price",
                 kind: FieldKind::Number,
                 required: false,
             },
@@ -1997,6 +2022,18 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 key: "currency",
                 label: "Currency",
                 kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "role",
+                label: "Granted role ID or owner/name",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "options",
+                label: "Plan options",
+                kind: FieldKind::TextArea,
                 required: false,
             },
             FieldDef {
@@ -2023,30 +2060,36 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 key: "display_name",
                 label: "Display name",
                 kind: FieldKind::Text,
-                required: false,
-            },
-            FieldDef {
-                key: "plan",
-                label: "Plan",
-                kind: FieldKind::Text,
-                required: true,
-            },
-            FieldDef {
-                key: "currency",
-                label: "Currency",
-                kind: FieldKind::Text,
-                required: true,
-            },
-            FieldDef {
-                key: "price",
-                label: "Price",
-                kind: FieldKind::Number,
                 required: true,
             },
             FieldDef {
                 key: "description",
                 label: "Description",
                 kind: FieldKind::TextArea,
+                required: false,
+            },
+            FieldDef {
+                key: "plans",
+                label: "Plan references (JSON array)",
+                kind: FieldKind::TextArea,
+                required: false,
+            },
+            FieldDef {
+                key: "trial_duration",
+                label: "Trial duration (days)",
+                kind: FieldKind::Number,
+                required: false,
+            },
+            FieldDef {
+                key: "application",
+                label: "Application",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "is_enabled",
+                label: "Enabled",
+                kind: FieldKind::Toggle,
                 required: false,
             },
         ],

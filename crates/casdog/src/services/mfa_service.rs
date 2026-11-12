@@ -1,6 +1,6 @@
 use chrono::Utc;
 use rand::Rng;
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
@@ -72,13 +72,18 @@ impl MfaService {
                     if let Some(mfa) = Self::get_user_mfa(pool, &user.id, kind).await? {
                         if mfa.is_enabled {
                             if let Some(secret) = mfa.secret {
-                                return Self::verify_totp(&secret, code);
+                                let mut conn = pool.acquire().await?;
+                                return Self::consume_totp(&mut conn, &user.id, &secret, code)
+                                    .await;
                             }
                         }
                     }
                 }
                 match user.totp_secret.as_deref().filter(|s| !s.is_empty()) {
-                    Some(secret) if user.mfa_enabled => Self::verify_totp(secret, code),
+                    Some(secret) if user.mfa_enabled => {
+                        let mut conn = pool.acquire().await?;
+                        Self::consume_totp(&mut conn, &user.id, secret, code).await
+                    }
                     _ => Ok(false),
                 }
             }
@@ -153,6 +158,68 @@ impl MfaService {
             .as_secs();
 
         Ok(totp.check(code, now))
+    }
+
+    /// Verify and consume an authenticator step in the caller's transaction.
+    /// The database clock and conditional upsert make this independent of local
+    /// clocks and prevent concurrent challenges from accepting the same proof.
+    pub async fn consume_totp(
+        conn: &mut PgConnection,
+        user_id: &str,
+        secret_base32: &str,
+        code: &str,
+    ) -> AppResult<bool> {
+        use sha2::{Digest, Sha256};
+        use subtle::ConstantTimeEq;
+        use totp_rs::{Algorithm, Secret, TOTP};
+
+        if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+            return Ok(false);
+        }
+        let secret = Secret::Encoded(secret_base32.to_string())
+            .to_bytes()
+            .map_err(|e| AppError::Internal(format!("TOTP secret error: {e}")))?;
+        let fingerprint = hex::encode(Sha256::digest(&secret));
+        let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret, None, "user".into())
+            .map_err(|e| AppError::Internal(format!("TOTP creation error: {e}")))?;
+        // Nested transactions use a savepoint, so browser completion still
+        // controls the final commit. Legacy callers get the same account ->
+        // authenticator lock order and cannot invert a users FK check.
+        let mut tx = conn.begin().await?;
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if exists.is_none() {
+            return Ok(false);
+        }
+        let now: i64 =
+            sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+                .fetch_one(&mut *tx)
+                .await?;
+        let current = now / 30;
+        // Pick the newest matching step in the rare event adjacent codes collide.
+        let step = (current.saturating_sub(1)..=current + 1)
+            .rev()
+            .find(|step| {
+                bool::from(
+                    totp.generate((*step as u64) * 30)
+                        .as_bytes()
+                        .ct_eq(code.as_bytes()),
+                )
+            });
+        let Some(step) = step else { return Ok(false) };
+        let consumed = sqlx::query(
+            "INSERT INTO user_totp_steps(user_id,secret_hash,last_step) VALUES($1,$2,$3) ON CONFLICT(user_id,secret_hash) DO UPDATE SET last_step=EXCLUDED.last_step WHERE user_totp_steps.last_step<EXCLUDED.last_step",
+        )
+        .bind(user_id)
+        .bind(fingerprint)
+        .bind(step)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(consumed.rows_affected() == 1)
     }
 
     /// Generate recovery codes
@@ -245,7 +312,7 @@ impl MfaService {
             .secret
             .as_deref()
             .ok_or_else(|| AppError::Validation("MFA secret missing".to_string()))?;
-        if !Self::verify_totp(secret, code)? {
+        if !Self::consume_totp(&mut transaction, user_id, secret, code).await? {
             return Ok(None);
         }
         sqlx::query("UPDATE user_mfa SET is_enabled = true, updated_at = NOW() WHERE id = $1")

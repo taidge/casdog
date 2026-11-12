@@ -35,6 +35,7 @@ struct CreateOrderRequest {
 #[derive(Debug, Serialize)]
 struct PurchaseUnit {
     reference_id: String,
+    custom_id: String,
     description: String,
     amount: Amount,
 }
@@ -154,9 +155,13 @@ impl PayPalPaymentProvider {
         headers: &HashMap<String, String>,
         webhook_event: &serde_json::Value,
     ) -> AppResult<()> {
-        let Some(webhook_id) = self.webhook_id.as_deref() else {
-            return Ok(());
-        };
+        let webhook_id = self
+            .webhook_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                AppError::Authentication("PayPal webhook verification is not configured".into())
+            })?;
 
         let transmission_id = headers.get("paypal-transmission-id").ok_or_else(|| {
             AppError::Authentication("Missing PayPal transmission id".to_string())
@@ -246,6 +251,7 @@ impl PaymentProvider for PayPalPaymentProvider {
             intent: "CAPTURE".to_string(),
             purchase_units: vec![PurchaseUnit {
                 reference_id: req.order_id.clone(),
+                custom_id: req.order_id.clone(),
                 description: req.product_display_name.clone(),
                 amount: Amount {
                     currency_code: req.currency.to_uppercase(),
@@ -263,6 +269,7 @@ impl PaymentProvider for PayPalPaymentProvider {
             .post(&url)
             .bearer_auth(&access_token)
             .header("Content-Type", "application/json")
+            .header("PayPal-Request-Id", &req.order_id)
             .json(&order_request)
             .send()
             .await
@@ -274,10 +281,12 @@ impl PaymentProvider for PayPalPaymentProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(AppError::Internal(format!(
-                "PayPal API failed with status {}: {}",
-                status, body
-            )));
+            let message = format!("PayPal API failed with status {}: {}", status, body);
+            return Err(if status.is_client_error() && status.as_u16() != 409 {
+                AppError::Validation(message)
+            } else {
+                AppError::Internal(message)
+            });
         }
 
         let order_response: CreateOrderResponse = response
@@ -312,7 +321,8 @@ impl PaymentProvider for PayPalPaymentProvider {
         // Determine payment status based on event type
         let event_type = event["event_type"].as_str().unwrap_or("");
         let payment_status = match event_type {
-            "CHECKOUT.ORDER.APPROVED" => "Paid",
+            // Approval authorizes a future capture; funds have not settled yet.
+            "CHECKOUT.ORDER.APPROVED" => "Pending",
             "PAYMENT.CAPTURE.COMPLETED" => "Paid",
             "PAYMENT.CAPTURE.DENIED" => "Failed",
             "CHECKOUT.ORDER.VOIDED" => "Failed",

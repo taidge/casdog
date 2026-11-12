@@ -247,6 +247,13 @@ pub async fn install(
     let name = text(request, "name");
     authorize(principal, owner)?;
     identity(owner, name)?;
+    if text(&bundle["manifest"], "type") == "app"
+        && (principal.is_application() || !principal.admin || name.starts_with("dcr_"))
+    {
+        return Err(AppError::Authorization(
+            "A real administrator must create a static application integration".into(),
+        ));
+    }
     if item["requiresGlobalAdmin"] == true && !principal.global_admin() {
         return Err(super::service::denied());
     }
@@ -318,6 +325,12 @@ pub async fn install(
         }
         sqlx::query("INSERT INTO applications(id,owner,name,display_name,logo,homepage_url,organization,client_id,client_secret,redirect_uris,grant_types,token_format) VALUES($1,$2,$3,$4,$5,$6,$2,$7,$8,$9,$10,$11)")
             .bind(&resource_id).bind(owner).bind(name).bind(display).bind(text(item,"logo")).bind(text(&request["variables"],"appUrl")).bind(random_secret()).bind(random_secret()).bind(redirects.to_string()).bind(grants).bind(template.get("tokenFormat").and_then(Value::as_str).filter(|s|!s.is_empty()).unwrap_or("JWT")).execute(&mut *tx).await?;
+        crate::services::key_credentials_service::mark_static_application_conn(
+            &mut tx,
+            &resource_id,
+            principal,
+        )
+        .await?;
         document["application"] = json!(name);
     } else {
         if text(request, "clientId").is_empty() || text(request, "clientSecret").is_empty() {

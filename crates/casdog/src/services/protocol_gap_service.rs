@@ -6,7 +6,6 @@ use std::{
     collections::HashSet,
     path::{Component, Path},
 };
-use tokio::io::AsyncReadExt;
 
 use crate::handlers::parity_resources::service::{self as resources, Kind, text};
 use crate::{
@@ -219,23 +218,18 @@ pub async fn storage_for_owner(
     let bucket = provider.bucket.as_deref().unwrap_or("");
     let region = provider.region_id.as_deref().unwrap_or("");
     let endpoint = provider.endpoint.as_deref().unwrap_or("");
-    let base = if endpoint.is_empty() {
-        format!("https://{bucket}.s3.{region}.amazonaws.com")
-    } else {
-        format!("{}/{}", endpoint.trim_end_matches('/'), bucket)
-    };
-    let url = reqwest::Url::parse(&base)
-        .map_err(|_| AppError::Validation("Invalid storage endpoint".into()))?;
-    let client =
-        crate::services::system_gap_service::client(&url, principal.global_admin()).await?;
     let storage = crate::services::providers::s3_storage::S3StorageProvider::new(
         provider.client_id.as_deref().unwrap_or("").into(),
         provider.client_secret.as_deref().unwrap_or("").into(),
         region.into(),
         bucket.into(),
         endpoint.into(),
-    )
-    .with_client(client);
+    );
+    // Validate and pin the exact origin used by the provider's object requests.
+    let client =
+        crate::services::system_gap_service::client(&storage.base_url()?, principal.global_admin())
+            .await?;
+    let storage = storage.with_client(client);
     Ok((Box::new(storage), None))
 }
 
@@ -641,16 +635,7 @@ pub async fn upload_transcript(
             .fetch_optional(pool)
             .await?
             .ok_or_else(|| AppError::NotFound("Storage provider not found".into()))?;
-    if !provider.provider_type.eq_ignore_ascii_case("local")
-        && !provider
-            .provider_type
-            .eq_ignore_ascii_case("Local File System")
-    {
-        return Err(AppError::Config(
-            "Transcript upload currently requires a Local storage provider".into(),
-        ));
-    }
-    let bucket = local_storage_root(principal, owner, provider.bucket.as_deref(), true).await?;
+    let (storage, _) = storage_for_owner(principal, owner, Some(&provider), true).await?;
     use md5::{Digest, Md5};
     let group = hex::encode(Md5::digest(format!(
         "{owner}|{}|{session}",
@@ -658,16 +643,6 @@ pub async fn upload_transcript(
     )));
     let parent = format!("openclaw/{group}");
     let object_key = format!("openclaw/{group}/{}.jsonl", uuid::Uuid::new_v4());
-    let storage = crate::services::providers::get_storage_provider(
-        "local",
-        "",
-        "",
-        "",
-        bucket
-            .to_str()
-            .ok_or_else(|| AppError::Config("Storage path must be UTF-8".into()))?,
-        "",
-    )?;
     let url = storage
         .upload(&object_key, bytes, "application/jsonl")
         .await?;
@@ -723,54 +698,16 @@ pub async fn transcript(
             .fetch_optional(pool)
             .await?
             .ok_or_else(|| AppError::NotFound("Transcript storage provider not found".into()))?;
-    if !provider.provider_type.eq_ignore_ascii_case("local")
-        && !provider
-            .provider_type
-            .eq_ignore_ascii_case("Local File System")
-    {
-        return Err(AppError::Config(
-            "Transcript previews currently require a Local storage provider".into(),
-        ));
-    }
-    let root = local_storage_root(principal, owner, provider.bucket.as_deref(), false).await?;
-    let key = Path::new(&resource.name);
-    if key
-        .components()
-        .any(|part| !matches!(part, Component::Normal(_)))
-        || resource.name.contains('\\')
-    {
-        return Err(AppError::Validation("Invalid transcript object key".into()));
-    }
-    let path = tokio::fs::canonicalize(root.join(key))
-        .await
-        .map_err(|_| AppError::NotFound("Transcript object not found".into()))?;
-    if !path.starts_with(&root) {
-        return Err(AppError::Authorization(
-            "Transcript path escapes storage root".into(),
-        ));
-    }
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| AppError::NotFound("Transcript object unavailable".into()))?;
-    let size = file
-        .metadata()
-        .await
-        .map_err(|_| AppError::Internal("Cannot read transcript size".into()))?
-        .len();
-    let mut bytes = Vec::new();
-    file.take((PREVIEW_LIMIT + 1) as u64)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| AppError::Internal("Cannot read transcript".into()))?;
-    let truncated = bytes.len() > PREVIEW_LIMIT;
-    bytes.truncate(PREVIEW_LIMIT);
+    let (storage, _) = storage_for_owner(principal, owner, Some(&provider), false).await?;
+    let preview = storage.preview(&resource.name, PREVIEW_LIMIT).await?;
+    let bytes = preview.bytes;
     let loaded = bytes.len();
     let filename = Path::new(&resource.file_name)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("transcript.jsonl");
     Ok(
-        json!({"fileName":filename,"fileSize":size,"loadedSize":loaded,"truncated":truncated,"content":String::from_utf8_lossy(&bytes)}),
+        json!({"fileName":filename,"fileSize":preview.size,"loadedSize":loaded,"truncated":preview.truncated,"content":String::from_utf8_lossy(&bytes)}),
     )
 }
 

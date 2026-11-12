@@ -45,7 +45,8 @@ impl Fixture {
                             return;
                         }
                         bytes.extend_from_slice(&chunk[..count]);
-                        if let Some(index) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
+                        if let Some(index) = bytes.windows(4).position(|value| value == b"\r\n\r\n")
+                        {
                             let head = String::from_utf8_lossy(&bytes[..index]);
                             let length = head
                                 .lines()
@@ -63,7 +64,12 @@ impl Fixture {
                     let request = String::from_utf8_lossy(&bytes).into_owned();
                     let path = request.split_whitespace().nth(1).unwrap().to_string();
                     requests.lock().unwrap().push(request);
-                    let (status, body) = responses.lock().unwrap().get(&path).cloned().unwrap_or((404, b"{}".to_vec()));
+                    let (status, body) = responses
+                        .lock()
+                        .unwrap()
+                        .get(&path)
+                        .cloned()
+                        .unwrap_or((404, b"{}".to_vec()));
                     let head = format!(
                         "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
@@ -81,10 +87,16 @@ impl Fixture {
         }
     }
     fn json(&self, path: &str, value: Value) {
-        self.responses.lock().unwrap().insert(path.into(), (200, serde_json::to_vec(&value).unwrap()));
+        self.responses
+            .lock()
+            .unwrap()
+            .insert(path.into(), (200, serde_json::to_vec(&value).unwrap()));
     }
     fn bytes(&self, path: &str, value: &[u8]) {
-        self.responses.lock().unwrap().insert(path.into(), (200, value.to_vec()));
+        self.responses
+            .lock()
+            .unwrap()
+            .insert(path.into(), (200, value.to_vec()));
     }
 }
 impl Drop for Fixture {
@@ -94,12 +106,15 @@ impl Drop for Fixture {
 }
 
 async fn pool() -> PgPool {
-    PgPool::connect(&std::env::var("CASDOG_TEST_DATABASE_URL").expect("dedicated test database required"))
-        .await
-        .unwrap()
+    PgPool::connect(
+        &std::env::var("CASDOG_TEST_DATABASE_URL").expect("dedicated test database required"),
+    )
+    .await
+    .unwrap()
 }
 fn principal(owner: &str, admin: bool) -> Principal {
     Principal {
+        application_identity: false,
         id: uuid::Uuid::new_v4().to_string(),
         owner: owner.into(),
         name: "tester".into(),
@@ -116,7 +131,11 @@ async fn provider(pool: &PgPool, owner: &str, category: &str, kind: &str) -> Pro
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query_as("SELECT * FROM providers WHERE id=$1").bind(id).fetch_one(pool).await.unwrap()
+    sqlx::query_as("SELECT * FROM providers WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 struct Artifacts {
@@ -137,16 +156,18 @@ impl Artifacts {
             .unwrap();
         let path = root.join(format!("system-gap-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
-        Self {
-            root,
-            path,
-        }
+        Self { root, path }
     }
 }
 impl Drop for Artifacts {
     fn drop(&mut self) {
         if self.path.canonicalize().is_ok_and(|path| {
-            path.starts_with(&self.root) && path.file_name().unwrap().to_string_lossy().starts_with("system-gap-test-")
+            path.starts_with(&self.root)
+                && path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("system-gap-test-")
         }) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
@@ -158,12 +179,15 @@ impl Drop for Artifacts {
 async fn upgrades_require_pinned_manifest_verify_package_and_restore_failed_restart() {
     if let Ok(id) = std::env::var("CASDOG_UPGRADE_STARTUP_PROBE") {
         let pool = pool().await;
-        operations::reconcile_upgrades(&pool, &SystemGapConfig::from_env()).await.unwrap();
-        let status: Value = sqlx::query_scalar("SELECT status FROM system_upgrade_history WHERE id=$1")
-            .bind(id)
-            .fetch_one(&pool)
+        operations::reconcile_upgrades(&pool, &SystemGapConfig::from_env())
             .await
             .unwrap();
+        let status: Value =
+            sqlx::query_scalar("SELECT status FROM system_upgrade_history WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(status["state"], "installed");
         return;
     }
@@ -185,27 +209,50 @@ async fn upgrades_require_pinned_manifest_verify_package_and_restore_failed_rest
         restart_program: Some(std::env::current_exe().unwrap()),
         restart_args: vec!["--list".into()],
     };
-    assert!(operations::upgrade(&pool, &config, &principal("other", true), "v9.9.9").await.is_err());
+    assert!(
+        operations::upgrade(&pool, &config, &principal("other", true), "v9.9.9")
+            .await
+            .is_err()
+    );
     config.manifest_sha256 = Some("0".repeat(64));
-    assert!(operations::upgrade(&pool, &config, &actor, "v9.9.9").await.is_err());
+    assert!(
+        operations::upgrade(&pool, &config, &actor, "v9.9.9")
+            .await
+            .is_err()
+    );
     assert_eq!(std::fs::read(&destination).unwrap(), b"stable fixture");
     config.manifest_sha256 = Some(operations::digest(&manifest_bytes));
     fixture.bytes("/package", b"tampered package");
-    assert!(operations::upgrade(&pool, &config, &actor, "v9.9.9").await.is_err());
+    assert!(
+        operations::upgrade(&pool, &config, &actor, "v9.9.9")
+            .await
+            .is_err()
+    );
     assert_eq!(std::fs::read(&destination).unwrap(), b"stable fixture");
     fixture.bytes("/package", package);
-    assert_eq!(operations::upgrade(&pool, &config, &actor, "v9.9.9").await.unwrap()["state"], "restart_requested");
+    assert_eq!(
+        operations::upgrade(&pool, &config, &actor, "v9.9.9")
+            .await
+            .unwrap()["state"],
+        "restart_requested"
+    );
     assert_eq!(std::fs::read(&destination).unwrap(), package);
     assert!(matches!(
         operations::upgrade(&pool, &config, &actor, "v9.9.9").await,
         Err(casdog::error::AppError::Conflict(_))
     ));
     assert_eq!(std::fs::read(&destination).unwrap(), package);
-    operations::reconcile_upgrades(&pool, &config).await.unwrap();
+    operations::reconcile_upgrades(&pool, &config)
+        .await
+        .unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), b"stable fixture");
     std::fs::write(&destination, b"rollback fixture").unwrap();
     config.restart_args = vec!["--invalid-argument-for-fixture".into()];
-    assert!(operations::upgrade(&pool, &config, &actor, "v9.9.9").await.is_err());
+    assert!(
+        operations::upgrade(&pool, &config, &actor, "v9.9.9")
+            .await
+            .is_err()
+    );
     assert_eq!(std::fs::read(&destination).unwrap(), b"rollback fixture");
     let info = operations::upgrade_info(&pool, &config).await.unwrap();
     assert_eq!(info["latestVersion"], "v9.9.9");
@@ -223,8 +270,16 @@ async fn upgrades_require_pinned_manifest_verify_package_and_restore_failed_rest
     .await
     .unwrap();
     let failed = operations::upgrade(&pool, &config, &actor, "v9.9.9").await;
-    sqlx::query(&format!("DROP TRIGGER {function} ON system_upgrade_history")).execute(&pool).await.unwrap();
-    sqlx::query(&format!("DROP FUNCTION {function}()")).execute(&pool).await.unwrap();
+    sqlx::query(&format!(
+        "DROP TRIGGER {function} ON system_upgrade_history"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!("DROP FUNCTION {function}()"))
+        .execute(&pool)
+        .await
+        .unwrap();
     assert!(failed.is_err());
     assert_eq!(std::fs::read(&destination).unwrap(), b"rollback fixture");
     let (journal_id, journal): (String, Value) = sqlx::query_as(
@@ -250,19 +305,37 @@ async fn upgrades_require_pinned_manifest_verify_package_and_restore_failed_rest
             .unwrap();
         // The currently running test image is outside the pending installation,
         // so startup must recover it instead of trusting the replacement on disk.
-        operations::reconcile_upgrades(&pool, &config).await.unwrap();
-        assert_eq!(std::fs::read(&destination).unwrap(), b"rollback fixture");
-        let status: Value = sqlx::query_scalar("SELECT status FROM system_upgrade_history WHERE id=$1")
-            .bind(&journal_id)
-            .fetch_one(&pool)
+        operations::reconcile_upgrades(&pool, &config)
             .await
             .unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"rollback fixture");
+        let status: Value =
+            sqlx::query_scalar("SELECT status FROM system_upgrade_history WHERE id=$1")
+                .bind(&journal_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(status["state"], "failed");
-        assert!(status["error"].as_str().unwrap().contains("Startup restored"));
+        assert!(
+            status["error"]
+                .as_str()
+                .unwrap()
+                .contains("Startup restored")
+        );
     }
-    assert_eq!(operations::upgrade(&pool, &config, &actor, "v9.9.9").await.unwrap()["state"], "restart_requested");
+    assert_eq!(
+        operations::upgrade(&pool, &config, &actor, "v9.9.9")
+            .await
+            .unwrap()["state"],
+        "restart_requested"
+    );
     assert_eq!(std::fs::read(&destination).unwrap(), package);
-    assert!(!std::fs::metadata(&destination).unwrap().permissions().readonly());
+    assert!(
+        !std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .readonly()
+    );
     // Launch a real copy of this executable from the prepared installation.
     // Its actual image hash and compiled version must confirm the handover.
     let new_image = artifacts.path.join(if cfg!(windows) {
@@ -272,15 +345,20 @@ async fn upgrades_require_pinned_manifest_verify_package_and_restore_failed_rest
     });
     std::fs::copy(std::env::current_exe().unwrap(), &new_image).unwrap();
     let startup_id = uuid::Uuid::new_v4().to_string();
-    let new_stage = artifacts.path.join(format!(".casdog-upgrade-{startup_id}.new"));
-    let old_image = artifacts.path.join(format!(".casdog-upgrade-{startup_id}.backup"));
+    let new_stage = artifacts
+        .path
+        .join(format!(".casdog-upgrade-{startup_id}.new"));
+    let old_image = artifacts
+        .path
+        .join(format!(".casdog-upgrade-{startup_id}.backup"));
     std::fs::write(&old_image, b"previous startup image").unwrap();
     let mut startup_journal = journal.clone();
     startup_journal["destination"] = json!(new_image);
     startup_journal["stage"] = json!(new_stage);
     startup_journal["backup"] = json!(old_image);
     startup_journal["previous_sha256"] = json!(operations::digest(b"previous startup image"));
-    startup_journal["package_sha256"] = json!(operations::digest(&std::fs::read(&new_image).unwrap()));
+    startup_journal["package_sha256"] =
+        json!(operations::digest(&std::fs::read(&new_image).unwrap()));
     sqlx::query("INSERT INTO system_upgrade_history(id,actor_id,version,status,journal) VALUES($1,$2,$3,$4,$5)")
         .bind(&startup_id)
         .bind(&actor.id)
@@ -303,7 +381,10 @@ async fn upgrades_require_pinned_manifest_verify_package_and_restore_failed_rest
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000);
-    let child = tokio::time::timeout(std::time::Duration::from_secs(20), command.output()).await.unwrap().unwrap();
+    let child = tokio::time::timeout(std::time::Duration::from_secs(20), command.output())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         child.status.success(),
         "startup child failed: {} {}",
@@ -316,7 +397,10 @@ async fn upgrades_require_pinned_manifest_verify_package_and_restore_failed_rest
         .await
         .unwrap();
     assert_eq!(status["state"], "installed");
-    assert_eq!(std::fs::read(&old_image).unwrap(), b"previous startup image");
+    assert_eq!(
+        std::fs::read(&old_image).unwrap(),
+        b"previous startup image"
+    );
     let mut lock = pool.begin().await.unwrap();
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('casdog-system-upgrade',0))")
         .execute(&mut *lock)
@@ -327,7 +411,11 @@ async fn upgrades_require_pinned_manifest_verify_package_and_restore_failed_rest
         Err(casdog::error::AppError::Conflict(_))
     ));
     lock.rollback().await.unwrap();
-    sqlx::query("DELETE FROM system_upgrade_history WHERE actor_id=$1").bind(actor.id).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM system_upgrade_history WHERE actor_id=$1")
+        .bind(actor.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -346,10 +434,15 @@ async fn security_scan_probes_fingerprints_persists_metadata_and_blocks_tenant_p
         .execute(&pool)
         .await
         .unwrap();
-    let provider: Provider =
-        sqlx::query_as("SELECT * FROM providers WHERE id=$1").bind(&provider.id).fetch_one(&pool).await.unwrap();
+    let provider: Provider = sqlx::query_as("SELECT * FROM providers WHERE id=$1")
+        .bind(&provider.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let global = principal("built-in", true);
-    let result = operations::security_scan(&pool, &global, &provider, "").await.unwrap();
+    let result = operations::security_scan(&pool, &global, &provider, "")
+        .await
+        .unwrap();
     assert_eq!(result[0]["product"], "Fixture product");
     assert_eq!(result[0]["version"], "1.2.3");
     assert_eq!(result[0]["cves"][0]["code"], "CVE-FIXTURE");
@@ -359,9 +452,26 @@ async fn security_scan_probes_fingerprints_persists_metadata_and_blocks_tenant_p
         .await
         .unwrap();
     assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), result);
-    assert!(operations::security_scan(&pool, &principal(&owner, true), &provider, "").await.is_err());
-    assert!(operations::provider(&pool, &principal("another-tenant", true), &owner, &provider.name).await.is_err());
-    sqlx::query("DELETE FROM providers WHERE id=$1").bind(provider.id).execute(&pool).await.unwrap();
+    assert!(
+        operations::security_scan(&pool, &principal(&owner, true), &provider, "")
+            .await
+            .is_err()
+    );
+    assert!(
+        operations::provider(
+            &pool,
+            &principal("another-tenant", true),
+            &owner,
+            &provider.name
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query("DELETE FROM providers WHERE id=$1")
+        .bind(provider.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -376,15 +486,18 @@ async fn intranet_discovery_initializes_real_mcp_and_rejects_public_or_oversized
     provider.content = Some(fixture.origin.rsplit(':').next().unwrap().into());
     provider.endpoint = Some("/mcp".into());
     let global = principal("built-in", true);
-    let result = operations::sync_intranet_servers(&pool, &global, &provider).await.unwrap();
+    let result = operations::sync_intranet_servers(&pool, &global, &provider)
+        .await
+        .unwrap();
     assert_eq!(result["scannedHosts"], 1);
     let name = result["servers"][0]["name"].as_str().unwrap().to_string();
-    let stored: Value =
-        sqlx::query_scalar("SELECT document FROM casdoor_objects WHERE kind='server' AND owner='built-in' AND name=$1")
-            .bind(&name)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let stored: Value = sqlx::query_scalar(
+        "SELECT document FROM casdoor_objects WHERE kind='server' AND owner='built-in' AND name=$1",
+    )
+    .bind(&name)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(stored["displayName"], "Fixture MCP");
     sqlx::query(
         "UPDATE casdoor_objects SET document=document || $2 WHERE kind='server' AND owner='built-in' AND name=$1",
@@ -394,13 +507,16 @@ async fn intranet_discovery_initializes_real_mcp_and_rejects_public_or_oversized
     .execute(&pool)
     .await
     .unwrap();
-    operations::sync_intranet_servers(&pool, &global, &provider).await.unwrap();
-    let stored: Value =
-        sqlx::query_scalar("SELECT document FROM casdoor_objects WHERE kind='server' AND owner='built-in' AND name=$1")
-            .bind(&name)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    operations::sync_intranet_servers(&pool, &global, &provider)
+        .await
+        .unwrap();
+    let stored: Value = sqlx::query_scalar(
+        "SELECT document FROM casdoor_objects WHERE kind='server' AND owner='built-in' AND name=$1",
+    )
+    .bind(&name)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(stored["token"], "preserved-secret");
     assert_eq!(stored["tools"][0]["name"], "preserved-tool");
     assert_eq!(
@@ -415,19 +531,35 @@ async fn intranet_discovery_initializes_real_mcp_and_rejects_public_or_oversized
     );
     let mut changed = provider.clone();
     changed.updated_at = chrono::Utc::now() + chrono::Duration::seconds(1);
-    assert!(operations::sync_intranet_servers(&pool, &global, &changed).await.is_err());
+    assert!(
+        operations::sync_intranet_servers(&pool, &global, &changed)
+            .await
+            .is_err()
+    );
     sqlx::query("DELETE FROM casdoor_objects WHERE kind='server' AND owner='built-in' AND name=$1")
         .bind(&name)
         .execute(&pool)
         .await
         .unwrap();
     assert!(fixture.requests.lock().unwrap()[0].contains("initialize"));
-    assert!(operations::intranet_scan(&principal("tenant", true), &provider).await.is_err());
+    assert!(
+        operations::intranet_scan(&principal("tenant", true), &provider)
+            .await
+            .is_err()
+    );
     for target in ["10.0.0.0/8", "8.8.8.8/32"] {
         provider.scopes = Some(target.into());
-        assert!(operations::intranet_scan(&principal("built-in", true), &provider).await.is_err());
+        assert!(
+            operations::intranet_scan(&principal("built-in", true), &provider)
+                .await
+                .is_err()
+        );
     }
-    sqlx::query("DELETE FROM providers WHERE id=$1").bind(provider.id).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM providers WHERE id=$1")
+        .bind(provider.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -436,12 +568,14 @@ async fn identity_verification_uses_configured_provider_and_updates_only_verifie
     let pool = pool().await;
     let fixture = Fixture::start().await;
     let owner = format!("idv-{}", uuid::Uuid::new_v4());
-    sqlx::query("INSERT INTO organizations(id,owner,name,display_name) VALUES($1,'admin',$2,'IDV Fixture')")
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(&owner)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO organizations(id,owner,name,display_name) VALUES($1,'admin',$2,'IDV Fixture')",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&owner)
+    .execute(&pool)
+    .await
+    .unwrap();
     let provider = provider(&pool, &owner, "ID Verification", "HTTP").await;
     sqlx::query("UPDATE providers SET endpoint=$1,client_secret='fixture-only-secret' WHERE id=$2")
         .bind(format!("{}/verify", fixture.origin))
@@ -457,7 +591,11 @@ async fn identity_verification_uses_configured_provider_and_updates_only_verifie
         .bind(&user).bind(&owner).bind(&app).execute(&pool).await.unwrap();
     let global = principal("built-in", true);
     fixture.json("/verify", json!({"verified":false}));
-    assert!(operations::verify_identification(&pool, &global, &owner, "tester", None).await.is_err());
+    assert!(
+        operations::verify_identification(&pool, &global, &owner, "tester", None)
+            .await
+            .is_err()
+    );
     assert!(
         !sqlx::query_scalar::<_, bool>("SELECT is_verified FROM users WHERE id=$1")
             .bind(&user)
@@ -466,12 +604,26 @@ async fn identity_verification_uses_configured_provider_and_updates_only_verifie
             .unwrap()
     );
     assert!(
-        operations::verify_identification(&pool, &principal("different", true), &owner, "tester", None).await.is_err()
+        operations::verify_identification(
+            &pool,
+            &principal("different", true),
+            &owner,
+            "tester",
+            None
+        )
+        .await
+        .is_err()
     );
-    assert!(operations::verify_identification(&pool, &global, &owner, "tester", Some("unconfigured")).await.is_err());
+    assert!(
+        operations::verify_identification(&pool, &global, &owner, "tester", Some("unconfigured"))
+            .await
+            .is_err()
+    );
     fixture.json("/verify", json!({"verified":true}));
     assert_eq!(
-        operations::verify_identification(&pool, &global, &owner, "tester", None).await.unwrap(),
+        operations::verify_identification(&pool, &global, &owner, "tester", None)
+            .await
+            .unwrap(),
         "Fixture Person"
     );
     assert!(
@@ -481,19 +633,31 @@ async fn identity_verification_uses_configured_provider_and_updates_only_verifie
             .await
             .unwrap()
     );
-    let audit: String = sqlx::query_scalar("SELECT subject_sha256 FROM identification_verifications WHERE user_id=$1")
-        .bind(&user)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let audit: String = sqlx::query_scalar(
+        "SELECT subject_sha256 FROM identification_verifications WHERE user_id=$1",
+    )
+    .bind(&user)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(audit.len(), 64);
     assert!(!audit.contains("fixture-id"));
     assert!(fixture.requests.lock().unwrap().iter().any(|request| {
         request.contains("fixture-id-123")
-            && request.to_ascii_lowercase().contains("authorization: bearer fixture-only-secret")
+            && request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer fixture-only-secret")
     }));
-    assert!(operations::verify_identification(&pool, &global, &owner, "tester", None).await.is_err());
-    sqlx::query("UPDATE users SET id_card='changed-identity' WHERE id=$1").bind(&user).execute(&pool).await.unwrap();
+    assert!(
+        operations::verify_identification(&pool, &global, &owner, "tester", None)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE users SET id_card='changed-identity' WHERE id=$1")
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
     assert!(
         !sqlx::query_scalar::<_, bool>("SELECT is_verified FROM users WHERE id=$1")
             .bind(&user)
@@ -501,10 +665,26 @@ async fn identity_verification_uses_configured_provider_and_updates_only_verifie
             .await
             .unwrap()
     );
-    sqlx::query("DELETE FROM users WHERE id=$1").bind(user).execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM applications WHERE id=$1").bind(app).execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM providers WHERE id=$1").bind(provider.id).execute(&pool).await.unwrap();
-    sqlx::query("DELETE FROM organizations WHERE name=$1").bind(&owner).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM applications WHERE id=$1")
+        .bind(app)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM providers WHERE id=$1")
+        .bind(provider.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM organizations WHERE name=$1")
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[handler]
@@ -525,28 +705,42 @@ async fn rest_provider_configuration_persists_scan_fields_and_preserves_omitted_
         "sub_type":"Intranet Scan","content":"8080,3000","scopes":"10.0.0.1/32","endpoint":"/mcp"
     }))
     .unwrap();
-    let created = casdog::services::ProviderService::create(&pool, request).await.unwrap();
+    let created = casdog::services::ProviderService::create(&pool, request)
+        .await
+        .unwrap();
     assert_eq!(created.content.as_deref(), Some("8080,3000"));
     assert_eq!(created.scopes.as_deref(), Some("10.0.0.1/32"));
     let update: casdog::models::provider::UpdateProviderRequest =
         serde_json::from_value(json!({"content":"3001","scopes":"10.0.0.2/32"})).unwrap();
-    let updated = casdog::services::ProviderService::update(&pool, &created.id, update).await.unwrap();
+    let updated = casdog::services::ProviderService::update(&pool, &created.id, update)
+        .await
+        .unwrap();
     assert_eq!(updated.content.as_deref(), Some("3001"));
     assert_eq!(updated.scopes.as_deref(), Some("10.0.0.2/32"));
     let update: casdog::models::provider::UpdateProviderRequest =
         serde_json::from_value(json!({"display_name":"Renamed"})).unwrap();
-    let updated = casdog::services::ProviderService::update(&pool, &created.id, update).await.unwrap();
+    let updated = casdog::services::ProviderService::update(&pool, &created.id, update)
+        .await
+        .unwrap();
     assert_eq!(updated.content.as_deref(), Some("3001"));
     assert_eq!(updated.scopes.as_deref(), Some("10.0.0.2/32"));
-    let fetched = casdog::services::ProviderService::get_by_id(&pool, &created.id).await.unwrap();
+    let fetched = casdog::services::ProviderService::get_by_id(&pool, &created.id)
+        .await
+        .unwrap();
     assert_eq!(fetched.content.as_deref(), Some("3001"));
-    sqlx::query("DELETE FROM providers WHERE id=$1").bind(created.id).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM providers WHERE id=$1")
+        .bind(created.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn system_mutations_require_global_admin_and_provider_queries_require_owner() {
     let lazy = PgPool::connect_lazy("postgres://nobody@localhost/unused").unwrap();
-    operations::reconcile_upgrades(&lazy, &SystemGapConfig::default()).await.unwrap();
+    operations::reconcile_upgrades(&lazy, &SystemGapConfig::default())
+        .await
+        .unwrap();
     let service = Service::new(
         Router::with_path("api")
             .hoop(salvo::affix_state::AffixList::new().inject(lazy))
@@ -564,10 +758,15 @@ async fn system_mutations_require_global_admin_and_provider_queries_require_owne
         );
     }
     assert_eq!(
-        TestClient::get("http://localhost/api/get-upgrade-info").send(&service).await.status_code,
+        TestClient::get("http://localhost/api/get-upgrade-info")
+            .send(&service)
+            .await
+            .status_code,
         Some(StatusCode::FORBIDDEN)
     );
-    let mut response = TestClient::get("http://localhost/api/scan?owner=other&name=provider").send(&service).await;
+    let mut response = TestClient::get("http://localhost/api/scan?owner=other&name=provider")
+        .send(&service)
+        .await;
     assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
     let body: Value = response.take_json().await.unwrap();
     assert_eq!(body["code"], 403);

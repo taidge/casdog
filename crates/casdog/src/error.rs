@@ -63,6 +63,14 @@ impl ErrorResponse {
 impl Writer for AppError {
     async fn write(self, _req: &mut Request, _depot: &mut Depot, res: &mut Response) {
         let (status, error_response) = match &self {
+            AppError::Database(e) if e.as_database_error().is_some_and(|db| {
+                db.code().as_deref() == Some("23514") && db.constraint() == Some("checkout_lifecycle")
+            }) => (
+                StatusCode::CONFLICT,
+                ErrorResponse::new(409, "Checkout state conflict").with_details(
+                    "Checkout amounts and references are fixed; use the payment or cancellation flow to change its state.",
+                ),
+            ),
             AppError::Database(e) => {
                 tracing::error!("Database error: {:?}", e);
                 (

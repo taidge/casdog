@@ -9,6 +9,35 @@ use crate::models::{
 pub struct SubscriptionService;
 
 impl SubscriptionService {
+    /// Resolve paid, currently valid roles from PostgreSQL on every permission
+    /// decision. Never copy these grants into permanent user_roles membership.
+    pub async fn active_role_names(
+        pool: &PgPool,
+        owner: &str,
+        user_name: &str,
+    ) -> AppResult<Vec<String>> {
+        let mut connection = pool.acquire().await?;
+        Self::active_role_names_conn(&mut connection, owner, user_name).await
+    }
+
+    pub async fn active_role_names_conn(
+        connection: &mut sqlx::PgConnection,
+        owner: &str,
+        user_name: &str,
+    ) -> AppResult<Vec<String>> {
+        Ok(sqlx::query_scalar("SELECT qualified_role_name FROM active_subscription_roles WHERE user_owner=$1 AND user_name=$2 ORDER BY qualified_role_name")
+            .bind(owner).bind(user_name).fetch_all(connection).await?)
+    }
+
+    pub async fn active_roles_for_user_id(
+        pool: &PgPool,
+        user_id: &str,
+    ) -> AppResult<Vec<crate::models::RoleResponse>> {
+        let roles: Vec<crate::models::Role>=sqlx::query_as("SELECT r.* FROM roles r JOIN active_subscription_roles a ON a.role_id=r.id WHERE a.user_id=$1 ORDER BY r.owner,r.name")
+            .bind(user_id).fetch_all(pool).await?;
+        Ok(roles.into_iter().map(Into::into).collect())
+    }
+
     pub async fn list(
         pool: &PgPool,
         owner: Option<&str>,

@@ -208,7 +208,7 @@ pub const RESOURCES: &[ResourceConfig] = &[
         group: "Commerce",
         endpoint: "/api/products",
         description: "Sellable products exposed in the store.",
-        template: r#"{"owner":"admin","name":"starter","display_name":"Starter"}"#,
+        template: r#"{"owner":"admin","name":"starter","display_name":"Starter","currency":"USD","quantity":-1,"state":"Active","recharge_options":[]}"#,
     },
     ResourceConfig {
         slug: "plans",
@@ -216,15 +216,15 @@ pub const RESOURCES: &[ResourceConfig] = &[
         group: "Commerce",
         endpoint: "/api/plans",
         description: "Subscription plans attached to products.",
-        template: r#"{"owner":"admin","name":"starter_monthly","display_name":"Starter Monthly","product":"starter"}"#,
+        template: r#"{"owner":"admin","name":"starter_monthly","display_name":"Starter Monthly","currency":"USD","price_per_month":9.99,"price_per_year":99.9,"is_enabled":true}"#,
     },
     ResourceConfig {
         slug: "pricings",
         label: "Pricings",
         group: "Commerce",
         endpoint: "/api/pricings",
-        description: "Currency-specific pricing rows.",
-        template: r#"{"owner":"admin","name":"starter_usd","display_name":"Starter USD","plan":"starter_monthly","currency":"USD","price":9.99}"#,
+        description: "Published collections of subscription plans.",
+        template: r#"{"owner":"admin","name":"starter_usd","display_name":"Starter USD","plans":"[\"admin/starter_monthly\"]","is_enabled":true}"#,
     },
     ResourceConfig {
         slug: "subscriptions",

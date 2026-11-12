@@ -1,21 +1,9 @@
-use base64::Engine as _;
-use base64::engine::general_purpose;
+use crate::error::ErrorResponse;
 use salvo::prelude::*;
-use sqlx::{Pool, Postgres};
 
-use crate::services::auth_service::Claims;
-
-/// Multi-source authentication hoop.
-/// Tries multiple auth methods in order:
-/// 1. Bearer token (JWT) from Authorization header
-/// 2. Access token (JWT) from query parameter
-/// 3. Access key + secret (from query params)
-/// 4. Client ID + secret (from Basic Auth or query params)
-///
-/// If no authentication source succeeds, the request continues anyway
-/// (the downstream handler may allow anonymous access).
+/// Optional authentication shares the exact required-auth credential verifier.
+/// Only requests with no credential transport may proceed anonymously.
 pub struct AutoSigninFilter;
-
 #[async_trait]
 impl Handler for AutoSigninFilter {
     async fn handle(
@@ -25,145 +13,24 @@ impl Handler for AutoSigninFilter {
         res: &mut Response,
         ctrl: &mut FlowCtrl,
     ) {
-        // JWTs from any transport share live-account and revocation validation.
-        for token in [
-            extract_bearer_token(req),
-            req.query::<String>("accessToken"),
-        ] {
-            if let (Some(token), Ok(pool)) = (token, depot.obtain::<Pool<Postgres>>()) {
-                if let Ok(claims) = super::auth::validate_session_claims(pool, &token).await {
-                    set_depot_from_claims(depot, &claims);
-                    ctrl.call_next(req, depot, res).await;
-                    return;
-                }
-            }
+        if super::auth::authenticate_request(req, depot).await.is_err() {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            res.render(Json(ErrorResponse::new(
+                401,
+                "Invalid or expired credentials",
+            )));
+            ctrl.skip_rest();
+            return;
         }
-
-        // 3. Try access key + secret from query params
-        if let (Some(access_key), Some(access_secret)) = (
-            req.query::<String>("accessKey"),
-            req.query::<String>("accessSecret"),
-        ) {
-            if let Ok(pool) = depot.obtain::<Pool<Postgres>>() {
-                let pool = pool.clone();
-                if let Ok(user) =
-                    lookup_user_by_access_key(&pool, &access_key, &access_secret).await
-                {
-                    depot.insert("user_id", user.0);
-                    depot.insert("user_owner", user.1);
-                    depot.insert("user_name", user.2);
-                    depot.insert("is_admin", user.3);
-                    ctrl.call_next(req, depot, res).await;
-                    return;
-                }
-            }
+        if crate::services::key_credentials_service::application_identity(depot) {
+            res.status_code(StatusCode::FORBIDDEN);
+            res.render(Json(ErrorResponse::new(
+                403,
+                "Application credentials cannot authenticate an interactive user",
+            )));
+            ctrl.skip_rest();
+            return;
         }
-
-        // 4. Try client_id + client_secret (Basic Auth or query params)
-        if let (Some(client_id), Some(client_secret)) = extract_client_credentials(req) {
-            if let Ok(pool) = depot.obtain::<Pool<Postgres>>() {
-                let pool = pool.clone();
-                if let Ok(_app) = lookup_application(&pool, &client_id, &client_secret).await {
-                    // Application-level auth (no user context)
-                    depot.insert("client_id", client_id);
-                    depot.insert("is_admin", false);
-                    ctrl.call_next(req, depot, res).await;
-                    return;
-                }
-            }
-        }
-
-        // No authentication found - continue anyway (handler may allow anonymous)
         ctrl.call_next(req, depot, res).await;
     }
-}
-
-fn extract_bearer_token(req: &Request) -> Option<String> {
-    req.headers()
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string())
-}
-
-fn set_depot_from_claims(depot: &mut Depot, claims: &Claims) {
-    depot.insert("user_id", claims.sub.clone());
-    depot.insert("user_owner", claims.owner.clone());
-    depot.insert("user_name", claims.name.clone());
-    depot.insert("is_admin", claims.is_admin);
-    if let Some(impersonator_user_id) = claims.impersonator_user_id.clone() {
-        depot.insert("impersonator_user_id", impersonator_user_id);
-        depot.insert("is_impersonating", true);
-    }
-    if let Some(impersonator_owner) = claims.impersonator_owner.clone() {
-        depot.insert("impersonator_owner", impersonator_owner);
-    }
-    if let Some(impersonator_name) = claims.impersonator_name.clone() {
-        depot.insert("impersonator_name", impersonator_name);
-    }
-    if let Some(impersonation_session_id) = claims.impersonation_session_id.clone() {
-        depot.insert("impersonation_session_id", impersonation_session_id);
-    }
-    if let Some(impersonation_application) = claims.impersonation_application.clone() {
-        depot.insert("impersonation_application", impersonation_application);
-    }
-    depot.insert("claims", claims.clone());
-}
-
-async fn lookup_user_by_access_key(
-    pool: &Pool<Postgres>,
-    access_key: &str,
-    access_secret: &str,
-) -> Result<(String, String, String, bool), ()> {
-    let row: Option<(String, String, String, bool)> = sqlx::query_as(
-        "SELECT id, owner, name, is_admin FROM users WHERE access_key = $1 AND access_secret = $2 AND is_deleted = false AND is_forbidden = false AND access_key <> '' AND access_secret <> ''",
-    )
-    .bind(access_key)
-    .bind(access_secret)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| ())?;
-
-    row.ok_or(())
-}
-
-fn extract_client_credentials(req: &Request) -> (Option<String>, Option<String>) {
-    // Try Basic Auth header first
-    if let Some(auth) = req
-        .headers()
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Basic "))
-    {
-        if let Ok(decoded) = general_purpose::STANDARD.decode(auth) {
-            if let Ok(decoded_str) = String::from_utf8(decoded) {
-                if let Some((id, secret)) = decoded_str.split_once(':') {
-                    return (Some(id.to_string()), Some(secret.to_string()));
-                }
-            }
-        }
-    }
-
-    // Fall back to query params
-    (
-        req.query::<String>("clientId"),
-        req.query::<String>("clientSecret"),
-    )
-}
-
-async fn lookup_application(
-    pool: &Pool<Postgres>,
-    client_id: &str,
-    client_secret: &str,
-) -> Result<String, ()> {
-    let name: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM applications WHERE client_id = $1 AND client_secret = $2",
-    )
-    .bind(client_id)
-    .bind(client_secret)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| ())?;
-
-    name.ok_or(())
 }

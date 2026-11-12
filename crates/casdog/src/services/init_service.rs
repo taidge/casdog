@@ -263,6 +263,7 @@ impl InitService {
 
         let client_id = Uuid::new_v4().to_string().replace('-', "");
         let client_secret = Uuid::new_v4().to_string().replace('-', "");
+        let application_id = Uuid::new_v4().to_string();
 
         let signup_items = serde_json::json!([
             {"name": "ID", "visible": false, "required": true, "prompted": false, "rule": "Random"},
@@ -291,6 +292,7 @@ impl InitService {
             {"name": "provider_captcha_default", "canSignUp": false, "canSignIn": false, "canUnlink": false, "prompted": false, "signupGroup": "", "rule": "None"},
         ]);
 
+        let mut tx = pool.begin().await?;
         sqlx::query(
             r#"INSERT INTO applications (
                 id, owner, name, display_name,
@@ -317,15 +319,32 @@ impl InitService {
                 NOW(), NOW()
             )"#,
         )
-        .bind(Uuid::new_v4().to_string())
+        .bind(&application_id)
         .bind(&client_id)
         .bind(&client_secret)
         .bind(&signup_items)
         .bind(&signin_methods)
         .bind(&signin_items)
         .bind(&providers)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+        let actor:Option<(String,String,String,bool)>=sqlx::query_as("SELECT id,owner,name,is_admin FROM users WHERE owner='built-in' AND name='admin' AND is_admin AND NOT is_deleted AND NOT is_forbidden")
+            .fetch_optional(&mut *tx).await?;
+        if let Some((id, owner, name, admin)) = actor {
+            crate::services::key_credentials_service::mark_static_application_conn(
+                &mut tx,
+                &application_id,
+                &crate::hoops::authz::Principal {
+                    application_identity: false,
+                    id,
+                    owner,
+                    name,
+                    admin,
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
 
         tracing::info!("Created built-in application (client_id: {})", client_id);
         Ok(())

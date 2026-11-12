@@ -265,11 +265,8 @@ impl RoleService {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let role_list = roles::table
-            .inner_join(user_roles::table.on(roles::id.eq(user_roles::role_id)))
-            .filter(user_roles::user_id.eq(user_id))
-            .filter(roles::is_deleted.eq(false))
-            .select(Role::as_select())
+        let role_list = diesel::sql_query("SELECT r.* FROM roles r JOIN users u ON u.id=$1 AND u.owner=r.owner WHERE r.is_deleted=false AND (EXISTS(SELECT 1 FROM user_roles ur WHERE ur.user_id=u.id AND ur.role_id=r.id) OR EXISTS(SELECT 1 FROM active_subscription_roles sr WHERE sr.user_id=u.id AND sr.role_id=r.id)) ORDER BY r.owner,r.name")
+            .bind::<diesel::sql_types::Text,_>(user_id)
             .load::<Role>(&mut conn)
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;

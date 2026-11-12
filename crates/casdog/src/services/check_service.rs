@@ -443,8 +443,9 @@ impl CheckService {
             r#"SELECT p.resources,p.actions,p.effect,
                 EXISTS(SELECT 1 FROM role_permissions rp
                     JOIN roles r ON r.id=rp.role_id
-                    JOIN user_roles ur ON ur.role_id=r.id
-                    WHERE rp.permission_id=p.id AND ur.user_id=$1
+                    WHERE rp.permission_id=p.id AND (
+                        EXISTS(SELECT 1 FROM user_roles ur WHERE ur.role_id=r.id AND ur.user_id=$1)
+                        OR EXISTS(SELECT 1 FROM active_subscription_roles sr WHERE sr.role_id=r.id AND sr.user_id=$1))
                       AND r.owner=$2 AND r.is_enabled=true AND r.is_deleted=false)
                 FROM permissions p WHERE p.owner=$2 AND lower(p.resource_type)='application'
                   AND p.is_enabled=true AND p.is_deleted=false"#,

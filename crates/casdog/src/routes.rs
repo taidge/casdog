@@ -100,11 +100,13 @@ fn api_router() -> Router {
 
 fn public_routes() -> Router {
     Router::new()
+        .push(payment_notification_routes())
         .push(Router::with_path("health").get(health::health_check))
         .push(Router::with_path("signup").post(auth::signup))
         .push(Router::with_path("request-password-reset").post(crate::handlers::password_reset::request_password_reset))
         .push(Router::with_path("reset-password").post(crate::handlers::password_reset::reset_password))
         .push(Router::with_path("login").post(crate::handlers::password_mfa::login))
+        .push(Router::with_path("auth/code/start").post(crate::handlers::primary_auth::start_code))
         .push(Router::with_path("get-app-login").get(auth::get_app_login))
         .push(Router::with_path("user").get(oidc::userinfo))
         .push(Router::with_path("userinfo").get(oidc::userinfo).post(oidc::userinfo))
@@ -165,10 +167,22 @@ fn public_routes() -> Router {
         .push(Router::with_path("auth/{provider}/callback").get(social_login::provider_callback))
 }
 
+// Provider callbacks authenticate their raw body with the configured webhook
+// verifier. Optional JWT identity is used only for administrator settlement,
+// which the handler authorizes against the stored payment.
+fn payment_notification_routes() -> Router {
+    Router::new()
+        .hoop(OptionalJwtAuth)
+        .push(Router::with_path("notify-payment").post(payment::notify_payment))
+        .push(Router::with_path("notify-payment/{owner}/{payment}").post(payment::notify_payment))
+        .push(Router::with_path("payments/notify").post(payment::notify_payment))
+}
+
 fn protected_routes() -> Router {
     Router::new()
         .hoop(JwtAuth)
         .hoop(AuthzFilter)
+        .push(Router::with_path("trust-application-credentials").post(application::trust_credentials))
         .push(Router::with_path("oauth/register").post(auth::oauth_register))
         .push(Router::with_path("logout").get(auth::logout).post(auth::logout))
         .push(Router::with_path("get-account").get(auth::get_account))
@@ -250,10 +264,6 @@ fn protected_routes() -> Router {
         .push(Router::with_path("delete-ldap").post(ldap::delete_ldap))
         .push(Router::with_path("get-ldap-users").get(ldap::get_ldap_users))
         .push(Router::with_path("sync-ldap-users").post(ldap::sync_ldap_users))
-        .push(Router::with_path("notify-payment").post(payment::notify_payment))
-        .push(
-            Router::with_path("notify-payment/{owner}/{payment}").post(payment::notify_payment),
-        )
         .push(Router::with_path("invoice-payment").post(payment::invoice_payment))
         .push(Router::with_path("pay-order").post(order::pay_order))
         .push(Router::with_path("cancel-order").post(order::cancel_order))
@@ -660,7 +670,6 @@ fn payment_routes() -> Router {
     Router::with_path("payments")
         .get(payment::list_payments)
         .post(payment::create_payment)
-        .push(Router::with_path("notify").post(payment::notify_payment))
         .push(Router::with_path("invoice").post(payment::invoice_payment))
         .push(
             Router::with_path("{id}")

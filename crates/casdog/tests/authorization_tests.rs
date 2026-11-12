@@ -390,6 +390,25 @@ async fn mcp_scopes_exact_applications_masks_secrets_and_rejects_nonadmins() {
 async fn messaging_validates_real_credentials_and_provider_tenant_before_delivery() {
     let f = Fixture::new().await;
     let bearer = format!("Bearer {}", f.token(true));
+    sqlx::query("INSERT INTO organizations(id,owner,name,display_name) VALUES($1,'admin',$2,$2)")
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&f.tenant)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    casdog::services::key_credentials_service::mark_static_application(
+        &f.pool,
+        &f.app,
+        &casdog::hoops::authz::Principal {
+            id: f.admin_id.clone(),
+            owner: f.tenant.clone(),
+            name: "admin".into(),
+            admin: true,
+            application_identity: false,
+        },
+    )
+    .await
+    .unwrap();
     // Empty receiver lists guarantee this regression never sends external messages.
     for (authorization, provider, status) in [
         (
@@ -443,6 +462,11 @@ async fn messaging_validates_real_credentials_and_provider_tenant_before_deliver
     .await;
     assert_eq!(res.status_code, Some(StatusCode::FORBIDDEN));
     f.cleanup().await;
+    sqlx::query("DELETE FROM organizations WHERE name=$1")
+        .bind(&f.tenant)
+        .execute(&f.pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

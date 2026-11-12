@@ -567,7 +567,7 @@ diesel::table! {
         created_at -> Timestamptz,
         organization -> Nullable<VarChar>,
         client_ip -> Nullable<VarChar>,
-        user_id -> Nullable<VarChar>,
+        user -> Nullable<Text>,
         method -> VarChar,
         request_uri -> VarChar,
         action -> VarChar,

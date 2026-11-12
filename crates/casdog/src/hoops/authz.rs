@@ -12,9 +12,23 @@ pub struct Principal {
     pub owner: String,
     pub name: String,
     pub admin: bool,
+    pub application_identity: bool,
+}
+
+/// Server-only authentication metadata. Neither request fields nor legacy user
+/// ID spelling determine whether an identity is an application.
+struct ApplicationIdentity(bool);
+
+pub(crate) fn set_application_identity(depot: &mut Depot, value: bool) {
+    depot.inject(ApplicationIdentity(value));
 }
 
 impl Principal {
+    /// Authentication supplies the kind independently of any legacy ID/name.
+    pub fn is_application(&self) -> bool {
+        self.application_identity
+    }
+
     pub fn from_depot(depot: &Depot) -> AppResult<Self> {
         let read = |key| {
             depot
@@ -29,6 +43,9 @@ impl Principal {
             owner: read("user_owner")?,
             name: read("user_name")?,
             admin: depot.get::<bool>("is_admin").copied().unwrap_or(false),
+            application_identity: depot
+                .obtain::<ApplicationIdentity>()
+                .is_ok_and(|kind| kind.0),
         })
     }
     pub fn global_admin(&self) -> bool {
@@ -38,7 +55,11 @@ impl Principal {
         if self.global_admin() {
             return Ok(());
         }
-        let own = if table == "organizations" {
+        let own = if table == "applications" && self.is_application() {
+            // Upstream static applications are often stored under owner=admin
+            // while their virtual principal belongs to Organization.
+            object.get("organization").and_then(Value::as_str) == Some(self.owner.as_str())
+        } else if table == "organizations" {
             object.get("name").and_then(Value::as_str) == Some(self.owner.as_str())
         } else {
             object.get("owner").and_then(Value::as_str) == Some(self.owner.as_str())
@@ -318,6 +339,16 @@ impl Handler for AuthzFilter {
 
 async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
     let p = Principal::from_depot(depot)?;
+    if p.is_application() {
+        // Even trusted static service administrators cannot exchange an API
+        // credential for a user's session, password, MFA or login ceremony.
+        if !machine_management_path(req) {
+            return Err(denied());
+        }
+        if !p.admin {
+            return authorize_application_policy(req, depot, &p).await;
+        }
+    }
     if p.global_admin() {
         return Ok(());
     }
@@ -411,6 +442,7 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
             | "delete-integration"
             | "get-marketplace-index"
             | "get-marketplace-bundle"
+            | "trust-application-credentials"
             | "get-openclaw-session-graph"
             | "get-webhook-events"
             | "get-webhook-event-detail"
@@ -579,9 +611,6 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
         path.as_str(),
         "pay-order" | "cancel-order" | "invoice-payment" | "payments/invoice"
     ) {
-        if !p.admin {
-            return Err(denied());
-        }
         let table = if path.contains("order") {
             "orders"
         } else {
@@ -590,6 +619,12 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
         let id = req.query::<String>("id").ok_or_else(denied)?;
         let object = stored_object(pool, table, &id).await?;
         p.check_owner(&object, table)?;
+        if !p.admin
+            && !(table == "orders"
+                && object.get("user").and_then(Value::as_str) == Some(p.name.as_str()))
+        {
+            return Err(denied());
+        }
         if table == "orders" {
             validate_order_targets(pool, &p, &object).await?;
         }
@@ -688,6 +723,10 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
                 ("organizations", "GET") => {}
                 ("sessions", "GET" | "DELETE")
                     if object.get("user_id").and_then(Value::as_str) == Some(p.id.as_str()) => {}
+                ("orders", "POST")
+                    if segments.len() == 3
+                        && matches!(segments[2], "pay" | "cancel")
+                        && object.get("user").and_then(Value::as_str) == Some(p.name.as_str()) => {}
                 _ => return Err(denied()),
             }
         }
@@ -716,4 +755,170 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
     // Unclassified global collections, Casbin policy/engine operations, system metrics,
     // bulk imports, network test operations and payment callbacks remain global-admin only.
     Err(denied())
+}
+
+fn machine_management_path(req: &Request) -> bool {
+    let path = req
+        .uri()
+        .path()
+        .trim_end_matches('/')
+        .trim_start_matches("/api/");
+    let segments: Vec<_> = path.split('/').collect();
+    if segments.len() <= 2
+        && resource_table(segments[0]).is_some_and(|table| !matches!(table, "sessions" | "tokens"))
+    {
+        return true;
+    }
+    if let Some((verb, resource)) = path.split_once('-') {
+        let resource = resource.strip_prefix("global-").unwrap_or(resource);
+        if matches!(verb, "get" | "add" | "update" | "delete") {
+            let plural = format!("{resource}s");
+            if resource_table(resource)
+                .or_else(|| resource_table(&plural))
+                .is_some_and(|table| !matches!(table, "sessions" | "tokens"))
+            {
+                return true;
+            }
+            if matches!(
+                resource,
+                "key" | "keys" | "agent" | "agents" | "entry" | "entries" | "server" | "servers"
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Unverified/dynamic applications need an explicit Casbin grant in addition
+/// to the immutable tenant boundary. Collection requests are forcibly scoped;
+/// object requests authorize the persisted object before the handler executes.
+async fn authorize_application_policy(
+    req: &mut Request,
+    depot: &Depot,
+    p: &Principal,
+) -> AppResult<()> {
+    let pool = depot
+        .obtain::<Pool<Postgres>>()
+        .map_err(|_| AppError::Internal("Authorization database unavailable".into()))?;
+    let path = req
+        .uri()
+        .path()
+        .trim_end_matches('/')
+        .trim_start_matches("/api/")
+        .to_string();
+    let method = req.method().as_str().to_string();
+    let body = if matches!(method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
+        let bytes = req.payload().await.map_err(|_| denied())?;
+        if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(bytes).map_err(|_| denied())?
+        }
+    } else {
+        Value::Null
+    };
+    let segments: Vec<_> = path.split('/').collect();
+    // An ordinary service policy is not authority to mint IAM credentials or
+    // rewrite its own policy. In particular GET users/applications/providers
+    // can expose credentials, while user updates can otherwise set is_admin.
+    let table = resource_table(segments[0])
+        .or_else(|| {
+            path.split_once('-').and_then(|(_, resource)| {
+                resource_table(resource).or_else(|| resource_table(&format!("{resource}s")))
+            })
+        })
+        .ok_or_else(denied)?;
+    if table == "users" {
+        if matches!(method.as_str(), "PUT" | "PATCH") || path.starts_with("update-user") {
+            validate_profile(&body)?;
+        } else {
+            return Err(denied());
+        }
+    } else if !matches!(
+        table,
+        "products" | "plans" | "pricings" | "sites" | "forms" | "tickets" | "resources"
+    ) {
+        return Err(denied());
+    }
+    if let Some(table) = resource_table(segments[0]) {
+        if segments.len() == 2 {
+            p.check_owner(&stored_object(pool, table, segments[1]).await?, table)?;
+        } else if method == "GET" {
+            if req
+                .query::<String>("owner")
+                .is_some_and(|owner| owner != p.owner)
+            {
+                return Err(denied());
+            }
+            req.queries_mut().insert("owner".into(), p.owner.clone());
+        } else if body["owner"].as_str() != Some(p.owner.as_str()) {
+            return Err(denied());
+        }
+    } else {
+        let (verb, resource) = path.split_once('-').ok_or_else(denied)?;
+        if resource.starts_with("global-") {
+            return Err(denied());
+        }
+        let plural = format!("{resource}s");
+        let table = resource_table(resource)
+            .or_else(|| resource_table(&plural))
+            .ok_or_else(denied)?;
+        if let Some(id) = req.query::<String>("id") {
+            let object: Option<Value> = if let Some((owner, name)) = id.split_once('/') {
+                if owner != p.owner {
+                    return Err(denied());
+                }
+                sqlx::query_scalar(&format!(
+                    "SELECT to_jsonb(t) FROM {table} t WHERE owner=$1 AND name=$2"
+                ))
+                .bind(owner)
+                .bind(name)
+                .fetch_optional(pool)
+                .await?
+            } else {
+                Some(stored_object(pool, table, &id).await?)
+            };
+            p.check_owner(&object.ok_or_else(denied)?, table)?;
+        } else if verb == "get" && resource_table(resource).is_some() {
+            if req
+                .query::<String>("owner")
+                .is_some_and(|owner| owner != p.owner)
+            {
+                return Err(denied());
+            }
+            req.queries_mut().insert("owner".into(), p.owner.clone());
+        } else {
+            if body["owner"].as_str() != Some(p.owner.as_str()) {
+                return Err(denied());
+            }
+            if verb != "add" {
+                let name = body["name"].as_str().ok_or_else(denied)?;
+                let object: Value = sqlx::query_scalar(&format!(
+                    "SELECT to_jsonb(t) FROM {table} t WHERE owner=$1 AND name=$2"
+                ))
+                .bind(&p.owner)
+                .bind(name)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(denied)?;
+                p.check_owner(&object, table)?;
+            }
+        }
+    }
+    if !body.is_null() {
+        validate_references(pool, p, &body).await?;
+    }
+    if crate::services::key_credentials_service::application_policy(
+        pool,
+        p,
+        req.uri().path(),
+        &method,
+    )
+    .await?
+    {
+        Ok(())
+    } else {
+        Err(denied())
+    }
 }

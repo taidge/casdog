@@ -696,6 +696,7 @@ async fn enrollment_and_social_completion_use_the_same_account_factor_lock_order
     let setup_pool = f.other_pool.clone();
     let setup_user = f.user.clone();
     let code = f.code();
+    let consumed_code = code.clone();
     let setup = tokio::spawn(async move {
         MfaService::confirm_setup(&setup_pool, &setup_user, "totp", &code).await
     });
@@ -728,7 +729,23 @@ async fn enrollment_and_social_completion_use_the_same_account_factor_lock_order
         .unwrap();
     assert!(confirmed.is_some());
     assert_eq!(
-        f.post(&proof, json!({"mfaType":"app","passcode":f.code()}))
+        f.post(&proof, json!({"mfaType":"app","passcode":consumed_code}))
+            .await
+            .status_code,
+        Some(StatusCode::UNAUTHORIZED)
+    );
+    // Enrollment already consumed this authenticator step. Recovery is an
+    // independent proof and avoids waiting for another 30-second window.
+    let codes: String = sqlx::query_scalar(
+        "SELECT recovery_codes FROM user_mfa WHERE user_id=$1 AND mfa_type='totp'",
+    )
+    .bind(&f.user)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    let codes: Vec<String> = serde_json::from_str(&codes).unwrap();
+    assert_eq!(
+        f.post(&proof, json!({"mfaType":"recovery","passcode":codes[0]}))
             .await
             .status_code,
         Some(StatusCode::OK)

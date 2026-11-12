@@ -11,6 +11,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 
 fn admin(owner: &str) -> Principal {
     Principal {
+        application_identity: false,
         id: "test-admin".into(),
         owner: owner.into(),
         name: "admin".into(),
@@ -293,7 +294,19 @@ async fn resource_crud_persists_secrets_preserves_identity_and_enforces_tenants(
 async fn marketplace_install_uninstall_is_atomic_and_links_real_resources() {
     let pool = pool().await;
     let owner = format!("market-{}", uuid::Uuid::new_v4());
-    let principal = admin(&owner);
+    let principal = Principal {
+        application_identity: false,
+        id: uuid::Uuid::new_v4().to_string(),
+        ..admin(&owner)
+    };
+    sqlx::query("INSERT INTO organizations(id,owner,name,display_name) VALUES($1,'admin',$2,$2)")
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash,is_admin) VALUES($1,$2,'admin','Admin','unused',true)")
+        .bind(&principal.id).bind(&owner).execute(&pool).await.unwrap();
     let app_bundle = json!({"manifest":{"id":"sample","type":"app","version":"1","variables":[{"name":"appUrl","type":"url","required":true}]},"files":{"application.json":{"redirectUris":["{{appUrl}}/callback"]}}});
     let item = json!({"id":"sample","type":"app","name":{"en":"Sample"}});
     let request = json!({"owner":owner,"name":"sample-app","integrationId":"sample","variables":{"appUrl":"https://example.org"}});
@@ -313,6 +326,14 @@ async fn marketplace_install_uninstall_is_atomic_and_links_real_resources() {
     .await
     .unwrap();
     assert_eq!(app["organization"], owner);
+    let origin: String = sqlx::query_scalar(
+        "SELECT origin FROM application_credential_origins WHERE application_id=$1",
+    )
+    .bind(app["id"].as_str().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(origin, "static");
     assert_eq!(app["redirect_uris"], "[\"https://example.org/callback\"]");
     let provider_bundle = json!({"manifest":{"id":"github","type":"provider","version":"1"},"files":{"provider.json":{"category":"OAuth","type":"GitHub","scopes":"user:email"}}});
     let request = json!({"owner":owner,"name":"github","clientId":"client","clientSecret":"secret","application":"sample-app"});
@@ -390,7 +411,17 @@ async fn marketplace_install_uninstall_is_atomic_and_links_real_resources() {
         .unwrap();
     assert_eq!(remaining, 0);
     sqlx::query("DELETE FROM applications WHERE owner=$1")
-        .bind(owner)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE owner=$1")
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM organizations WHERE name=$1")
+        .bind(&owner)
         .execute(&pool)
         .await
         .unwrap();

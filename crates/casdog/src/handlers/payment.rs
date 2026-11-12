@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
+use crate::hoops::authz::Principal;
 use crate::models::{CreatePaymentRequest, PaymentResponse, UpdatePaymentRequest};
 use crate::services::{PaymentFlowService, PaymentService};
 
@@ -136,8 +137,36 @@ pub async fn notify_payment(
         .map_err(|e| AppError::Validation(format!("Failed to read request body: {}", e)))?
         .clone();
     let payload = serde_json::from_slice::<NotifyPaymentRequest>(&raw_body).ok();
+    let provider_event = serde_json::from_slice::<serde_json::Value>(&raw_body).ok();
+    let provider_reference = provider_event.as_ref().and_then(|event| {
+        event
+            .pointer("/data/object/client_reference_id")
+            .or_else(|| event.pointer("/data/object/metadata/order_id"))
+            .or_else(|| event.pointer("/resource/custom_id"))
+            .or_else(|| event.pointer("/resource/purchase_units/0/custom_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    });
 
-    let payment_id = if let Some(id) = payload.as_ref().and_then(|value| value.id.clone()) {
+    // A provider event also has its own top-level `id`. The configured
+    // owner/payment callback address takes precedence over that event ID.
+    let callback_owner = req.param::<String>("owner");
+    let callback_name = req.param::<String>("payment");
+    let payment_id = if let (Some(owner), Some(name)) = (&callback_owner, &callback_name) {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM payments WHERE owner=$1 AND name=$2 AND is_deleted=false",
+        )
+        .bind(owner)
+        .bind(name)
+        .fetch_optional(&pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Payment not found".into()))?
+    } else if let Some(id) = req
+        .query::<String>("id")
+        .or(provider_reference)
+        .or_else(|| payload.as_ref().and_then(|value| value.id.clone()))
+    {
         id
     } else {
         let owner = req
@@ -167,6 +196,20 @@ pub async fn notify_payment(
 
     let payment = if manual_state.is_some() || manual_message.is_some() || manual_invoice.is_some()
     {
+        // Webhooks are public; a JSON state field must never bypass provider
+        // signature verification without a separately authenticated operator.
+        let principal = Principal::from_depot(depot)?;
+        let owner: String =
+            sqlx::query_scalar("SELECT owner FROM payments WHERE id=$1 AND is_deleted=false")
+                .bind(&payment_id)
+                .fetch_optional(&pool)
+                .await?
+                .ok_or_else(|| AppError::NotFound("Payment not found".into()))?;
+        if !principal.admin || (!principal.global_admin() && principal.owner != owner) {
+            return Err(AppError::Authorization(
+                "Only a tenant administrator may settle a payment manually".into(),
+            ));
+        }
         PaymentFlowService::manual_notify_payment(
             &pool,
             &payment_id,

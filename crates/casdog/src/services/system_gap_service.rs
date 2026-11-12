@@ -63,7 +63,9 @@ pub async fn client(url: &Url, allow_private: bool) -> AppResult<reqwest::Client
         || url.password().is_some()
         || url.fragment().is_some()
     {
-        return Err(invalid("An HTTP(S) URL without credentials or fragment is required"));
+        return Err(invalid(
+            "An HTTP(S) URL without credentials or fragment is required",
+        ));
     }
     let host = url.host_str().ok_or_else(|| invalid("URL host required"))?;
     let addresses: Vec<_> = tokio::time::timeout(
@@ -95,7 +97,9 @@ pub async fn client(url: &Url, allow_private: bool) -> AppResult<reqwest::Client
                 || ip.to_ipv4_mapped().is_some()
         }
     };
-    if addresses.is_empty() || (!allow_private && addresses.iter().any(|address| non_public(address.ip()))) {
+    if addresses.is_empty()
+        || (!allow_private && addresses.iter().any(|address| non_public(address.ip())))
+    {
         return Err(denied());
     }
     reqwest::Client::builder()
@@ -110,12 +114,17 @@ pub async fn client(url: &Url, allow_private: bool) -> AppResult<reqwest::Client
 
 pub async fn limited_bytes(mut response: reqwest::Response, limit: usize) -> AppResult<Vec<u8>> {
     if !response.status().is_success() {
-        return Err(invalid(format!("Provider returned HTTP {}", response.status())));
+        return Err(invalid(format!(
+            "Provider returned HTTP {}",
+            response.status()
+        )));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(invalid)? {
         if bytes.len() + chunk.len() > limit {
-            return Err(invalid("Provider response exceeds the configured size limit"));
+            return Err(invalid(
+                "Provider response exceeds the configured size limit",
+            ));
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -132,25 +141,55 @@ pub struct Release {
 }
 
 fn version(value: &str) -> AppResult<[u64; 3]> {
-    let parts: Vec<_> = value.strip_prefix('v').unwrap_or(value).split('.').collect();
-    if parts.len() != 3 || parts.iter().any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit())) {
+    let parts: Vec<_> = value
+        .strip_prefix('v')
+        .unwrap_or(value)
+        .split('.')
+        .collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
         return Err(invalid("Release version must contain major.minor.patch"));
     }
-    Ok([parts[0].parse().map_err(invalid)?, parts[1].parse().map_err(invalid)?, parts[2].parse().map_err(invalid)?])
+    Ok([
+        parts[0].parse().map_err(invalid)?,
+        parts[1].parse().map_err(invalid)?,
+        parts[2].parse().map_err(invalid)?,
+    ])
 }
 
 async fn release(config: &SystemGapConfig) -> AppResult<Release> {
-    let url = Url::parse(config.manifest_url.as_deref().ok_or_else(|| invalid("Upgrade manifest is not configured"))?)
-        .map_err(invalid)?;
-    if url.scheme() != "https" && !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1")) {
+    let url = Url::parse(
+        config
+            .manifest_url
+            .as_deref()
+            .ok_or_else(|| invalid("Upgrade manifest is not configured"))?,
+    )
+    .map_err(invalid)?;
+    if url.scheme() != "https" && !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+    {
         return Err(invalid("Upgrade manifest requires HTTPS"));
     }
-    let expected =
-        config.manifest_sha256.as_deref().ok_or_else(|| invalid("A trusted manifest SHA-256 is required"))?;
-    let bytes =
-        limited_bytes(client(&url, true).await?.get(url.clone()).send().await.map_err(invalid)?, 65_536).await?;
+    let expected = config
+        .manifest_sha256
+        .as_deref()
+        .ok_or_else(|| invalid("A trusted manifest SHA-256 is required"))?;
+    let bytes = limited_bytes(
+        client(&url, true)
+            .await?
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(invalid)?,
+        65_536,
+    )
+    .await?;
     if expected.len() != 64 || !digest(&bytes).eq_ignore_ascii_case(expected) {
-        return Err(invalid("Upgrade manifest does not match the operator's trusted SHA-256"));
+        return Err(invalid(
+            "Upgrade manifest does not match the operator's trusted SHA-256",
+        ));
     }
     let release: Release = serde_json::from_slice(&bytes).map_err(invalid)?;
     version(&release.version)?;
@@ -164,21 +203,28 @@ async fn release(config: &SystemGapConfig) -> AppResult<Release> {
         || release.version.len() > 100
         || release.target != format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
     {
-        return Err(invalid("Invalid upgrade package origin, size, digest, version or platform"));
+        return Err(invalid(
+            "Invalid upgrade package origin, size, digest, version or platform",
+        ));
     }
     Ok(release)
 }
 
 pub async fn upgrade_info(pool: &PgPool, config: &SystemGapConfig) -> AppResult<Value> {
-    let status: Option<Value> =
-        sqlx::query_scalar("SELECT status FROM system_upgrade_history ORDER BY created_at DESC,id DESC LIMIT 1")
-            .fetch_optional(pool)
-            .await?;
+    let status: Option<Value> = sqlx::query_scalar(
+        "SELECT status FROM system_upgrade_history ORDER BY created_at DESC,id DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
     let configured = config.manifest_url.is_some() && config.manifest_sha256.is_some();
     let install_ready = config.install_path.as_ref().is_some_and(|path| {
-        path.is_absolute() && std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+        path.is_absolute()
+            && std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
     });
-    let restart_ready = config.restart_program.as_ref().is_some_and(|path| path.is_absolute() && path.is_file());
+    let restart_ready = config
+        .restart_program
+        .as_ref()
+        .is_some_and(|path| path.is_absolute() && path.is_file());
     let mut info = json!({"currentVersion":env!("CARGO_PKG_VERSION"),"deploymentType":"binary",
         "latestVersion":"","latestUrl":"","hasNewVersion":false,"isCheckDisabled":!configured,
         "isUpgradeDisabled":!install_ready || !restart_ready,"canUpgrade":false,
@@ -215,7 +261,10 @@ fn machine() -> String {
         .unwrap_or_else(|_| "local".into())
 }
 fn install_destination(config: &SystemGapConfig) -> AppResult<PathBuf> {
-    let destination = config.install_path.as_ref().ok_or_else(|| invalid("Upgrade install path is not configured"))?;
+    let destination = config
+        .install_path
+        .as_ref()
+        .ok_or_else(|| invalid("Upgrade install path is not configured"))?;
     if !destination.is_absolute() {
         return Err(invalid("Upgrade install path must be absolute"));
     }
@@ -224,8 +273,11 @@ fn install_destination(config: &SystemGapConfig) -> AppResult<PathBuf> {
         .ok_or_else(|| invalid("Upgrade install parent required"))?
         .canonicalize()
         .map_err(internal)?;
-    let destination =
-        parent.join(destination.file_name().ok_or_else(|| invalid("Upgrade installation file name required"))?);
+    let destination = parent.join(
+        destination
+            .file_name()
+            .ok_or_else(|| invalid("Upgrade installation file name required"))?,
+    );
     if destination.to_str().is_none() {
         return Err(invalid("Upgrade installation path must use UTF-8"));
     }
@@ -240,7 +292,9 @@ fn install_paths(config: &SystemGapConfig, id: &str) -> AppResult<(PathBuf, Path
     for path in [&destination, &stage, &backup] {
         if let Ok(metadata) = std::fs::symlink_metadata(path) {
             if !metadata.file_type().is_file() || metadata.len() > 268_435_456 {
-                return Err(invalid("Upgrade paths must be regular files no larger than 256 MiB"));
+                return Err(invalid(
+                    "Upgrade paths must be regular files no larger than 256 MiB",
+                ));
             }
         }
     }
@@ -269,17 +323,23 @@ fn restore_upgrade(config: &SystemGapConfig, id: &str, journal: &UpgradeJournal)
     let (destination, stage, backup) = install_paths(config, id)?;
     if backup.exists() {
         if file_digest(&backup)? != journal.previous_sha256 {
-            return Err(invalid("Upgrade backup changed; operator recovery is required"));
+            return Err(invalid(
+                "Upgrade backup changed; operator recovery is required",
+            ));
         }
         if destination.exists() {
             if file_digest(&destination)? != journal.package_sha256 || stage.exists() {
-                return Err(invalid("Upgrade installation changed; operator recovery is required"));
+                return Err(invalid(
+                    "Upgrade installation changed; operator recovery is required",
+                ));
             }
             std::fs::rename(&destination, &stage).map_err(internal)?;
         }
         std::fs::rename(&backup, &destination).map_err(internal)?;
     } else if !destination.exists() || file_digest(&destination)? != journal.previous_sha256 {
-        return Err(invalid("Previous upgrade installation is unavailable; operator recovery is required"));
+        return Err(invalid(
+            "Previous upgrade installation is unavailable; operator recovery is required",
+        ));
     }
     if stage.exists() {
         std::fs::remove_file(&stage).map_err(internal)?;
@@ -293,7 +353,10 @@ pub async fn reconcile_upgrades(pool: &PgPool, config: &SystemGapConfig) -> AppR
     if config.install_path.is_none() {
         return Ok(());
     }
-    let executable = std::env::current_exe().map_err(internal)?.canonicalize().map_err(internal)?;
+    let executable = std::env::current_exe()
+        .map_err(internal)?
+        .canonicalize()
+        .map_err(internal)?;
     // Linux exposes the executing inode even if its directory entry was replaced.
     // Other hosts additionally require the version compiled into this process,
     // preventing an old process from trusting only its newly replaced disk path.
@@ -303,11 +366,15 @@ pub async fn reconcile_upgrades(pool: &PgPool, config: &SystemGapConfig) -> AppR
     let executable_sha256 = file_digest(&executable)?;
     let mut connection = pool.acquire().await?;
     connection.close_on_drop();
-    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended('casdog-system-upgrade',0))")
-        .fetch_one(&mut *connection)
-        .await?;
+    let locked: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_lock(hashtextextended('casdog-system-upgrade',0))",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
     if !locked {
-        return Err(AppError::Conflict("Another process is still completing an upgrade".into()));
+        return Err(AppError::Conflict(
+            "Another process is still completing an upgrade".into(),
+        ));
     }
     let outcome=async {
         let rows:Vec<(String,String,Value)>=sqlx::query_as("SELECT id,version,journal FROM system_upgrade_history WHERE status->>'state' IN ('prepared','installing','restarting','restart_requested','recovery_required') AND journal->>'machine'=$1 AND journal->>'destination'=$2 ORDER BY created_at,id")
@@ -351,7 +418,10 @@ async fn write_upgrade_status(
         .ok_or_else(|| AppError::Conflict("Upgrade operation journal disappeared".into()))
 }
 
-async fn recover_upgrades(connection: &mut sqlx::PgConnection, config: &SystemGapConfig) -> AppResult<()> {
+async fn recover_upgrades(
+    connection: &mut sqlx::PgConnection,
+    config: &SystemGapConfig,
+) -> AppResult<()> {
     let rows:Vec<(String,String,Value,String)>=sqlx::query_as("SELECT id,version,journal,status->>'state' FROM system_upgrade_history WHERE status->>'state' IN ('prepared','installing','restarting','restart_requested','recovery_required') AND journal->>'machine'=$1 AND journal->>'destination'=$2 ORDER BY created_at,id")
         .bind(machine()).bind(install_destination(config)?.to_string_lossy().to_string()).fetch_all(&mut *connection).await?;
     for (id, version, document, state) in rows {
@@ -373,8 +443,14 @@ async fn recover_upgrades(connection: &mut sqlx::PgConnection, config: &SystemGa
                 .await?;
             }
             Err(error) => {
-                let _ =
-                    write_upgrade_status(connection, &id, &version, "recovery_required", Some(error.to_string())).await;
+                let _ = write_upgrade_status(
+                    connection,
+                    &id,
+                    &version,
+                    "recovery_required",
+                    Some(error.to_string()),
+                )
+                .await;
                 return Err(error);
             }
         }
@@ -383,10 +459,14 @@ async fn recover_upgrades(connection: &mut sqlx::PgConnection, config: &SystemGa
 }
 
 async fn restart(config: &SystemGapConfig) -> AppResult<()> {
-    let program =
-        config.restart_program.as_ref().ok_or_else(|| invalid("Upgrade restart program is not configured"))?;
+    let program = config
+        .restart_program
+        .as_ref()
+        .ok_or_else(|| invalid("Upgrade restart program is not configured"))?;
     if !program.is_absolute() || !program.is_file() {
-        return Err(invalid("Upgrade restart program must be an existing absolute file"));
+        return Err(invalid(
+            "Upgrade restart program must be an existing absolute file",
+        ));
     }
     let mut command = tokio::process::Command::new(program);
     command
@@ -398,7 +478,10 @@ async fn restart(config: &SystemGapConfig) -> AppResult<()> {
     #[cfg(windows)]
     command.creation_flags(0x08000000);
     let result = tokio::time::timeout(Duration::from_secs(30), command.status()).await;
-    if result.as_ref().is_ok_and(|result| result.as_ref().is_ok_and(|status| status.success())) {
+    if result
+        .as_ref()
+        .is_ok_and(|result| result.as_ref().is_ok_and(|status| status.success()))
+    {
         Ok(())
     } else {
         Err(invalid("Upgrade restart program failed or timed out"))
@@ -418,9 +501,11 @@ pub async fn upgrade(
     // this connection on drop also releases the lock if this future is cancelled.
     let mut connection = pool.acquire().await?;
     connection.close_on_drop();
-    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended('casdog-system-upgrade',0))")
-        .fetch_one(&mut *connection)
-        .await?;
+    let locked: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_lock(hashtextextended('casdog-system-upgrade',0))",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
     if !locked {
         return Err(AppError::Conflict("Another upgrade is in progress".into()));
     }
@@ -510,7 +595,12 @@ pub async fn upgrade(
     outcome
 }
 
-pub async fn provider(pool: &PgPool, principal: &Principal, owner: &str, name: &str) -> AppResult<Provider> {
+pub async fn provider(
+    pool: &PgPool,
+    principal: &Principal,
+    owner: &str,
+    name: &str,
+) -> AppResult<Provider> {
     if !principal.global_admin() && !(principal.admin && principal.owner == owner) {
         return Err(denied());
     }
@@ -523,7 +613,12 @@ pub async fn provider(pool: &PgPool, principal: &Principal, owner: &str, name: &
 }
 
 async fn get_document(url: &Url, allow_private: bool) -> AppResult<(String, String)> {
-    let response = client(url, allow_private).await?.get(url.clone()).send().await.map_err(invalid)?;
+    let response = client(url, allow_private)
+        .await?
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(invalid)?;
     let headers = response
         .headers()
         .iter()
@@ -543,9 +638,12 @@ pub async fn security_scan(
     if !principal.global_admin() && !(principal.admin && principal.owner == provider.owner) {
         return Err(denied());
     }
-    tokio::time::timeout(Duration::from_secs(60), security_scan_inner(pool, principal, provider, target))
-        .await
-        .map_err(|_| invalid("Security scan exceeded 60 seconds"))?
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        security_scan_inner(pool, principal, provider, target),
+    )
+    .await
+    .map_err(|_| invalid("Security scan exceeded 60 seconds"))?
 }
 
 async fn security_scan_inner(
@@ -559,19 +657,16 @@ async fn security_scan_inner(
     }
     let subtype = provider.sub_type.as_deref().unwrap_or("Url");
     let targets: Vec<(String, String)> = if subtype.eq_ignore_ascii_case("Site") {
-        let rows: Vec<(String, String, String, i32)> =
-            sqlx::query_as("SELECT name,domain,ssl_mode,port FROM sites WHERE owner=$1 AND NOT is_deleted")
-                .bind(&provider.owner)
-                .fetch_all(pool)
-                .await?;
+        let rows: Vec<(String, String, String, i32)> = sqlx::query_as(
+            "SELECT name,domain,ssl_mode,port FROM sites WHERE owner=$1 AND NOT is_deleted",
+        )
+        .bind(&provider.owner)
+        .fetch_all(pool)
+        .await?;
         rows.into_iter()
             .filter(|(_, domain, _, _)| target.is_empty() || domain.contains(target))
             .map(|(name, domain, ssl, port)| {
-                let scheme = if ssl == "HTTP Only" {
-                    "http"
-                } else {
-                    "https"
-                };
+                let scheme = if ssl == "HTTP Only" { "http" } else { "https" };
                 (name, format!("{scheme}://{domain}:{port}"))
             })
             .collect()
@@ -593,17 +688,26 @@ async fn security_scan_inner(
     if targets.is_empty() || targets.len() > 32 {
         return Err(invalid("Configure between 1 and 32 scan targets"));
     }
-    let list =
-        provider.endpoint.as_deref().filter(|s| !s.is_empty()).unwrap_or("https://casdoor.ai/casdoor-data/data.json");
+    let list = provider
+        .endpoint
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https://casdoor.ai/casdoor-data/data.json");
     let list_url = Url::parse(list).map_err(invalid)?;
     let bytes = limited_bytes(
-        client(&list_url, principal.global_admin()).await?.get(list_url).send().await.map_err(invalid)?,
+        client(&list_url, principal.global_admin())
+            .await?
+            .get(list_url)
+            .send()
+            .await
+            .map_err(invalid)?,
         4_194_304,
     )
     .await?;
     let catalog: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
-    let fingerprints =
-        catalog["fingerprintList"].as_array().ok_or_else(|| invalid("Scanner catalog must contain fingerprintList"))?;
+    let fingerprints = catalog["fingerprintList"]
+        .as_array()
+        .ok_or_else(|| invalid("Scanner catalog must contain fingerprintList"))?;
     if fingerprints.len() > 128 {
         return Err(invalid("Scanner catalog exceeds 128 fingerprints"));
     }
@@ -613,7 +717,10 @@ async fn security_scan_inner(
         let before = findings.len();
         for fingerprint in fingerprints {
             let info = &fingerprint["httpInfo"];
-            if info["method"].as_str().is_some_and(|method| !method.eq_ignore_ascii_case("GET")) {
+            if info["method"]
+                .as_str()
+                .is_some_and(|method| !method.eq_ignore_ascii_case("GET"))
+            {
                 return Err(invalid("Only GET fingerprint probes are supported"));
             }
             let path = info["path"].as_str().unwrap_or("/");
@@ -622,7 +729,9 @@ async fn security_scan_inner(
                 return Err(invalid("Fingerprint paths must stay on the target origin"));
             }
             let (headers, body) = get_document(&probe, principal.global_admin()).await?;
-            let matchers = info["matchers"].as_array().ok_or_else(|| invalid("Fingerprint matchers are required"))?;
+            let matchers = info["matchers"]
+                .as_array()
+                .ok_or_else(|| invalid("Fingerprint matchers are required"))?;
             let mut matched = false;
             for matcher in matchers {
                 let value = matcher["value"].as_str().unwrap_or_default().trim();
@@ -631,17 +740,24 @@ async fn security_scan_inner(
                 }
                 matched |= match matcher["pos"].as_str().unwrap_or("body") {
                     "body" => body.contains(value),
-                    "header" | "headers" => headers.to_ascii_lowercase().contains(&value.to_ascii_lowercase()),
+                    "header" | "headers" => headers
+                        .to_ascii_lowercase()
+                        .contains(&value.to_ascii_lowercase()),
                     "icon" => {
                         let icon = base.join("/favicon.ico").map_err(invalid)?;
-                        let response =
-                            client(&icon, principal.global_admin()).await?.get(icon).send().await.map_err(invalid)?;
+                        let response = client(&icon, principal.global_admin())
+                            .await?
+                            .get(icon)
+                            .send()
+                            .await
+                            .map_err(invalid)?;
                         let status = response.status().as_u16();
                         if status.to_string() == value {
                             true
                         } else {
                             let bytes = limited_bytes(response, 262_144).await?;
-                            bytes.len().to_string() == value || String::from_utf8_lossy(&bytes).contains(value)
+                            bytes.len().to_string() == value
+                                || String::from_utf8_lossy(&bytes).contains(value)
                         }
                     }
                     _ => false,
@@ -652,7 +768,10 @@ async fn security_scan_inner(
             }
             let version_info = &fingerprint["versionInfo"];
             let mut version = String::new();
-            if let Some(pattern) = version_info["regex"].as_str().filter(|value| !value.is_empty()) {
+            if let Some(pattern) = version_info["regex"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+            {
                 let path = version_info["path"].as_str().unwrap_or(path);
                 let url = base.join(path).map_err(invalid)?;
                 if url.origin() != base.origin() {
@@ -664,7 +783,10 @@ async fn security_scan_inner(
                 } else {
                     body
                 };
-                let regex = regex::RegexBuilder::new(pattern).size_limit(262_144).build().map_err(invalid)?;
+                let regex = regex::RegexBuilder::new(pattern)
+                    .size_limit(262_144)
+                    .build()
+                    .map_err(invalid)?;
                 version = regex
                     .captures(&part)
                     .and_then(|captures| captures.get(1).or_else(|| captures.get(0)))
@@ -675,7 +797,10 @@ async fn security_scan_inner(
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|cve| cve["name"] == fingerprint["name"] && cve["rule"].as_str().unwrap_or_default().is_empty())
+                .filter(|cve| {
+                    cve["name"] == fingerprint["name"]
+                        && cve["rule"].as_str().unwrap_or_default().is_empty()
+                })
                 .cloned()
                 .collect();
             let unassessed: Vec<Value> = catalog["cveList"]
@@ -683,7 +808,8 @@ async fn security_scan_inner(
                 .into_iter()
                 .flatten()
                 .filter(|cve| {
-                    cve["name"] == fingerprint["name"] && !cve["rule"].as_str().unwrap_or_default().is_empty()
+                    cve["name"] == fingerprint["name"]
+                        && !cve["rule"].as_str().unwrap_or_default().is_empty()
                 })
                 .cloned()
                 .collect();
@@ -704,14 +830,20 @@ async fn security_scan_inner(
         .eq(&1)
         .then_some(())
         .ok_or_else(|| {
-            AppError::Conflict("Provider changed during scanning; retry with its current configuration".into())
+            AppError::Conflict(
+                "Provider changed during scanning; retry with its current configuration".into(),
+            )
         })?;
     Ok(result)
 }
 
 fn targets(value: &str) -> AppResult<BTreeSet<Ipv4Addr>> {
     let mut result = BTreeSet::new();
-    for target in value.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+    for target in value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let (address, prefix) = target.split_once('/').unwrap_or((target, "32"));
         let address: Ipv4Addr = address.parse().map_err(invalid)?;
         let prefix: u32 = prefix.parse().map_err(invalid)?;
@@ -745,7 +877,9 @@ pub async fn intranet_scan(principal: &Principal, provider: &Provider) -> AppRes
         || provider.provider_type != "MCP Scan"
         || provider.sub_type.as_deref() != Some("Intranet Scan")
     {
-        return Err(invalid("A Scan / MCP Scan / Intranet Scan provider is required"));
+        return Err(invalid(
+            "A Scan / MCP Scan / Intranet Scan provider is required",
+        ));
     }
     let hosts = targets(provider.scopes.as_deref().unwrap_or_default())?;
     let ports: Vec<u16> = provider
@@ -768,10 +902,15 @@ pub async fn intranet_scan(principal: &Principal, provider: &Provider) -> AppRes
         || paths.is_empty()
         || paths.len() > 8
         || paths.iter().any(|path| {
-            !path.starts_with('/') || path.starts_with("//") || path.contains(['?', '#', '\\']) || path.len() > 128
+            !path.starts_with('/')
+                || path.starts_with("//")
+                || path.contains(['?', '#', '\\'])
+                || path.len() > 128
         })
     {
-        return Err(invalid("Configure up to 16 valid ports and 8 absolute paths"));
+        return Err(invalid(
+            "Configure up to 16 valid ports and 8 absolute paths",
+        ));
     }
     let mut jobs = tokio::task::JoinSet::new();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(16));
@@ -821,7 +960,11 @@ pub async fn intranet_scan(principal: &Principal, provider: &Provider) -> AppRes
         .map_err(|_| invalid("Intranet scan exceeded 60 seconds"))?
 }
 
-pub async fn sync_intranet_servers(pool: &PgPool, principal: &Principal, provider: &Provider) -> AppResult<Value> {
+pub async fn sync_intranet_servers(
+    pool: &PgPool,
+    principal: &Principal,
+    provider: &Provider,
+) -> AppResult<Value> {
     let mut result = intranet_scan(principal, provider).await?;
     let mut transaction = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
@@ -839,17 +982,22 @@ pub async fn sync_intranet_servers(pool: &PgPool, principal: &Principal, provide
         ));
     }
     for server in result["servers"].as_array_mut().unwrap() {
-        let url = server["url"].as_str().ok_or_else(|| invalid("Discovered server URL missing"))?;
+        let url = server["url"]
+            .as_str()
+            .ok_or_else(|| invalid("Discovered server URL missing"))?;
         let existing:Option<String> = sqlx::query_scalar("SELECT name FROM casdoor_objects WHERE kind='server' AND owner=$1 AND document->>'url'=$2 ORDER BY name LIMIT 1 FOR UPDATE")
             .bind(&provider.owner).bind(url).fetch_optional(&mut *transaction).await?;
-        let name = existing.unwrap_or_else(|| format!("intranet-{}", &digest(url.as_bytes())[..24]));
+        let name =
+            existing.unwrap_or_else(|| format!("intranet-{}", &digest(url.as_bytes())[..24]));
         let title = server["name"].as_str().unwrap_or("Discovered MCP server");
         let time = chrono::Utc::now().to_rfc3339();
         let document = json!({"owner":provider.owner,"name":name,"displayName":title,"url":url,"tools":[],"createdTime":time,"updatedTime":time});
         let affected=sqlx::query("INSERT INTO casdoor_objects(kind,owner,name,document) VALUES('server',$1,$2,$3) ON CONFLICT(kind,owner,name) DO UPDATE SET document=casdoor_objects.document || jsonb_build_object('displayName',EXCLUDED.document->'displayName','updatedTime',EXCLUDED.document->'updatedTime'),updated_at=NOW() WHERE casdoor_objects.document->>'url'=EXCLUDED.document->>'url'")
             .bind(&provider.owner).bind(&name).bind(document).execute(&mut *transaction).await?.rows_affected();
         if affected != 1 {
-            return Err(AppError::Conflict("Discovered server name conflicts with an existing resource".into()));
+            return Err(AppError::Conflict(
+                "Discovered server name conflicts with an existing resource".into(),
+            ));
         }
         server["owner"] = json!(provider.owner);
         server["name"] = json!(name);
@@ -865,19 +1013,29 @@ pub async fn verify_identification(
     name: &str,
     provider_name: Option<&str>,
 ) -> AppResult<String> {
-    if !principal.global_admin() && (owner != principal.owner || (!principal.admin && name != principal.name)) {
+    if !principal.global_admin()
+        && (owner != principal.owner || (!principal.admin && name != principal.name))
+    {
         return Err(denied());
     }
     let mut transaction = pool.begin().await?;
-    let organization: Option<String> =
-        sqlx::query_scalar("SELECT id FROM organizations WHERE name=$1 AND NOT is_deleted FOR SHARE")
-            .bind(owner)
-            .fetch_optional(&mut *transaction)
-            .await?;
+    let organization: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM organizations WHERE name=$1 AND NOT is_deleted FOR SHARE",
+    )
+    .bind(owner)
+    .fetch_optional(&mut *transaction)
+    .await?;
     if organization.is_none() {
         return Err(denied());
     }
-    type Subject = (String, Option<String>, Option<String>, Option<String>, Option<String>, bool);
+    type Subject = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        bool,
+    );
     let (id, card_type, card, real_name, application, verified): Subject = sqlx::query_as(
         "SELECT id,id_card_type,id_card,real_name,signup_application,is_verified FROM users WHERE owner=$1 AND name=$2 AND NOT is_deleted AND NOT is_forbidden FOR UPDATE")
         .bind(owner).bind(name).fetch_optional(&mut *transaction).await?.ok_or_else(|| AppError::NotFound("User not found".into()))?;
@@ -887,16 +1045,26 @@ pub async fn verify_identification(
     if verified {
         return Err(AppError::Conflict("User is already verified".into()));
     }
-    let card_type = card_type.filter(|value| !value.is_empty()).ok_or_else(|| invalid("ID card type required"))?;
-    let card = card.filter(|value| !value.is_empty()).ok_or_else(|| invalid("ID card number required"))?;
-    let real_name = real_name.filter(|value| !value.is_empty()).ok_or_else(|| invalid("Real name required"))?;
+    let card_type = card_type
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid("ID card type required"))?;
+    let card = card
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid("ID card number required"))?;
+    let real_name = real_name
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid("Real name required"))?;
     let application = application.ok_or_else(|| invalid("User has no signup application"))?;
     let applications:Vec<Option<Value>>=sqlx::query_scalar("SELECT providers FROM applications WHERE organization=$1 AND NOT is_deleted AND (id=$2 OR owner||'/'||name=$2 OR name=$2) FOR SHARE")
         .bind(owner).bind(application).fetch_all(&mut *transaction).await?;
     if applications.len() != 1 {
         return Err(denied());
     }
-    let configured = applications.into_iter().next().flatten().unwrap_or(json!([]));
+    let configured = applications
+        .into_iter()
+        .next()
+        .flatten()
+        .unwrap_or(json!([]));
     let providers:Vec<Provider>=sqlx::query_as("SELECT * FROM providers WHERE category='ID Verification' AND (owner=$1 OR owner='admin') ORDER BY owner,name FOR SHARE")
         .bind(owner).fetch_all(&mut *transaction).await?;
     let available: Vec<_> = providers
@@ -908,15 +1076,21 @@ pub async fn verify_identification(
                 (name == Some(reference.as_str()) || name == Some(provider.name.as_str()))
                     && entry.get("canVerify").and_then(Value::as_bool) != Some(false)
             });
-            enabled && provider_name.is_none_or(|requested| requested == reference || requested == provider.name)
+            enabled
+                && provider_name
+                    .is_none_or(|requested| requested == reference || requested == provider.name)
         })
         .collect();
     if available.len() != 1 {
-        return Err(invalid("Configure exactly one permitted ID Verification provider or select it explicitly"));
+        return Err(invalid(
+            "Configure exactly one permitted ID Verification provider or select it explicitly",
+        ));
     }
     let provider = &available[0];
     if !matches!(provider.provider_type.as_str(), "HTTP" | "Generic") {
-        return Err(invalid("This ID Verification provider requires a supported HTTP adapter"));
+        return Err(invalid(
+            "This ID Verification provider requires a supported HTTP adapter",
+        ));
     }
     let endpoint = provider
         .endpoint
@@ -925,7 +1099,8 @@ pub async fn verify_identification(
         .ok_or_else(|| invalid("Identity verification endpoint required"))?;
     let url = Url::parse(endpoint).map_err(invalid)?;
     if url.scheme() != "https"
-        && !(principal.global_admin() && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1")))
+        && !(principal.global_admin()
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1")))
     {
         return Err(invalid("Identity verification requires HTTPS"));
     }
@@ -933,20 +1108,28 @@ pub async fn verify_identification(
         .await?
         .post(url)
         .json(&json!({"idCardType":card_type,"idCard":card,"realName":real_name}));
-    if let Some(secret) = provider.client_secret.as_deref().filter(|secret| !secret.is_empty()) {
+    if let Some(secret) = provider
+        .client_secret
+        .as_deref()
+        .filter(|secret| !secret.is_empty())
+    {
         request = request.bearer_auth(secret);
     }
     let bytes = limited_bytes(
-        request.send().await.map_err(|_| invalid("Identity verification provider could not be reached"))?,
+        request
+            .send()
+            .await
+            .map_err(|_| invalid("Identity verification provider could not be reached"))?,
         65_536,
     )
     .await?;
-    let response: Value =
-        serde_json::from_slice(&bytes).map_err(|_| invalid("Identity verification provider returned invalid JSON"))?;
+    let response: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| invalid("Identity verification provider returned invalid JSON"))?;
     if response["verified"] != true || response["status"].as_str() == Some("error") {
         return Err(invalid("Identity verification failed"));
     }
-    let subject = digest(&serde_json::to_vec(&json!([card_type, card, real_name])).map_err(internal)?);
+    let subject =
+        digest(&serde_json::to_vec(&json!([card_type, card, real_name])).map_err(internal)?);
     sqlx::query("UPDATE users SET is_verified=true,updated_at=NOW() WHERE id=$1")
         .bind(&id)
         .execute(&mut *transaction)

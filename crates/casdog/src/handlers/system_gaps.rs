@@ -18,10 +18,16 @@ pub fn routes() -> Router {
 }
 
 fn pool(depot: &Depot) -> AppResult<PgPool> {
-    depot.obtain::<PgPool>().cloned().map_err(|_| AppError::Internal("Database unavailable".into()))
+    depot
+        .obtain::<PgPool>()
+        .cloned()
+        .map_err(|_| AppError::Internal("Database unavailable".into()))
 }
 fn config(depot: &Depot) -> SystemGapConfig {
-    depot.obtain::<SystemGapConfig>().cloned().unwrap_or_else(|_| SystemGapConfig::from_env())
+    depot
+        .obtain::<SystemGapConfig>()
+        .cloned()
+        .unwrap_or_else(|_| SystemGapConfig::from_env())
 }
 fn required(req: &Request, name: &str) -> AppResult<String> {
     req.query::<String>(name)
@@ -34,7 +40,9 @@ pub async fn upgrade_info(depot: &mut Depot) -> AppResult<Json<Value>> {
     if !Principal::from_depot(depot)?.global_admin() {
         return Err(operations::denied());
     }
-    Ok(Json(json!({"status":"ok","data":operations::upgrade_info(&pool(depot)?,&config(depot)).await?})))
+    Ok(Json(
+        json!({"status":"ok","data":operations::upgrade_info(&pool(depot)?,&config(depot)).await?}),
+    ))
 }
 
 #[handler]
@@ -43,8 +51,13 @@ pub async fn upgrade_system(depot: &mut Depot, req: &mut Request) -> AppResult<J
     if !principal.global_admin() {
         return Err(operations::denied());
     }
-    let body: Value = req.parse_json().await.map_err(|_| AppError::Validation("JSON version required".into()))?;
-    let version = body["version"].as_str().ok_or_else(|| AppError::Validation("version required".into()))?;
+    let body: Value = req
+        .parse_json()
+        .await
+        .map_err(|_| AppError::Validation("JSON version required".into()))?;
+    let version = body["version"]
+        .as_str()
+        .ok_or_else(|| AppError::Validation("version required".into()))?;
     let status = operations::upgrade(&pool(depot)?, &config(depot), &principal, version).await?;
     Ok(Json(json!({"status":"ok","data":status})))
 }
@@ -53,7 +66,13 @@ pub async fn upgrade_system(depot: &mut Depot, req: &mut Request) -> AppResult<J
 pub async fn scan(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
     let principal = Principal::from_depot(depot)?;
     let pool = pool(depot)?;
-    let provider = operations::provider(&pool, &principal, &required(req, "owner")?, &required(req, "name")?).await?;
+    let provider = operations::provider(
+        &pool,
+        &principal,
+        &required(req, "owner")?,
+        &required(req, "name")?,
+    )
+    .await?;
     let target = req.query::<String>("target").unwrap_or_default();
     let result = operations::security_scan(&pool, &principal, &provider, &target).await?;
     Ok(Json(json!({"status":"ok","data":result})))
@@ -65,8 +84,13 @@ pub async fn sync_intranet_servers(depot: &mut Depot, req: &mut Request) -> AppR
     if !principal.global_admin() {
         return Err(operations::denied());
     }
-    let provider =
-        operations::provider(&pool(depot)?, &principal, &required(req, "owner")?, &required(req, "name")?).await?;
+    let provider = operations::provider(
+        &pool(depot)?,
+        &principal,
+        &required(req, "owner")?,
+        &required(req, "name")?,
+    )
+    .await?;
     let result = operations::sync_intranet_servers(&pool(depot)?, &principal, &provider).await?;
     Ok(Json(json!({"status":"ok","data":result})))
 }
@@ -74,11 +98,24 @@ pub async fn sync_intranet_servers(depot: &mut Depot, req: &mut Request) -> AppR
 #[handler]
 pub async fn verify_identification(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
     let principal = Principal::from_depot(depot)?;
-    let owner =
-        req.query::<String>("owner").filter(|value| !value.is_empty()).unwrap_or_else(|| principal.owner.clone());
-    let name = req.query::<String>("name").filter(|value| !value.is_empty()).unwrap_or_else(|| principal.name.clone());
-    let provider = req.query::<String>("provider").filter(|value| !value.is_empty());
-    let result =
-        operations::verify_identification(&pool(depot)?, &principal, &owner, &name, provider.as_deref()).await?;
+    let owner = req
+        .query::<String>("owner")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| principal.owner.clone());
+    let name = req
+        .query::<String>("name")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| principal.name.clone());
+    let provider = req
+        .query::<String>("provider")
+        .filter(|value| !value.is_empty());
+    let result = operations::verify_identification(
+        &pool(depot)?,
+        &principal,
+        &owner,
+        &name,
+        provider.as_deref(),
+    )
+    .await?;
     Ok(Json(json!({"status":"ok","data":result})))
 }

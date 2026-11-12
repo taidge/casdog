@@ -164,7 +164,7 @@ async fn verify_factor(
                         .flatten()
                 });
             match secret {
-                Some(secret) => MfaService::verify_totp(secret, code),
+                Some(secret) => MfaService::consume_totp(conn, &user.id, secret, code).await,
                 None => Ok(false),
             }
         }

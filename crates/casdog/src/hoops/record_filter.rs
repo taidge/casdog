@@ -15,6 +15,27 @@ const SKIP_LOG_PREFIXES: &[&str] = &["/swagger-ui/", "/api-doc/", "/api/health",
 /// block the response from being sent to the client.
 pub struct RecordFilter;
 
+/// Log the path rather than the full URI: compatibility credentials and OAuth
+/// proofs may be carried in query parameters. Never write those to tracing.
+pub struct RequestLogger;
+
+#[async_trait]
+impl Handler for RequestLogger {
+    async fn handle(
+        &self,
+        req: &mut Request,
+        depot: &mut Depot,
+        res: &mut Response,
+        ctrl: &mut FlowCtrl,
+    ) {
+        let started = std::time::Instant::now();
+        let method = req.method().to_string();
+        let path = req.uri().path().to_string();
+        ctrl.call_next(req, depot, res).await;
+        tracing::info!(method=%method,path=%path,status=res.status_code.map(|s|s.as_u16()).unwrap_or(200),elapsed_ms=started.elapsed().as_millis(),"HTTP request");
+    }
+}
+
 #[async_trait]
 impl Handler for RecordFilter {
     async fn handle(

@@ -434,23 +434,51 @@ pub async fn validate_coupon(depot: &mut Depot, req: &mut Request) -> AppResult<
         json!({"coupon":{"name":coupon["name"],"displayName":coupon["displayName"],"discountType":coupon["discountType"],"discount":coupon["discount"],"maxDiscount":coupon["maxDiscount"],"scope":coupon["scope"]},"discount":discount}),
     ))
 }
+// Resolve and lock checkout configuration on the caller's transaction. A second
+// pool acquisition here can deadlock a correctly configured single-connection pool.
+async fn checkout_configuration(
+    tx: &mut Transaction<'_, Postgres>,
+    table: &str,
+    reference: &str,
+    owner: &str,
+) -> AppResult<Value> {
+    if !matches!(table, "plans" | "pricings" | "roles") {
+        return Err(invalid("Invalid checkout configuration"));
+    }
+    let value: Option<Value> = if let Some((reference_owner, name)) = reference.split_once('/') {
+        sqlx::query_scalar(&format!("SELECT to_jsonb(t) FROM {table} t WHERE owner=$1 AND name=$2 AND is_deleted=false FOR SHARE"))
+            .bind(reference_owner).bind(name).fetch_optional(&mut **tx).await?
+    } else {
+        sqlx::query_scalar(&format!("SELECT to_jsonb(t) FROM {table} t WHERE (id=$1 OR (owner=$2 AND name=$1)) AND is_deleted=false ORDER BY(id=$1) DESC LIMIT 1 FOR SHARE"))
+            .bind(reference).bind(owner).fetch_optional(&mut **tx).await?
+    };
+    value.ok_or_else(|| AppError::NotFound("Checkout configuration not found".into()))
+}
+
 #[handler]
 pub async fn buy_product(depot: &mut Depot, req: &mut Request) -> AppResult<Json<Value>> {
     let p = Principal::from_depot(depot)?;
     let pool = db(depot)?;
-    for key in ["pricingName", "planName", "paymentEnv"] {
-        if req.query::<String>(key).is_some_and(|s| !s.is_empty()) {
-            return Err(invalid(
-                "This checkout supports standalone products; subscription/environment checkout is not implemented",
-            ));
-        }
+    let environment = req.query::<String>("paymentEnv").unwrap_or_default();
+    if !matches!(environment.as_str(), "" | "Web" | "web") {
+        return Err(invalid("This provider supports browser checkout only"));
     }
-    if req.query::<f64>("customPrice").is_some_and(|n| n != 0.0) {
-        return Err(invalid("Custom-price recharge products are not supported"));
+    let custom_price = req
+        .query::<String>("customPrice")
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<f64>()
+                .map_err(|_| invalid("customPrice must be a valid amount"))
+        })
+        .transpose()?;
+    let pricing_ref = req.query::<String>("pricingName").filter(|s| !s.is_empty());
+    let plan_ref = req.query::<String>("planName").filter(|s| !s.is_empty());
+    if pricing_ref.is_some() != plan_ref.is_some() {
+        return Err(invalid("pricingName and planName are required together"));
     }
-    let product = find(&pool, "products", &reference(req, &Value::Null)?, &p.owner).await?;
-    p.check_owner(&product, "products")?;
-    let owner = required(&product, "owner")?;
+    let initial_product = find(&pool, "products", &reference(req, &Value::Null)?, &p.owner).await?;
+    p.check_owner(&initial_product, "products")?;
+    let owner = required(&initial_product, "owner")?;
     let target = req
         .query::<String>("userName")
         .unwrap_or_else(|| p.name.clone());
@@ -468,27 +496,12 @@ pub async fn buy_product(depot: &mut Depot, req: &mut Request) -> AppResult<Json
     if required(&provider, "owner")? != owner || string(&provider, "category") != Some("Payment") {
         return Err(denied());
     }
-    let amount = number(&product, "price", 0.0)?;
-    // Current checkout and coupon accounting use cents. Reject unsupported
-    // sub-cent product prices instead of silently changing the charged amount.
-    if amount > 9_000_000_000_000.0 || ((amount * 100.0).round() - amount * 100.0).abs() > 0.000001
-    {
-        return Err(invalid(
-            "Checkout prices must have at most two decimal places",
-        ));
-    }
-    let currency = string(&product, "currency").unwrap_or("USD");
-    let name = required(&product, "name")?;
-    let order_id = uuid::Uuid::new_v4().to_string();
-    let order_name = format!("buy-{}", &order_id[..12]);
     let mut tx = pool.begin().await?;
-    let stock: i32 = sqlx::query_scalar(
-        "SELECT quantity FROM products WHERE id=$1 AND is_deleted=false FOR UPDATE",
-    )
-    .bind(required(&product, "id")?)
-    .fetch_one(&mut *tx)
-    .await?;
-    if stock == 0 {
+    let product: Value=sqlx::query_scalar("SELECT to_jsonb(p) FROM products p WHERE id=$1 AND owner=$2 AND is_deleted=false FOR UPDATE")
+        .bind(required(&initial_product,"id")?).bind(&owner).fetch_one(&mut *tx).await?;
+    let is_recharge = product["is_recharge"] == true;
+    let stock = product["quantity"].as_i64().unwrap_or(0);
+    if stock == 0 && !is_recharge {
         return Err(invalid("Product is out of stock"));
     }
     if string(&product, "state").is_some_and(|s| {
@@ -499,6 +512,126 @@ pub async fn buy_product(depot: &mut Depot, req: &mut Request) -> AppResult<Json
     }) {
         return Err(invalid("Product is not for sale"));
     }
+    let currency = string(&product, "currency").unwrap_or("USD");
+    let name = required(&product, "name")?;
+    let mut amount = number(&product, "price", 0.0)?;
+    let mut plan_id: Option<String> = None;
+    let mut pricing_id: Option<String> = None;
+    let mut plan_name: Option<String> = None;
+    let mut pricing_name: Option<String> = None;
+    let mut role_id: Option<String> = None;
+    let mut period: Option<String> = None;
+    if let (Some(pricing_ref), Some(plan_ref)) = (pricing_ref, plan_ref) {
+        if is_recharge || custom_price.is_some_and(|v| v != 0.0) {
+            return Err(invalid(
+                "Subscription checkout cannot contain a recharge amount",
+            ));
+        }
+        let plan = checkout_configuration(&mut tx, "plans", &plan_ref, &owner).await?;
+        let pricing = checkout_configuration(&mut tx, "pricings", &pricing_ref, &owner).await?;
+        if required(&plan, "owner")? != owner || required(&pricing, "owner")? != owner {
+            return Err(denied());
+        }
+        if plan["is_enabled"] != true || pricing["is_enabled"] != true {
+            return Err(invalid("Plan or pricing is disabled"));
+        }
+        let pid = required(&plan, "id")?;
+        let pname = required(&plan, "name")?;
+        if string(&product, "plan_id") != Some(pid.as_str()) {
+            return Err(invalid("This product does not sell the selected plan"));
+        }
+        let allowed: Vec<String> = serde_json::from_str(string(&pricing, "plans").unwrap_or("[]"))
+            .map_err(|_| invalid("Pricing plans must be an array of plan references"))?;
+        if !allowed
+            .iter()
+            .any(|r| r == &pid || r == &pname || r == &format!("{owner}/{pname}"))
+        {
+            return Err(invalid("The selected plan does not belong to this pricing"));
+        }
+        if !string(&plan, "currency")
+            .unwrap_or("USD")
+            .eq_ignore_ascii_case(currency)
+        {
+            return Err(invalid("Plan and product currencies differ"));
+        }
+        let selected_period = req
+            .query::<String>("period")
+            .unwrap_or_else(|| "monthly".into())
+            .to_ascii_lowercase();
+        amount = match selected_period.as_str() {
+            "monthly" => number(&plan, "price_per_month", 0.0)?,
+            "yearly" => number(&plan, "price_per_year", 0.0)?,
+            _ => return Err(invalid("period must be monthly or yearly")),
+        };
+        if let Some(role_ref) = string(&plan, "role") {
+            let role = checkout_configuration(&mut tx, "roles", role_ref, &owner).await?;
+            if required(&role, "owner")? != owner {
+                return Err(denied());
+            }
+            if role["is_enabled"] != true {
+                return Err(invalid("The plan role is disabled"));
+            }
+            role_id = Some(required(&role, "id")?);
+        }
+        let suspended: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM subscriptions WHERE owner=$1 AND user_id=$2 AND plan_id=$3 AND is_deleted=false AND lower(state)='suspended')")
+            .bind(&owner).bind(required(&user,"id")?).bind(&pid).fetch_one(&mut *tx).await?;
+        if suspended {
+            return Err(invalid("This plan subscription is suspended"));
+        }
+        let lifetime: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM subscriptions WHERE owner=$1 AND user_id=$2 AND plan_id=$3 AND pricing_id=$4 AND is_deleted=false AND lower(state)='active' AND start_date<=clock_timestamp() AND end_date IS NULL)")
+            .bind(&owner).bind(required(&user,"id")?).bind(&pid).bind(required(&pricing,"id")?).fetch_one(&mut *tx).await?;
+        if lifetime {
+            return Err(invalid(
+                "An active lifetime subscription already covers this plan",
+            ));
+        }
+        plan_id = Some(pid);
+        plan_name = Some(pname);
+        pricing_id = Some(required(&pricing, "id")?);
+        pricing_name = Some(required(&pricing, "name")?);
+        period = Some(selected_period);
+    } else if is_recharge {
+        if string(&product, "plan_id").is_some() {
+            return Err(invalid("A recharge product cannot sell a plan"));
+        }
+        amount = custom_price.ok_or_else(|| invalid("customPrice is required for recharge"))?;
+        let cents = crate::services::ProductService::validate_price(amount, true)?;
+        let options: Vec<f64> = serde_json::from_value(product["recharge_options"].clone())
+            .map_err(|_| invalid("Invalid recharge options"))?;
+        let options = options
+            .into_iter()
+            .map(|v| crate::services::ProductService::validate_price(v, true))
+            .collect::<AppResult<Vec<_>>>()?;
+        if product["disable_custom_recharge"] == true && !options.contains(&cents) {
+            return Err(invalid("Select one of the configured recharge amounts"));
+        }
+        if req
+            .query::<String>("couponCode")
+            .is_some_and(|s| !s.is_empty())
+        {
+            return Err(invalid("Recharge purchases cannot use coupons"));
+        }
+        let provider_type = string(&provider, "type")
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .replace([' ', '-', '_'], "");
+        if provider_type == "balance" {
+            return Err(invalid("Recharge requires an external payment provider"));
+        }
+        PaymentFlowService::validate_balance_currency(&user, currency)?;
+    } else {
+        if string(&product, "plan_id").is_some() {
+            return Err(invalid("This product requires pricingName and planName"));
+        }
+        if custom_price.is_some_and(|v| v != 0.0) {
+            return Err(invalid(
+                "A custom amount is only supported for recharge products",
+            ));
+        }
+    }
+    crate::services::ProductService::validate_price(amount, is_recharge)?;
+    let order_id = uuid::Uuid::new_v4().to_string();
+    let order_name = format!("buy-{}", &order_id[..12]);
     let discount = if let Some(code) = req.query::<String>("couponCode").filter(|s| !s.is_empty()) {
         Some(
             coupon_discount(
@@ -520,8 +653,14 @@ pub async fn buy_product(depot: &mut Depot, req: &mut Request) -> AppResult<Json
     if !price.is_finite() || price < 0.0 {
         return Err(invalid("Invalid checkout amount"));
     }
-    sqlx::query("INSERT INTO orders(id,owner,name,display_name,product_name,product_display_name,quantity,price,currency,state,\"user\",provider) VALUES($1,$2,$3,$4,$5,$4,1,$6,$7,'Created',$8,$9)")
- .bind(&order_id).bind(&owner).bind(&order_name).bind(string(&product,"display_name").unwrap_or(&name)).bind(&name).bind(price).bind(currency).bind(required(&user,"name")?).bind(required(&provider,"id")?).execute(&mut *tx).await?;
+    let cents = crate::services::ProductService::validate_price(price, is_recharge)?;
+    sqlx::query("INSERT INTO orders(id,owner,name,display_name,product_name,product_display_name,quantity,price,currency,state,\"user\",provider,plan_name,pricing_name) VALUES($1,$2,$3,$4,$5,$4,1,$6,$7,'Created',$8,$9,$10,$11)")
+ .bind(&order_id).bind(&owner).bind(&order_name).bind(string(&product,"display_name").unwrap_or(&name)).bind(&name).bind(price).bind(currency).bind(required(&user,"name")?).bind(required(&provider,"id")?).bind(&plan_name).bind(&pricing_name).execute(&mut *tx).await?;
+    if is_recharge || plan_id.is_some() {
+        sqlx::query("INSERT INTO order_benefits(order_id,kind,user_id,amount_cents,plan_id,pricing_id,period,role_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(&order_id).bind(if is_recharge {"recharge"} else {"plan"}).bind(required(&user,"id")?).bind(cents)
+            .bind(&plan_id).bind(&pricing_id).bind(&period).bind(&role_id).execute(&mut *tx).await?;
+    }
     if let Some((coupon, amount)) = &discount {
         sqlx::query("INSERT INTO coupon_usages(id,coupon_id,user_id,order_id,amount) VALUES($1,$2,$3,$4,$5)").bind(uuid::Uuid::new_v4().to_string()).bind(required(coupon,"id")?).bind(required(&user,"id")?).bind(&order_id).bind(amount).execute(&mut *tx).await?;
     }
@@ -541,7 +680,9 @@ pub async fn buy_product(depot: &mut Depot, req: &mut Request) -> AppResult<Json
             json!({"status":"ok","data":result.payment,"data2":result.attach_info,"order":result.order,"payUrl":result.pay_url,"autoPaid":result.auto_paid}),
         )),
         Err(error) => {
-            sqlx::query("UPDATE orders SET state='Failed',error_text=$2,updated_at=NOW() WHERE id=$1 AND state='Created'").bind(&order_id).bind(error.to_string()).execute(&pool).await?;
+            // A remote transport error can leave a durable pending checkout.
+            // Its verified notification or explicit cancellation resolves it.
+            sqlx::query("UPDATE orders SET state='Failed',error_text=$2,updated_at=NOW() WHERE id=$1 AND state='Created' AND (payment_id IS NULL OR payment_id='')").bind(&order_id).bind(error.to_string()).execute(&pool).await?;
             Err(error)
         }
     }
