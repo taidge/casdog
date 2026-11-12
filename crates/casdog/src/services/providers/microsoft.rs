@@ -98,6 +98,9 @@ impl OAuthProviderTrait for MicrosoftProvider {
             .map_err(|e| AppError::Internal(format!("Microsoft user parse failed: {}", e)))?;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.id.clone(),
             username: user
                 .user_principal_name

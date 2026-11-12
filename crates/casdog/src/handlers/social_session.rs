@@ -63,6 +63,7 @@ async fn policy(
     if provider.id != completion.provider_id {
         return Err(denied());
     }
+    super::social_login::lock_provider_stamp(conn, &completion.context, &provider).await?;
     let user: User=sqlx::query_as("SELECT * FROM users WHERE id=$1 AND owner=$2 AND NOT is_deleted AND NOT is_forbidden FOR UPDATE")
         .bind(&completion.user_id).bind(&completion.organization).fetch_optional(&mut *conn).await?.ok_or_else(denied)?;
     ensure_social_account_policy_conn(conn, &user).await?;

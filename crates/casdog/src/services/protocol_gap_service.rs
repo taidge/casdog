@@ -173,6 +173,95 @@ pub async fn local_storage_root(
     Ok(path)
 }
 
+pub(crate) fn storage_api_endpoint(provider: &Provider) -> AppResult<Option<String>> {
+    let Some(raw) = provider.metadata.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.len() > 64 * 1024 {
+        return Err(AppError::Validation(
+            "Storage metadata exceeds 64 KiB".into(),
+        ));
+    }
+    let metadata: Value = serde_json::from_str(raw)
+        .map_err(|_| AppError::Validation("Storage metadata must be a JSON object".into()))?;
+    if !metadata.is_object() {
+        return Err(AppError::Validation(
+            "Storage metadata must be a JSON object".into(),
+        ));
+    }
+    match metadata.get("storageApiEndpoint") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        _ => Err(AppError::Validation(
+            "storageApiEndpoint must be a nonempty URL string".into(),
+        )),
+    }
+}
+
+/// Validate saved cloud credentials and transport configuration atomically with
+/// Provider CRUD, without opening connections to tenant-configured endpoints.
+pub fn validate_storage_configuration(provider: &Provider) -> AppResult<()> {
+    use crate::services::providers::{
+        azure_storage::AzureBlobStorageProvider, cloud_public_configuration,
+        gcs_storage::GoogleCloudStorageProvider,
+    };
+    if !provider.category.eq_ignore_ascii_case("Storage") {
+        return Ok(());
+    }
+    let kind = provider.provider_type.to_ascii_lowercase();
+    if !matches!(kind.as_str(), "azure blob" | "google cloud storage") {
+        return Ok(());
+    }
+    let (public, _) = cloud_public_configuration(provider)?;
+    let api = storage_api_endpoint(provider)?;
+    let bucket = provider.bucket.clone().unwrap_or_default();
+    if kind == "azure blob" {
+        let storage = AzureBlobStorageProvider::new(
+            provider.client_id.clone().unwrap_or_default(),
+            provider.client_secret.clone().unwrap_or_default(),
+            bucket,
+            public,
+        )?;
+        if let Some(api) = api {
+            storage.with_api_endpoint(api)?;
+        }
+    } else {
+        let storage = GoogleCloudStorageProvider::new(
+            provider.client_secret.clone().unwrap_or_default(),
+            bucket,
+            public,
+        )?;
+        if let Some(api) = api {
+            storage.with_api_endpoint(api)?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply upstream's Domain.path and PathPrefix once, at creation. Reads always
+/// use the saved key, so subsequent provider configuration changes cannot move
+/// an existing object or double-prefix a download/delete request.
+pub fn storage_object_key(provider: Option<&Provider>, key: &str) -> AppResult<String> {
+    use crate::services::providers::storage_provider::{
+        cloud_public_configuration, validate_object_key,
+    };
+    validate_object_key(key)?;
+    let Some(provider) = provider.filter(|p| {
+        p.provider_type.eq_ignore_ascii_case("Azure Blob")
+            || p.provider_type.eq_ignore_ascii_case("Google Cloud Storage")
+    }) else {
+        return Ok(key.into());
+    };
+    let (_, prefix) = cloud_public_configuration(provider)?;
+    let key = if prefix.is_empty() {
+        key.into()
+    } else {
+        format!("{prefix}/{key}")
+    };
+    validate_object_key(&key)?;
+    Ok(key)
+}
+
 pub async fn storage_for_owner(
     principal: &Principal,
     owner: &str,
@@ -211,13 +300,65 @@ pub async fn storage_for_owner(
         )?;
         return Ok((storage, Some(root)));
     }
-    if !kind.eq_ignore_ascii_case("s3") {
-        return Err(AppError::Config("Unsupported storage provider type".into()));
-    }
     let provider = provider.ok_or_else(|| AppError::Config("Storage provider required".into()))?;
+    if !provider.category.eq_ignore_ascii_case("Storage") {
+        return Err(AppError::Validation(
+            "Provider is not a storage provider".into(),
+        ));
+    }
     let bucket = provider.bucket.as_deref().unwrap_or("");
     let region = provider.region_id.as_deref().unwrap_or("");
     let endpoint = provider.endpoint.as_deref().unwrap_or("");
+    let kind = kind.to_ascii_lowercase();
+    if kind == "azure blob" || kind == "google cloud storage" {
+        use crate::services::providers::{
+            azure_storage::AzureBlobStorageProvider, cloud_public_configuration,
+            gcs_storage::GoogleCloudStorageProvider,
+        };
+        let (public, _) = cloud_public_configuration(provider)?;
+        let api = storage_api_endpoint(provider)?;
+        if kind == "azure blob" {
+            let mut storage = AzureBlobStorageProvider::new(
+                provider.client_id.clone().unwrap_or_default(),
+                provider.client_secret.clone().unwrap_or_default(),
+                bucket.into(),
+                public,
+            )?;
+            if let Some(api) = api {
+                storage = storage.with_api_endpoint(api)?;
+            }
+            let client = crate::services::system_gap_service::client(
+                &storage.base_url()?,
+                principal.global_admin(),
+            )
+            .await?;
+            return Ok((Box::new(storage.with_client(client)), None));
+        }
+        let mut storage = GoogleCloudStorageProvider::new(
+            provider.client_secret.clone().unwrap_or_default(),
+            bucket.into(),
+            public,
+        )?;
+        if let Some(api) = api {
+            storage = storage.with_api_endpoint(api)?;
+        }
+        // Check both origins before either request can disclose a bearer token
+        // or signed assertion. Redirects remain disabled in the pinned clients.
+        let client = crate::services::system_gap_service::client(
+            &storage.base_url()?,
+            principal.global_admin(),
+        )
+        .await?;
+        let token_client = crate::services::system_gap_service::client(
+            &storage.token_url()?,
+            principal.global_admin(),
+        )
+        .await?;
+        return Ok((Box::new(storage.with_clients(client, token_client)), None));
+    }
+    if !matches!(kind.as_str(), "s3" | "aws s3" | "minio") {
+        return Err(AppError::Config("Unsupported storage provider type".into()));
+    }
     let storage = crate::services::providers::s3_storage::S3StorageProvider::new(
         provider.client_id.as_deref().unwrap_or("").into(),
         provider.client_secret.as_deref().unwrap_or("").into(),
@@ -642,7 +783,10 @@ pub async fn upload_transcript(
         text(&entry, "provider")
     )));
     let parent = format!("openclaw/{group}");
-    let object_key = format!("openclaw/{group}/{}.jsonl", uuid::Uuid::new_v4());
+    let object_key = storage_object_key(
+        Some(&provider),
+        &format!("openclaw/{group}/{}.jsonl", uuid::Uuid::new_v4()),
+    )?;
     let url = storage
         .upload(&object_key, bytes, "application/jsonl")
         .await?;

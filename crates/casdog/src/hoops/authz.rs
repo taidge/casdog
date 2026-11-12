@@ -384,6 +384,12 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
         .trim_start_matches("/api/")
         .to_string();
     let method = req.method().as_str().to_string();
+    // Network exceptions are deliberate global decisions, even when a tenant
+    // happens to own a provider in a similarly named namespace.
+    let segments: Vec<_> = path.split('/').collect();
+    if segments.len() == 3 && segments[0] == "providers" && segments[2] == "network-approval" {
+        return Err(denied()); // Current real global administrators returned above.
+    }
     // These handlers bind identity/proofs to the authenticated user themselves.
     if matches!(
         path.as_str(),
@@ -433,6 +439,21 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
 
     if path == "telemetry/receivers" || path.starts_with("telemetry/receivers/") {
         return Ok(()); // Handler validates current real administrator and stored receiver scope.
+    }
+    // These concrete file handlers authorize persisted resource.owner/user and
+    // current storage provider themselves, before any object request or URL.
+    if let Some((operation, id)) = path.split_once('/') {
+        if !id.is_empty()
+            && !id.contains('/')
+            && matches!(
+                (operation, method.as_str()),
+                ("resource-url", "GET")
+                    | ("download-resource", "GET")
+                    | ("delete-resource", "POST")
+            )
+        {
+            return Ok(());
+        }
     }
     if path == "upload-users" || path == "upload-users-with-mfa" {
         return if p.admin { Ok(()) } else { Err(denied()) };

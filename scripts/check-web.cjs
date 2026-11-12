@@ -490,6 +490,30 @@ async function main() {
     assert.equal(providerWrite.scopes,'127.0.0.1/32');
     assert.equal(providerWrite.content,'8080');
 
+    await page.getByRole('button',{name:'New resource',exact:true}).click();
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'Custom'});
+    await fill(page.getByRole('textbox',{name:'OAuth authorization URL',exact:true}),'https://identity.example/authorize');
+    await fill(page.getByRole('textbox',{name:'OAuth token URL',exact:true}),'https://identity.example/token');
+    await fill(page.getByRole('textbox',{name:'OAuth user info URL',exact:true}),'https://identity.example/userinfo');
+    await fill(page.getByRole('textbox',{name:'OAuth user mapping (JSON)',exact:true}),'{"id":"data.id","displayName":"data.name"}');
+    await fill(page.getByLabel('Secondary client secret',{exact:true}),'secondary-private');
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+    const oauthWrite=calls.filter(c=>c.endpoint==='/api/providers'&&c.method==='POST').at(-1).body;
+    assert.equal(oauthWrite.custom_auth_url,'https://identity.example/authorize');assert.deepEqual(oauthWrite.user_mapping,{id:'data.id',displayName:'data.name'});assert.equal(oauthWrite.client_secret2,'secondary-private');
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'Okta'});
+    await fill(page.getByRole('textbox',{name:'Okta issuer base',exact:true}),'https://example.okta.com/oauth2/default');
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+    assert.equal(calls.filter(c=>c.endpoint==='/api/providers'&&c.method==='POST').at(-1).body.domain,'https://example.okta.com/oauth2/default');
+    await page.getByRole('combobox',{name:'Category',exact:true}).selectOption({label:'Email'});
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'SMTP'});
+    await fill(page.getByRole('textbox',{name:'From address',exact:true}),'sender@example.test');
+    await fill(page.getByRole('textbox',{name:'From name',exact:true}),'Browser Sender');
+    await page.getByRole('checkbox',{name:'Allow plaintext SMTP',exact:true}).check();
+    assert.equal(await page.getByRole('textbox',{name:'OAuth authorization URL',exact:true}).isVisible(),false);
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+    const emailWrite=calls.filter(c=>c.endpoint==='/api/providers'&&c.method==='POST').at(-1).body;
+    assert.equal(emailWrite.client_id2,'sender@example.test');assert.equal(emailWrite.client_secret2,'Browser Sender');assert.equal(emailWrite.disable_ssl,true);
+
     await page.getByRole('button',{name:'Pricings',exact:true}).click();
     await fill(page.getByRole('textbox',{name:'Owner',exact:true}),'built-in');
     await fill(page.getByRole('textbox',{name:'Name',exact:true}),'invited-pricing');

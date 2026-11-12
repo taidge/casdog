@@ -40,10 +40,14 @@ struct Kdc {
 }
 impl Kdc {
     async fn start() -> Self {
+        // canonicalize adds Windows' verbatim \\?\ prefix, which Java's
+        // classpath wildcard does not expand. The manifest path is absolute.
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .unwrap();
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let cases = workspace.join("target/phase13/kerberos-cases");
         std::fs::create_dir_all(&cases).unwrap();
         let directory = tempfile::tempdir_in(cases).unwrap();
@@ -99,7 +103,14 @@ impl Kdc {
             "KDC exited: {}",
             std::fs::read_to_string(self.directory.path().join("kdc.log")).unwrap_or_default()
         );
-        line.trim().to_owned()
+        let line = line.trim().to_owned();
+        assert_ne!(
+            line,
+            "ERROR",
+            "Independent KDC/GSS failure: {}",
+            std::fs::read_to_string(self.directory.path().join("kdc.log")).unwrap_or_default()
+        );
+        line
     }
     async fn command(&mut self, command: &str) -> String {
         self.input
@@ -181,7 +192,7 @@ impl Fixture {
         }
         let app = uuid::Uuid::new_v4().to_string();
         let client = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO applications(id,owner,name,display_name,organization,client_id,client_secret,redirect_uris,enable_password,grant_types) VALUES($1,'admin',$1,'Kerberos',$2,$3,'confidential','[\"http://localhost/callback\"]',false,'[\"authorization_code\"]')")
+        sqlx::query("INSERT INTO applications(id,owner,name,display_name,organization,client_id,client_secret,redirect_uris,enable_password,grant_types) VALUES($1,'admin',$1,'Kerberos',$2,$3,'confidential','http://localhost/callback',false,'[\"authorization_code\"]')")
             .bind(&app).bind(&owner).bind(&client).execute(&pool).await.unwrap();
         Self {
             pool,
@@ -459,18 +470,49 @@ async fn kerberos_mfa_uses_browser_challenge_and_rechecks_current_org_configurat
     let (_, token) = kdc.token("alice", "spnego", "casdog.localhost").await;
     let response = f.login(&token, "").await;
     let cookie = mfa_cookie(&response);
+    let mut revocation = f.pool.begin().await.unwrap();
     sqlx::query("UPDATE organizations SET kerberos_service_name='HTTP' WHERE id=$1")
         .bind(&f.org.id)
+        .execute(&mut *revocation)
+        .await
+        .unwrap();
+    let mut stale = Box::pin(
+        TestClient::post("http://localhost/api/auth/password/session")
+            .add_header("origin", origin(), true)
+            .add_header("cookie", &cookie, true)
+            .json(&json!({"mfaType":"recovery","passcode":"kerberos-recovery-two"}))
+            .send(&f.service),
+    );
+    // An in-flight keytab-policy edit cannot race the MFA transaction into
+    // issuing a JWT from the previously committed configuration.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut stale)
+            .await
+            .is_err()
+    );
+    revocation.commit().await.unwrap();
+    let stale = stale.await;
+    assert_eq!(stale.status_code, Some(StatusCode::UNAUTHORIZED));
+    let (_, token) = kdc.token("alice", "spnego", "casdog.localhost").await;
+    let response = f.login(&token, "").await;
+    let cookie = mfa_cookie(&response);
+    sqlx::query("UPDATE users SET name='renamed' WHERE id=$1")
+        .bind(&f.alice)
         .execute(&f.pool)
         .await
         .unwrap();
-    let stale = TestClient::post("http://localhost/api/auth/password/session")
+    let renamed = TestClient::post("http://localhost/api/auth/password/session")
         .add_header("origin", origin(), true)
         .add_header("cookie", &cookie, true)
         .json(&json!({"mfaType":"recovery","passcode":"kerberos-recovery-two"}))
         .send(&f.service)
         .await;
-    assert_eq!(stale.status_code, Some(StatusCode::UNAUTHORIZED));
+    assert_eq!(renamed.status_code, Some(StatusCode::UNAUTHORIZED));
+    sqlx::query("UPDATE users SET name='alice' WHERE id=$1")
+        .bind(&f.alice)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     for sql in [
         "UPDATE users SET is_forbidden=true WHERE id=$1",
         "UPDATE users SET is_forbidden=false,is_deleted=true WHERE id=$1",

@@ -125,6 +125,9 @@ impl OAuthProviderTrait for SlackProvider {
         let avatar_url = user.profile.as_ref().and_then(|p| p.image_512.clone());
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.id,
             username: user.name.clone(),
             display_name: user.real_name.unwrap_or(user.name),

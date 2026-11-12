@@ -10,6 +10,8 @@ pub struct SendGridEmailProvider {
     client: Client,
     api_key: String,
     from_address: String,
+    from_name: Option<String>,
+    api_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +48,8 @@ impl SendGridEmailProvider {
             client: Client::new(),
             api_key,
             from_address,
+            from_name: None,
+            api_url: "https://api.sendgrid.com/v3/mail/send".into(),
         }
     }
 
@@ -53,12 +57,35 @@ impl SendGridEmailProvider {
     pub fn from_provider_record(api_key: &str, from_address: &str) -> Self {
         Self::new(api_key.to_string(), from_address.to_string())
     }
+    pub fn with_sender(mut self, sender: &lettre::message::Mailbox) -> Self {
+        self.from_address = sender.email.to_string();
+        self.from_name = sender.name.clone();
+        self
+    }
+    /// Explicit transport hook for embedded integrations and loopback tests.
+    /// Provider records cannot override SendGrid's official gateway.
+    pub fn with_api_url(mut self, value: &str) -> AppResult<Self> {
+        let url = reqwest::Url::parse(value)
+            .map_err(|_| AppError::Validation("Invalid SendGrid API URL".into()))?;
+        if (url.scheme() != "https"
+            && !(url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))))
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(AppError::Validation("Invalid SendGrid API URL".into()));
+        }
+        self.api_url = url.into();
+        Ok(self)
+    }
 }
 
 #[async_trait]
 impl EmailProviderTrait for SendGridEmailProvider {
     async fn send_email(&self, to: &str, subject: &str, body: &str) -> AppResult<()> {
-        let url = "https://api.sendgrid.com/v3/mail/send";
+        let url = &self.api_url;
 
         let request = SendGridRequest {
             personalizations: vec![Personalization {
@@ -69,7 +96,7 @@ impl EmailProviderTrait for SendGridEmailProvider {
             }],
             from: EmailAddress {
                 email: self.from_address.clone(),
-                name: None,
+                name: self.from_name.clone(),
             },
             subject: subject.to_string(),
             content: vec![Content {

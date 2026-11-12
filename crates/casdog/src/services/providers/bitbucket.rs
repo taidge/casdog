@@ -129,6 +129,9 @@ impl OAuthProviderTrait for BitbucketProvider {
         let avatar_url = user.links.and_then(|l| l.avatar).and_then(|a| a.href);
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.account_id,
             username: user.username,
             display_name: user.display_name,

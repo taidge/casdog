@@ -97,8 +97,8 @@ pub use webhook_executor::{WebhookExecutor, WebhookPayload};
 
 pub mod password_reset_service;
 
-pub mod key_credentials_service;
 pub mod kerberos_service;
+pub mod key_credentials_service;
 pub mod primary_auth_service;
 pub mod protocol_gap_service;
 pub mod social_state_service;
@@ -108,6 +108,8 @@ pub mod user_import_service;
 
 pub mod mfa_restore_service;
 pub mod payment_reconcile_scheduler;
+pub mod provider_configuration_service;
+pub mod provider_network_service;
 pub mod runtime_settings_service;
 pub mod subscription_renewal_service;
 pub mod syncer_scim;

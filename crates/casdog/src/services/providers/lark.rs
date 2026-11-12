@@ -111,6 +111,9 @@ impl OAuthProviderTrait for LarkProvider {
             .ok_or_else(|| AppError::Internal("No user data in Lark response".to_string()))?;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.open_id.clone(),
             username: user.email.clone().unwrap_or(user.open_id),
             display_name: user.name,

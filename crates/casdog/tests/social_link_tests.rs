@@ -26,6 +26,7 @@ struct Fixture {
     provider: Provider,
     a: String,
     b: String,
+    network_admin: Option<String>,
     server: tokio::task::JoinHandle<()>,
 }
 impl Fixture {
@@ -106,6 +107,7 @@ impl Fixture {
             provider,
             a,
             b,
+            network_admin: None,
             server,
         }
     }
@@ -114,6 +116,22 @@ impl Fixture {
         AuthService::new(users.clone())
             .generate_token(&users.get_by_id(id).await.unwrap())
             .unwrap()
+    }
+    async fn approve_network(&mut self) {
+        let id = Uuid::new_v4().to_string();
+        let name = format!("link-admin-{}", Uuid::new_v4());
+        sqlx::query("INSERT INTO organizations(id,owner,name,display_name) VALUES($1,'admin','built-in','Built in') ON CONFLICT(name) DO NOTHING").bind(Uuid::new_v4().to_string()).execute(&self.pool).await.unwrap();
+        sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash,is_admin) VALUES($1,'built-in',$2,'Network approver','unused',true)").bind(&id).bind(name).execute(&self.pool).await.unwrap();
+        let approval = TestClient::post(format!(
+            "http://localhost/api/providers/{}/network-approval",
+            self.provider.id
+        ))
+        .bearer_auth(self.token(&id).await)
+        .json(&json!({"allow_private":true}))
+        .send(&self.service)
+        .await;
+        assert_eq!(approval.status_code, Some(StatusCode::OK));
+        self.network_admin = Some(id);
     }
     async fn flow(&self, id: &str) -> OAuthFlow {
         let token = self.token(id).await;
@@ -130,12 +148,19 @@ impl Fixture {
                 self.provider.name
             ),
             purpose: "link".into(),
-            context: json!({"user_id":id,"owner":self.org,"token_hash":casdog::hoops::auth::session_fingerprint(&token),"issued_at_ms":claims.issued_at_ms,"exp":claims.exp}),
+            context: json!({"user_id":id,"owner":self.org,"token_hash":casdog::hoops::auth::session_fingerprint(&token),"issued_at_ms":claims.issued_at_ms,"exp":claims.exp,"provider_stamp":casdog::services::providers::oauth_provider::configuration_stamp(&self.provider),"network_binding":"unapproved"}),
             created_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(5),
         }
     }
     async fn cleanup(self) {
+        if let Some(id) = &self.network_admin {
+            sqlx::query("DELETE FROM users WHERE id=$1")
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
         self.server.abort();
         for table in ["social_oauth_completions", "social_oauth_flows"] {
             sqlx::query(&format!("DELETE FROM {table} WHERE organization=$1"))
@@ -187,7 +212,8 @@ async fn state(mut response: Response) -> (String, String) {
 #[tokio::test]
 #[ignore = "requires migrated PostgreSQL and CASDOG_TEST_DATABASE_URL"]
 async fn authenticated_link_callback_then_social_signin_returns_the_original_account() {
-    let f = Fixture::new().await;
+    let mut f = Fixture::new().await;
+    f.approve_network().await;
     let auth = format!("Bearer {}", f.token(&f.a).await);
     let begin = TestClient::post(format!(
         "http://localhost/api/auth/{}/link",

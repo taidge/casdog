@@ -97,6 +97,9 @@ impl OAuthProviderTrait for DiscordProvider {
         };
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.id,
             username: user.username,
             display_name,

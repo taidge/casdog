@@ -2067,11 +2067,22 @@ async fn paged_directory() -> (
                                         ("st", b"Shanghai".to_vec()),
                                         ("postalCode", b"200000".to_vec()),
                                         ("co", b"China".to_vec()),
-                                        ("whenCreated", b"20231010120000.0Z".to_vec()),
+                                        (
+                                            "whenCreated",
+                                            if *n == 1 && state.mode == "bad-ad-time" {
+                                                b"not-a-time".to_vec()
+                                            } else {
+                                                b"20231010120000.0Z".to_vec()
+                                            },
+                                        ),
                                         (
                                             "userAccountControl",
                                             if *n == 1 && state.mode == "bad-ad-uac" {
                                                 b"invalid".to_vec()
+                                            } else if *n == 1 && state.mode == "binary-ad-uac" {
+                                                vec![0xff, 0xfe]
+                                            } else if *n == 1 && state.mode == "empty-ad-uac" {
+                                                Vec::new()
                                             } else {
                                                 state.uac.as_bytes().to_vec()
                                             },
@@ -2087,7 +2098,14 @@ async fn paged_directory() -> (
                                             continue;
                                         }
                                         let mut attr = tlv(4, name.as_bytes());
-                                        attr.extend(tlv(0x31, &tlv(4, &value)));
+                                        let mut values = tlv(4, &value);
+                                        if *n == 1
+                                            && state.mode == "multiple-ad-uac"
+                                            && name == "userAccountControl"
+                                        {
+                                            values.extend(tlv(4, b"514"));
+                                        }
+                                        attr.extend(tlv(0x31, &values));
                                         attributes.extend(tlv(0x30, &attr));
                                     }
                                 }
@@ -2413,6 +2431,10 @@ async fn active_directory_guid_identity_profile_defaults_and_uac_survive_dn_and_
     for mode in [
         "bad-ad-guid",
         "bad-ad-uac",
+        "bad-ad-time",
+        "binary-ad-uac",
+        "empty-ad-uac",
+        "multiple-ad-uac",
         "error",
         "truncated",
         "malformed",

@@ -109,6 +109,9 @@ impl OAuthProviderTrait for SteamProvider {
             .ok_or_else(|| AppError::Internal("No player data in Steam response".to_string()))?;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: player.steamid.clone(),
             username: player.steamid,
             display_name: player.personaname,

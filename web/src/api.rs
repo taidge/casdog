@@ -284,3 +284,67 @@ fn parse_error_message(status: u16, text: &str) -> String {
         format!("{status}: {}", text.trim())
     }
 }
+
+/// Ask the browser to negotiate using its own integrated-auth credentials.
+/// Never forward the application's bearer token or a user-supplied principal.
+pub async fn kerberos_login(url: &str) -> Result<Value, String> {
+    let response = Request::get(url)
+        .credentials(web_sys::RequestCredentials::Include)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if status == 401 {
+        return Err("Browser integrated authentication was not completed. Check your domain sign-in and browser integrated-auth policy, or use another sign-in method.".into());
+    }
+    if !(200..300).contains(&status) {
+        return Err(parse_error_message(status, &text));
+    }
+    validate_response(
+        serde_json::from_str(&text).map_err(|_| "Invalid Kerberos sign-in response".to_string())?,
+    )
+}
+
+pub async fn download_resource(
+    url: &str,
+    token: Option<&str>,
+    filename: &str,
+) -> Result<(), String> {
+    use wasm_bindgen::JsCast;
+    let response = with_auth(Request::get(url), token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.ok() {
+        let status = response.status();
+        return Err(parse_error_message(
+            status,
+            &response.text().await.map_err(|e| e.to_string())?,
+        ));
+    }
+    let bytes = response.binary().await.map_err(|e| e.to_string())?;
+    let parts = js_sys::Array::new();
+    parts.push(&js_sys::Uint8Array::from(bytes.as_slice()));
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
+        .map_err(|_| "Cannot prepare download bytes")?;
+    let address = web_sys::Url::create_object_url_with_blob(&blob)
+        .map_err(|_| "Cannot prepare resource download")?;
+    let window = web_sys::window().ok_or("Browser window unavailable")?;
+    let document = window.document().ok_or("Browser document unavailable")?;
+    let anchor = document
+        .create_element("a")
+        .map_err(|_| "Cannot create download")?
+        .dyn_into::<web_sys::HtmlAnchorElement>()
+        .map_err(|_| "Cannot create download link")?;
+    anchor.set_href(&address);
+    anchor.set_download(filename);
+    anchor.click();
+    let cleanup = wasm_bindgen::closure::Closure::once_into_js(move || {
+        let _ = web_sys::Url::revoke_object_url(&address);
+    });
+    let _ =
+        window.set_timeout_with_callback_and_timeout_and_arguments_0(cleanup.unchecked_ref(), 1000);
+    Ok(())
+}

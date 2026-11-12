@@ -61,6 +61,7 @@ impl EmailProviderTrait for SmtpEmailProvider {
     async fn send_email(&self, to: &str, subject: &str, body: &str) -> AppResult<()> {
         use lettre::message::header::ContentType;
         use lettre::transport::smtp::authentication::Credentials;
+        use lettre::transport::smtp::client::{Tls, TlsParameters};
         use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
         let email = Message::builder()
@@ -79,16 +80,27 @@ impl EmailProviderTrait for SmtpEmailProvider {
 
         let creds = Credentials::new(self.username.clone(), self.password.clone());
 
-        let mailer = if self.use_ssl {
+        let mailer = if self.use_ssl && self.port == 465 {
             AsyncSmtpTransport::<Tokio1Executor>::relay(&self.host)
                 .map_err(|e| AppError::Internal(format!("SMTP connection failed: {}", e)))?
                 .port(self.port)
                 .credentials(creds)
                 .build()
-        } else {
+        } else if self.use_ssl {
             AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.host)
-                .map_err(|e| AppError::Internal(format!("SMTP connection failed: {}", e)))?
+                .map_err(|_| AppError::Config("Invalid SMTP TLS configuration".into()))?
                 .port(self.port)
+                .credentials(creds)
+                .build()
+        } else {
+            // The deprecated disable_ssl setting disables implicit TLS, not an
+            // advertised STARTTLS upgrade. Plaintext is permitted only for this
+            // explicit compatibility choice when STARTTLS is unavailable.
+            let parameters = TlsParameters::new(self.host.clone())
+                .map_err(|_| AppError::Config("Invalid SMTP TLS configuration".into()))?;
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.host)
+                .port(self.port)
+                .tls(Tls::Opportunistic(parameters))
                 .credentials(creds)
                 .build()
         };

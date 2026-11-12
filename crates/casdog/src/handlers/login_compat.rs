@@ -31,6 +31,11 @@ pub async fn kerberos_login(
         res.status_code(StatusCode::UNAUTHORIZED);
         return Ok(());
     }
+    // Reject malformed authentication material before application metadata or
+    // database access. This checks bounded framing only; it proves no identity.
+    crate::services::spnego_service::SpnegoService::authentication_token(
+        token.as_deref().unwrap(),
+    )?;
     let reference = req
         .query::<String>("application")
         .filter(|s| !s.is_empty() && s.len() <= 400)

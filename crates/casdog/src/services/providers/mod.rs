@@ -40,11 +40,11 @@ pub mod sms_provider;
 pub mod captcha_provider;
 
 // Storage Providers
+pub mod azure_storage;
+pub mod gcs_storage;
 pub mod local_storage;
 pub mod s3_storage;
 pub mod storage_provider;
-pub mod azure_storage;
-pub mod gcs_storage;
 
 // Payment Providers
 pub mod balance_payment;

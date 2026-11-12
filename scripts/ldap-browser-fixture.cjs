@@ -19,7 +19,7 @@ function item(bytes) {
   if (!part || bytes.length < part.offset + part.length) throw Error('Incomplete LDAP fixture item');
   return { tag:bytes[0], value:bytes.subarray(part.offset,part.offset+part.length), rest:bytes.subarray(part.offset+part.length) };
 }
-async function startDirectory(username) {
+async function startDirectory(username, adState) {
   const sockets = new Set();
   const metrics = { searches:0, userBinds:0, errors:0 };
   const server = net.createServer(socket => {
@@ -47,7 +47,12 @@ async function startDirectory(username) {
             reply(id.value,0x61,result(service||user?0:49));
           } else if (operation.tag===0x63) {
             metrics.searches++;
-            if (operation.value.includes(Buffer.from(username()))) {
+            if(adState){
+              const state=adState();
+              const values={objectGUID:Buffer.from('33221100554477668899'+(state.guidTail||'aabbccddeeff'),'hex'),sAMAccountName:state.name,givenName:'Browser',sn:'Directory',displayName:'AD browser user',userPrincipalName:`${state.name}@example.test`,userAccountControl:state.disabled?'514':'512',title:'Directory engineer',department:'Browser department'};
+              const attributes=Object.entries(values).map(([name,value])=>tlv(0x30,Buffer.concat([tlv(4,name),tlv(0x31,tlv(4,value))])));
+              reply(id.value,0x64,Buffer.concat([tlv(4,state.dn),tlv(0x30,Buffer.concat(attributes))]));
+            } else if (operation.value.includes(Buffer.from(username()))) {
               const attr=tlv(0x30,Buffer.concat([tlv(4,'uid'),tlv(0x31,tlv(4,username()))]));
               reply(id.value,0x64,Buffer.concat([tlv(4,`uid=${username()},dc=example,dc=test`),tlv(0x30,attr)]));
             }

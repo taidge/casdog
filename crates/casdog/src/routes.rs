@@ -306,6 +306,7 @@ fn protected_routes() -> Router {
         // File upload/download/delete with storage provider integration
         .push(Router::with_path("upload-resource").post(upload::upload_resource))
         .push(Router::with_path("download-resource/{id}").get(upload::download_resource))
+        .push(Router::with_path("resource-url/{id}").get(upload::resource_url))
         .push(Router::with_path("delete-resource/{id}").post(upload::delete_resource_with_file))
 }
 
@@ -396,7 +397,11 @@ fn provider_routes() -> Router {
             Router::with_path("{id}")
                 .get(provider::get_provider)
                 .put(provider::update_provider)
-                .delete(provider::delete_provider),
+                .delete(provider::delete_provider)
+                .push(Router::with_path("network-approval")
+                    .get(crate::handlers::provider_network::get)
+                    .post(crate::handlers::provider_network::approve)
+                    .delete(crate::handlers::provider_network::revoke)),
         )
 }
 
@@ -910,7 +915,11 @@ fn api_router_for_openapi() -> Router {
                         Router::with_path("{id}")
                             .get(provider::get_provider)
                             .put(provider::update_provider)
-                            .delete(provider::delete_provider),
+                            .delete(provider::delete_provider)
+                            .push(Router::with_path("network-approval")
+                                .get(crate::handlers::provider_network::get)
+                                .post(crate::handlers::provider_network::approve)
+                                .delete(crate::handlers::provider_network::revoke)),
                     ),
             )
             .push(
@@ -1240,6 +1249,7 @@ fn api_router_for_openapi() -> Router {
             // File upload/download/delete with storage provider integration
             .push(Router::with_path("upload-resource").post(upload::upload_resource))
             .push(Router::with_path("download-resource/{id}").get(upload::download_resource))
+            .push(Router::with_path("resource-url/{id}").get(upload::resource_url))
             .push(Router::with_path("delete-resource/{id}").post(upload::delete_resource_with_file)),
     )
 }

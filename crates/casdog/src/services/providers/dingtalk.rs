@@ -80,6 +80,9 @@ impl OAuthProviderTrait for DingTalkProvider {
             .map_err(|e| AppError::Internal(format!("DingTalk user parse failed: {}", e)))?;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.userid.clone(),
             username: user.email.clone().unwrap_or(user.userid),
             display_name: user.name,

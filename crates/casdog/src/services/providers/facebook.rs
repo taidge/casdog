@@ -96,6 +96,9 @@ impl OAuthProviderTrait for FacebookProvider {
         let avatar_url = user.picture.and_then(|p| p.data).and_then(|d| d.url);
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.id.clone(),
             username: user.email.clone().unwrap_or(user.id),
             display_name: user.name.unwrap_or_default(),

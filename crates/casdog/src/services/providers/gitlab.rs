@@ -94,6 +94,9 @@ impl OAuthProviderTrait for GitLabProvider {
             .map_err(|e| AppError::Internal(format!("GitLab user parse failed: {}", e)))?;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.id.to_string(),
             username: user.username,
             display_name: user.name,

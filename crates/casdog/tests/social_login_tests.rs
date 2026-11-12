@@ -137,6 +137,30 @@ async fn social_browser_flow_is_scoped_single_use_and_does_not_link_claimed_emai
     }
     sqlx::query("INSERT INTO users(id,owner,name,password_hash,display_name,email,email_verified) VALUES($1,$2,'password-user','unusable','Password user','unverified@example.test',true)")
         .bind(&existing_id).bind(&org).execute(&pg).await.unwrap();
+    // Loopback IdPs now require an explicit grant from a live global admin.
+    // Obtain it through the normal API; ownership alone is never sufficient.
+    let administrator = uuid::Uuid::new_v4().to_string();
+    let administrator_name = format!("social-admin-{suffix}");
+    sqlx::query("INSERT INTO organizations(id,owner,name,display_name) VALUES($1,'admin','built-in','Built in') ON CONFLICT(name) DO NOTHING").bind(uuid::Uuid::new_v4().to_string()).execute(&pg).await.unwrap();
+    sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash,is_admin) VALUES($1,'built-in',$2,'Network approver','unused',true)").bind(&administrator).bind(&administrator_name).execute(&pg).await.unwrap();
+    let now = chrono::Utc::now();
+    let bearer=jsonwebtoken::encode(&jsonwebtoken::Header::default(),&json!({"sub":administrator,"owner":"built-in","name":administrator_name,"is_admin":true,"iat":now.timestamp(),"issued_at_ms":now.timestamp_millis(),"exp":now.timestamp()+3600,"iss":AppConfig::get().jwt.issuer}),&jsonwebtoken::EncodingKey::from_secret(AppConfig::get().jwt.secret.as_bytes())).unwrap();
+    let approval_service = Service::new(casdog::routes::create_router()).hoop(
+        salvo::affix_state::AffixList::new()
+            .inject(pg.clone())
+            .inject(diesel.clone()),
+    );
+    assert_eq!(
+        TestClient::post(format!(
+            "http://localhost/api/providers/{provider_id}/network-approval"
+        ))
+        .bearer_auth(bearer)
+        .json(&json!({"allow_private":true}))
+        .send(&approval_service)
+        .await
+        .status_code,
+        Some(StatusCode::OK)
+    );
     let make_service = |pg: PgPool, diesel| {
         Service::new(
             Router::with_path("api/auth")
@@ -341,6 +365,11 @@ async fn social_browser_flow_is_scoped_single_use_and_does_not_link_claimed_emai
         .await
         .unwrap();
     drop(other_service);
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(&administrator)
+        .execute(&pg)
+        .await
+        .unwrap();
     other_pool.close().await;
     mock.abort();
 }

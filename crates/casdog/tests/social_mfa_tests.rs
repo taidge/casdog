@@ -94,6 +94,12 @@ impl Fixture {
         }
     }
     async fn completion(&self) -> String {
+        let provider: casdog::models::Provider =
+            sqlx::query_as("SELECT * FROM providers WHERE id=$1")
+                .bind(&self.provider)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
         state::create_completion(
             &self.pool,
             &NewCompletion {
@@ -102,7 +108,7 @@ impl Fixture {
                 provider_name: "mock".into(),
                 application_id: self.app.clone(),
                 organization: self.owner.clone(),
-                context: json!({"link_key":format!("oauth:{}",self.provider),"subject":"subject"}),
+                context: json!({"link_key":format!("oauth:{}",self.provider),"subject":"subject","provider_stamp":casdog::services::providers::oauth_provider::configuration_stamp(&provider),"network_binding":"unapproved"}),
             },
         )
         .await
@@ -160,6 +166,25 @@ impl Fixture {
         self.other_pool.close().await;
     }
 }
+#[tokio::test]
+#[ignore = "requires migrated PostgreSQL and CASDOG_TEST_DATABASE_URL"]
+async fn completion_without_provider_configuration_stamp_is_not_an_upgrade_bypass() {
+    let f = Fixture::new().await;
+    let proof = f.completion().await;
+    sqlx::query(
+        "UPDATE social_oauth_completions SET context=context-'provider_stamp' WHERE secret_hash=$1",
+    )
+    .bind(state::proof_hash(&proof))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let response = f
+        .post(&proof, json!({"mfaType":"app","passcode":f.code()}))
+        .await;
+    assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+    f.cleanup().await;
+}
+
 #[tokio::test]
 #[ignore = "requires migrated disposable PostgreSQL"]
 async fn social_totp_challenge_issues_no_jwt_until_proof_and_is_single_use() {

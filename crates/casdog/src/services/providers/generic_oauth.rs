@@ -1,7 +1,12 @@
 use async_trait::async_trait;
+use serde_json::Value;
+use std::collections::BTreeMap;
 
-use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo};
-use crate::error::{AppError, AppResult};
+use super::oauth_provider::{OAuthProviderTrait, ProviderUserInfo, map_user_info, validate_url};
+use crate::{
+    error::{AppError, AppResult},
+    services::system_gap_service,
+};
 
 pub struct GenericOAuthProvider {
     provider_type_name: String,
@@ -11,8 +16,12 @@ pub struct GenericOAuthProvider {
     token_url: String,
     user_info_url: String,
     scope: String,
+    user_mapping: BTreeMap<String, String>,
+    allow_private: bool,
 }
-
+fn failed() -> AppError {
+    AppError::Authentication("OAuth provider request failed".into())
+}
 impl GenericOAuthProvider {
     pub fn new(
         provider_type_name: String,
@@ -31,28 +40,74 @@ impl GenericOAuthProvider {
             token_url,
             user_info_url,
             scope,
+            user_mapping: BTreeMap::new(),
+            allow_private: false,
         }
     }
+    pub fn with_configuration(
+        mut self,
+        user_mapping: BTreeMap<String, String>,
+        allow_private: bool,
+    ) -> Self {
+        self.user_mapping = user_mapping;
+        self.allow_private = allow_private;
+        self
+    }
+    async fn client(&self, value: &str) -> AppResult<(reqwest::Url, reqwest::Client)> {
+        let url = validate_url(value)?;
+        let client = system_gap_service::client(&url, self.allow_private)
+            .await
+            .map_err(|_| failed())?;
+        Ok((url, client))
+    }
+    async fn json(response: reqwest::Response) -> AppResult<Value> {
+        let bytes = system_gap_service::limited_bytes(response, 1024 * 1024)
+            .await
+            .map_err(|_| failed())?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| failed())?;
+        if !value.is_object() || value.get("error").is_some() {
+            return Err(failed());
+        }
+        Ok(value)
+    }
 }
-
 #[async_trait]
 impl OAuthProviderTrait for GenericOAuthProvider {
     fn get_auth_url(&self, redirect_uri: &str, state: &str, scope: Option<&str>) -> String {
-        let scope = scope.unwrap_or(&self.scope);
-        format!(
-            "{}?client_id={}&redirect_uri={}&response_type=code&state={}&scope={}",
-            self.auth_url,
-            urlencoding::encode(&self.client_id),
-            urlencoding::encode(redirect_uri),
-            urlencoding::encode(state),
-            urlencoding::encode(scope),
-        )
+        let Ok(mut url) = validate_url(&self.auth_url) else {
+            return String::new();
+        };
+        let scope = scope
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| (!self.scope.trim().is_empty()).then_some(self.scope.as_str()))
+            .unwrap_or("openid profile email");
+        let pairs: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_ref(),
+                    "client_id" | "redirect_uri" | "response_type" | "state" | "scope"
+                )
+            })
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(pairs)
+            .append_pair("client_id", &self.client_id)
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("response_type", "code")
+            .append_pair("state", state)
+            .append_pair("scope", scope);
+        url.into()
     }
-
     async fn exchange_code(&self, code: &str, redirect_uri: &str) -> AppResult<String> {
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&self.token_url)
+        if code.is_empty() || code.len() > 8192 {
+            return Err(failed());
+        }
+        let (url, client) = self.client(&self.token_url).await?;
+        let response = client
+            .post(url)
             .header("Accept", "application/json")
             .form(&[
                 ("code", code),
@@ -63,55 +118,38 @@ impl OAuthProviderTrait for GenericOAuthProvider {
             ])
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("Token exchange failed: {}", e)))?;
-
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Internal(format!("Token parse failed: {}", e)))?;
-
-        json["access_token"]
+            .map_err(|_| failed())?;
+        let value = Self::json(response).await?;
+        if value["token_type"]
             .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| AppError::Internal("No access_token in response".to_string()))
+            .is_some_and(|v| !v.eq_ignore_ascii_case("bearer"))
+        {
+            return Err(failed());
+        }
+        value["access_token"]
+            .as_str()
+            .filter(|v| !v.is_empty() && v.len() <= 16384 && !v.chars().any(char::is_control))
+            .map(str::to_owned)
+            .ok_or_else(failed)
     }
-
     async fn get_user_info(&self, access_token: &str) -> AppResult<ProviderUserInfo> {
-        let client = reqwest::Client::new();
-        let resp = client
-            .get(&self.user_info_url)
-            .header("Authorization", format!("Bearer {}", access_token))
+        if access_token.is_empty()
+            || access_token.len() > 16384
+            || access_token.chars().any(char::is_control)
+        {
+            return Err(failed());
+        }
+        let (url, client) = self.client(&self.user_info_url).await?;
+        let response = client
+            .get(url)
+            .header("Accept", "application/json")
+            .bearer_auth(access_token)
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("User info failed: {}", e)))?;
-
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Internal(format!("User info parse failed: {}", e)))?;
-
-        Ok(ProviderUserInfo {
-            id: json["sub"]
-                .as_str()
-                .or_else(|| json["id"].as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            username: json["preferred_username"]
-                .as_str()
-                .or_else(|| json["login"].as_str())
-                .or_else(|| json["email"].as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            display_name: json["name"].as_str().unwrap_or("Unknown").to_string(),
-            email: json["email"].as_str().map(|s| s.to_string()),
-            avatar_url: json["picture"]
-                .as_str()
-                .or_else(|| json["avatar_url"].as_str())
-                .map(|s| s.to_string()),
-            provider_type: self.provider_type_name.clone(),
-        })
+            .map_err(|_| failed())?;
+        let claims = Self::json(response).await?;
+        map_user_info(&claims, &self.user_mapping, &self.provider_type_name)
     }
-
     fn provider_type(&self) -> &str {
         &self.provider_type_name
     }

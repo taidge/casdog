@@ -12,7 +12,10 @@ use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::models::{Application, Provider, User};
 use crate::services::check_service::CheckService;
-use crate::services::providers::oauth_provider::{OAuthProviderTrait, create_oauth_provider};
+use crate::services::providers::oauth_provider::{
+    OAuthProviderTrait, configuration_stamp, create_oauth_provider_record,
+    create_oauth_provider_record_with_policy,
+};
 use crate::services::social_state_service::{
     self, COMPLETION_TTL_SECONDS, NewCompletion, NewOAuthFlow,
 };
@@ -122,16 +125,75 @@ pub(crate) fn oauth_provider(provider: &Provider) -> AppResult<Box<dyn OAuthProv
     if provider.category != "OAuth" {
         return Err(AppError::Validation("OAuth provider required".into()));
     }
-    create_oauth_provider(
-        &provider.provider_type,
-        provider.client_id.as_deref().unwrap_or_default(),
-        provider.client_secret.as_deref().unwrap_or_default(),
-        provider.custom_auth_url.as_deref(),
-        provider.custom_token_url.as_deref(),
-        provider.custom_user_info_url.as_deref(),
-        provider.scopes.as_deref(),
-    )
-    .ok_or_else(|| AppError::Validation("Unsupported OAuth provider".into()))
+    create_oauth_provider_record(provider)
+}
+pub(crate) fn require_provider_stamp(context: &Value, provider: &Provider) -> AppResult<()> {
+    if context["provider_stamp"].as_str() != Some(configuration_stamp(provider).as_str()) {
+        return Err(AppError::Authentication(
+            "OAuth provider configuration changed; restart sign-in".into(),
+        ));
+    }
+    Ok(())
+}
+pub(crate) async fn network_binding(
+    conn: &mut PgConnection,
+    provider: &Provider,
+    lock: bool,
+) -> AppResult<String> {
+    let sql = if lock {
+        "SELECT configuration_stamp,generation FROM oauth_provider_network_approvals WHERE provider_id=$1 FOR SHARE"
+    } else {
+        "SELECT configuration_stamp,generation FROM oauth_provider_network_approvals WHERE provider_id=$1"
+    };
+    let approval: Option<(String, String)> = sqlx::query_as(sql)
+        .bind(&provider.id)
+        .fetch_optional(conn)
+        .await?;
+    Ok(match approval {
+        Some((stamp, time)) if stamp == configuration_stamp(provider) => {
+            social_state_service::proof_hash(&format!("oauth.network.approval.v1:{stamp}:{time}"))
+        }
+        _ => "unapproved".into(),
+    })
+}
+async fn checked_oauth_provider(
+    pool: &PgPool,
+    provider: &Provider,
+    context: &Value,
+) -> AppResult<Box<dyn OAuthProviderTrait>> {
+    let mut conn = pool.acquire().await?;
+    let current: Provider = sqlx::query_as("SELECT * FROM providers WHERE id=$1")
+        .bind(&provider.id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| AppError::Authentication("OAuth provider unavailable".into()))?;
+    require_provider_stamp(context, &current)?;
+    let network = network_binding(&mut conn, &current, false).await?;
+    if context["network_binding"].as_str() != Some(network.as_str()) {
+        return Err(AppError::Authentication(
+            "OAuth network approval changed; restart sign-in".into(),
+        ));
+    }
+    create_oauth_provider_record_with_policy(&current, network != "unapproved")
+}
+pub(crate) async fn lock_provider_stamp(
+    conn: &mut PgConnection,
+    context: &Value,
+    provider: &Provider,
+) -> AppResult<()> {
+    let current: Provider = sqlx::query_as("SELECT * FROM providers WHERE id=$1 FOR SHARE")
+        .bind(&provider.id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| AppError::Authentication("OAuth provider unavailable".into()))?;
+    require_provider_stamp(context, &current)?;
+    let network = network_binding(conn, &current, true).await?;
+    if context["network_binding"].as_str() != Some(network.as_str()) {
+        return Err(AppError::Authentication(
+            "OAuth network approval changed; restart sign-in".into(),
+        ));
+    }
+    Ok(())
 }
 pub(crate) async fn provider_for_application(
     pool: &PgPool,
@@ -204,6 +266,8 @@ pub async fn get_provider_auth_url(
         .ok_or_else(|| AppError::Validation("application is required".into()))?;
     let app = application(&pool, &reference).await?;
     let provider = provider_for_application(&pool, &app, &name).await?;
+    let oauth = oauth_provider(&provider)?;
+    let network = network_binding(&mut *pool.acquire().await?, &provider, false).await?;
     let origin = public_origin()?;
     let redirect_uri = format!("{origin}/api/auth/{}/callback", urlencoding::encode(&name));
     // A client-supplied redirect can never alter the code exchange destination.
@@ -222,11 +286,11 @@ pub async fn get_provider_auth_url(
             organization: app.organization,
             redirect_uri: redirect_uri.clone(),
             purpose: "signin".into(),
-            context: json!({}),
+            context: json!({"provider_stamp":configuration_stamp(&provider),"network_binding":network}),
         },
     )
     .await?;
-    let url = oauth_provider(&provider)?.get_auth_url(&redirect_uri, &state, None);
+    let url = oauth.get_auth_url(&redirect_uri, &state, None);
     set_cookie(
         res,
         BROWSER_COOKIE,
@@ -266,9 +330,15 @@ pub async fn provider_callback(
             "Provider configuration changed".into(),
         ));
     }
-    let oauth = oauth_provider(&provider)?;
+    require_provider_stamp(&flow.context, &provider)?;
+    let oauth = checked_oauth_provider(&pool, &provider, &flow.context).await?;
     let token = oauth.exchange_code(&code, &flow.redirect_uri).await?;
-    let info = oauth.get_user_info(&token).await?;
+    // Re-read the persisted grant and configuration between the two requests;
+    // revocation must not permit a second request using cached private access.
+    let info = checked_oauth_provider(&pool, &provider, &flow.context)
+        .await?
+        .get_user_info(&token)
+        .await?;
     if info.id.trim().is_empty() || info.id == "unknown" {
         return Err(AppError::Authentication(
             "Provider returned no stable subject".into(),
@@ -293,6 +363,7 @@ pub async fn provider_callback(
     // subject strings from two OAuth client configurations are not the same identity.
     let link_key = format!("oauth:{}", provider.id);
     let mut transaction = pool.begin().await?;
+    lock_provider_stamp(&mut transaction, &flow.context, &provider).await?;
     super::social_link::lock_identity(&mut transaction, &app.organization, &provider.id, &info.id)
         .await?;
     let existing = super::social_link::find_identity(
@@ -312,12 +383,43 @@ pub async fn provider_callback(
             }
             // Never merge accounts merely because a provider claims an email.
             let id = uuid::Uuid::new_v4().to_string();
-            let name = format!("social_{}", uuid::Uuid::new_v4().simple());
+            let mut name = format!("social_{}", uuid::Uuid::new_v4().simple());
+            if CheckService::check_username(&info.username).is_ok() {
+                let occupied: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM users WHERE owner=$1 AND name=$2)",
+                )
+                .bind(&app.organization)
+                .bind(&info.username)
+                .fetch_one(&mut *transaction)
+                .await?;
+                if !occupied {
+                    name = info.username.clone();
+                }
+            }
             let links = json!({link_key.clone(): info.id});
-            sqlx::query_as::<_, User>("INSERT INTO users (id, owner, name, password_hash, display_name, email, email_verified, avatar, provider_ids, signup_application) VALUES ($1, $2, $3, '', $4, $5, false, $6, $7, $8) RETURNING *")
-                .bind(id).bind(&app.organization).bind(&name).bind(if info.display_name.is_empty() { &name } else { &info.display_name })
-                .bind(&info.email).bind(&info.avatar_url).bind(links).bind(format!("{}/{}", app.owner, app.name))
-                .fetch_one(&mut *transaction).await?
+            let country = info
+                .phone
+                .as_deref()
+                .and_then(|p| phonenumber::parse(None, p).ok())
+                .filter(|n| n.is_valid())
+                .and_then(|n| n.country().id())
+                .map(|id| id.as_ref().to_owned());
+            let profile = json!({"oauth_profile":{"provider_id":provider.id,"id":info.id,"username":info.username,"displayName":info.display_name,"email":info.email,"emailVerified":info.email_verified,"phone":info.phone,"phoneVerified":info.phone_verified,"avatarUrl":info.avatar_url}});
+            let mut created = None;
+            for _ in 0..2 {
+                created=sqlx::query_as::<_, User>("INSERT INTO users (id, owner, name, password_hash, display_name, email, email_verified, avatar, provider_ids, signup_application,phone,country_code,properties) VALUES ($1, $2, $3, '', $4, $5, $9, $6, $7, $8,$10,$11,$12) ON CONFLICT(owner,name) DO NOTHING RETURNING *")
+                    .bind(&id).bind(&app.organization).bind(&name).bind(if info.display_name.is_empty() { &name } else { &info.display_name })
+                    .bind(&info.email).bind(&info.avatar_url).bind(&links).bind(format!("{}/{}", app.owner, app.name))
+                    .bind(info.email_verified).bind(&info.phone).bind(&country).bind(&profile)
+                    .fetch_optional(&mut *transaction).await?;
+                if created.is_some() {
+                    break;
+                }
+                name = format!("social_{}", uuid::Uuid::new_v4().simple());
+            }
+            created.ok_or_else(|| {
+                AppError::Conflict("Social account name unavailable; restart sign-in".into())
+            })?
         }
     };
     if user.is_forbidden {
@@ -333,8 +435,8 @@ pub async fn provider_callback(
             organization: app.organization,
             application_id: app.id,
             provider_name: name,
-            provider_id: provider.id,
-            context: json!({"link_key":link_key,"subject":info.id}),
+            provider_id: provider.id.clone(),
+            context: json!({"link_key":link_key,"subject":info.id,"provider_stamp":configuration_stamp(&provider),"network_binding":flow.context["network_binding"]}),
         },
     )
     .await?;

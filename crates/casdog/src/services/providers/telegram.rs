@@ -52,6 +52,9 @@ impl OAuthProviderTrait for TelegramProvider {
         };
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: id.clone(),
             username: username.unwrap_or(id.clone()),
             display_name,

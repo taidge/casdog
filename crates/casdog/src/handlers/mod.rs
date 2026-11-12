@@ -35,6 +35,7 @@ pub mod pricing;
 pub mod product;
 pub mod provider;
 pub mod provider_extra;
+pub mod provider_network;
 pub mod record;
 pub mod resource;
 pub mod role;

@@ -1,4 +1,3 @@
-use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -69,50 +68,12 @@ impl ProviderService {
     }
 
     pub async fn create(pool: &PgPool, req: CreateProviderRequest) -> AppResult<ProviderResponse> {
-        let id = Uuid::new_v4().to_string();
-        let now = Utc::now();
-
-        let provider = sqlx::query_as::<_, Provider>(
-            r#"INSERT INTO providers (
-                id, owner, name, created_at, updated_at, display_name, category, type,
-                sub_type, method, client_id, client_secret, host, port, disable_ssl,
-                endpoint, bucket, domain, region_id, sign_name, template_code, app_id,
-                metadata, issuer_url, provider_url, enable_sign_authn_request, content, scopes
-            ) VALUES (
-                $1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, false, $25, $26
-            ) RETURNING *"#,
-        )
-        .bind(&id)
-        .bind(&req.owner)
-        .bind(&req.name)
-        .bind(now)
-        .bind(&req.display_name)
-        .bind(&req.category)
-        .bind(&req.provider_type)
-        .bind(&req.sub_type)
-        .bind(&req.method)
-        .bind(&req.client_id)
-        .bind(&req.client_secret)
-        .bind(&req.host)
-        .bind(&req.port)
-        .bind(req.disable_ssl.unwrap_or(false))
-        .bind(&req.endpoint)
-        .bind(&req.bucket)
-        .bind(&req.domain)
-        .bind(&req.region_id)
-        .bind(&req.sign_name)
-        .bind(&req.template_code)
-        .bind(&req.app_id)
-        .bind(&req.metadata)
-        .bind(&req.issuer_url)
-        .bind(&req.provider_url)
-        .bind(&req.content)
-        .bind(&req.scopes)
-        .fetch_one(pool)
-        .await?;
-
-        Ok(provider.into())
+        let object = serde_json::to_value(req)
+            .map_err(|_| AppError::Validation("Invalid provider configuration".into()))?
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        Ok(Self::create_configuration(pool, object).await?.into())
     }
 
     pub async fn update(
@@ -120,63 +81,143 @@ impl ProviderService {
         id: &str,
         req: UpdateProviderRequest,
     ) -> AppResult<ProviderResponse> {
-        let now = Utc::now();
+        let object = serde_json::to_value(req)
+            .map_err(|_| AppError::Validation("Invalid provider configuration".into()))?
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        Ok(Self::update_configuration(pool, id, object, None)
+            .await?
+            .into())
+    }
 
-        let provider = sqlx::query_as::<_, Provider>(
-            r#"UPDATE providers SET
-                updated_at = $2,
-                display_name = COALESCE($3, display_name),
-                category = COALESCE($4, category),
-                type = COALESCE($5, type),
-                sub_type = COALESCE($6, sub_type),
-                method = COALESCE($7, method),
-                client_id = COALESCE($8, client_id),
-                client_secret = COALESCE($9, client_secret),
-                host = COALESCE($10, host),
-                port = COALESCE($11, port),
-                disable_ssl = COALESCE($12, disable_ssl),
-                endpoint = COALESCE($13, endpoint),
-                bucket = COALESCE($14, bucket),
-                domain = COALESCE($15, domain),
-                region_id = COALESCE($16, region_id),
-                sign_name = COALESCE($17, sign_name),
-                template_code = COALESCE($18, template_code),
-                app_id = COALESCE($19, app_id),
-                metadata = COALESCE($20, metadata),
-                issuer_url = COALESCE($21, issuer_url),
-                provider_url = COALESCE($22, provider_url),
-                content = COALESCE($23, content),
-                scopes = COALESCE($24, scopes)
-            WHERE id = $1 RETURNING *"#,
-        )
-        .bind(id)
-        .bind(now)
-        .bind(&req.display_name)
-        .bind(&req.category)
-        .bind(&req.provider_type)
-        .bind(&req.sub_type)
-        .bind(&req.method)
-        .bind(&req.client_id)
-        .bind(&req.client_secret)
-        .bind(&req.host)
-        .bind(&req.port)
-        .bind(&req.disable_ssl)
-        .bind(&req.endpoint)
-        .bind(&req.bucket)
-        .bind(&req.domain)
-        .bind(&req.region_id)
-        .bind(&req.sign_name)
-        .bind(&req.template_code)
-        .bind(&req.app_id)
-        .bind(&req.metadata)
-        .bind(&req.issuer_url)
-        .bind(&req.provider_url)
-        .bind(&req.content)
-        .bind(&req.scopes)
-        .fetch_one(pool)
-        .await?;
+    pub async fn create_configuration(
+        pool: &PgPool,
+        mut object: serde_json::Map<String, serde_json::Value>,
+    ) -> AppResult<Provider> {
+        object.retain(|key, _| {
+            Self::configuration_columns().contains(&key.as_str())
+                || matches!(
+                    key.as_str(),
+                    "owner" | "name" | "display_name" | "category" | "type"
+                )
+        });
+        crate::services::provider_configuration_service::prepare_patch(None, &mut object)?;
+        for key in ["owner", "name", "display_name", "category", "type"] {
+            if !object
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+            {
+                return Err(AppError::Validation(
+                    "Provider identity and category/type are required".into(),
+                ));
+            }
+        }
+        object.insert("id".into(), serde_json::json!(Uuid::new_v4().to_string()));
+        let mut tx = pool.begin().await?;
+        let columns = object.keys().map(String::as_str).collect::<Vec<_>>();
+        let quoted = columns
+            .iter()
+            .map(|key| format!("\"{key}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "INSERT INTO providers ({quoted}) SELECT {quoted} FROM jsonb_populate_record(NULL::providers,$1) RETURNING *"
+        );
+        let provider: Provider = sqlx::query_as(&sql)
+            .bind(serde_json::Value::Object(object))
+            .fetch_one(&mut *tx)
+            .await?;
+        crate::services::provider_configuration_service::validate(&provider)?;
+        tx.commit().await?;
+        Ok(provider)
+    }
 
-        Ok(provider.into())
+    /// Caller authorization and immutable owner/name are preserved. Markers and
+    /// partial metadata resolve against the current row under this write lock.
+    pub async fn update_configuration(
+        pool: &PgPool,
+        id: &str,
+        mut object: serde_json::Map<String, serde_json::Value>,
+        expected_owner: Option<&str>,
+    ) -> AppResult<Provider> {
+        object.retain(|key, _| Self::configuration_columns().contains(&key.as_str()));
+        let mut tx = pool.begin().await?;
+        let current: Provider = sqlx::query_as("SELECT * FROM providers WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Provider not found".into()))?;
+        if expected_owner.is_some_and(|owner| owner != current.owner) {
+            return Err(AppError::Conflict(
+                "Provider ownership changed; reload before updating".into(),
+            ));
+        }
+        crate::services::provider_configuration_service::prepare_patch(
+            Some(&current),
+            &mut object,
+        )?;
+        let columns = object.keys().map(String::as_str).collect::<Vec<_>>();
+        let mut setters = columns
+            .iter()
+            .map(|key| format!("\"{key}\"=(jsonb_populate_record(NULL::providers,$2)).\"{key}\""))
+            .collect::<Vec<_>>();
+        setters.push("updated_at=clock_timestamp()".into());
+        let sql = format!(
+            "UPDATE providers SET {} WHERE id=$1 RETURNING *",
+            setters.join(",")
+        );
+        let provider: Provider = sqlx::query_as(&sql)
+            .bind(id)
+            .bind(serde_json::Value::Object(object))
+            .fetch_one(&mut *tx)
+            .await?;
+        crate::services::provider_configuration_service::validate(&provider)?;
+        tx.commit().await?;
+        Ok(provider)
+    }
+
+    fn configuration_columns() -> &'static [&'static str] {
+        &[
+            "display_name",
+            "category",
+            "type",
+            "sub_type",
+            "content",
+            "scopes",
+            "method",
+            "client_id",
+            "client_secret",
+            "client_id2",
+            "client_secret2",
+            "cert",
+            "custom_auth_url",
+            "custom_token_url",
+            "custom_user_info_url",
+            "custom_logo",
+            "user_mapping",
+            "http_headers",
+            "host",
+            "port",
+            "disable_ssl",
+            "title",
+            "receiver",
+            "endpoint",
+            "intranet_endpoint",
+            "bucket",
+            "domain",
+            "path_prefix",
+            "region_id",
+            "sign_name",
+            "template_code",
+            "app_id",
+            "metadata",
+            "idp",
+            "issuer_url",
+            "enable_sign_authn_request",
+            "provider_url",
+        ]
     }
 
     /// Get a provider by name, returning the full Provider entity (includes secrets)

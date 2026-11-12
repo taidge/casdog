@@ -10,13 +10,32 @@ Casdog 开始复核时已有未提交的兼容层、CAS、MCP、Telegram 和 Str
 **结论：已有较广的 IAM 骨架和不少真实实现，但不能称为完整 Casdoor 替代品。**
 路由存在、编译通过、返回 401/500 均不证明功能等价。旧 `_todos.md` 把上一轮的局部修复扩大为整体完成，本次纠正。
 
-## 第十三阶段提交快照（集成中，2026-11-12）
+## 第十四阶段已验收状态（2026-11-12）
 
-本次按要求提交当前工作区，包含下述已验收的第十二阶段，以及第十三阶段尚在集成的代码。新增 Active Directory 的 objectGUID 稳定身份和 UAC 状态转换、Azure Blob/GCS 驱动及测试、Kerberos 密钥表验票和共享防重放状态。Kerberos 组织配置使用迁移 045；组织接口对密钥表脱敏，回传 `***` 保留原值，非法配置整体回滚。
+本阶段补齐 Provider 原生配置闭环、Custom OAuth 用户映射、自定义 scopes、Okta issuer 路径及私网身份源的显式审批。部署须顺序应用迁移至 048，并统一升级实例后启用新配置和审批；旧的无配置指纹 OAuth 待完成请求会失效，用户需重新发起登录，原证明最长五分钟。
 
-第十三阶段尚未完成整体验收：云驱动的正常上传路径、Provider 配置持久化与字段长度迁移、域名路径前缀接线和专用前端仍待完善；新增数据库回归与浏览器端到端回归尚未跑通。独立 Kerby KDC 与 JDK 已实际签发 AES128/AES256 票据，但不能据此宣称 Rust 验票及完整登录流程已验证。以下第十二阶段的 490 次执行和 25 项浏览器结果仅对应其阶段源码，不能直接套用于本提交的第十三阶段增量。
+最终后端回归：42 个测试程序、520 次执行、0 失败、0 忽略；216 个显式 PostgreSQL 测试函数逐名核对通过。前端 7 项原生测试、WASM、Trunk release、浏览器夹具及 36 项真实后端浏览器检查通过，未拦截 API、无运行时错误。新增实际 SMTP/通知/OAuth 登录和绑定流程，保留原 31 项 AD、云存储、WebAuthn、购物车和 Kerberos/MFA 检查。范围及证据见 `docs/phase14-gap-assessment.json`。
 
-提交前重新执行的后端 `cargo check --offline --locked --tests --jobs 1`、前端 7 项原生测试、WASM 编译检查，以及两个浏览器检查脚本和 Kerberos PowerShell 夹具的语法检查均通过。后端检查仅证明代码及测试可通过类型检查，不代表新增数据库回归已经执行。
+- 配置与保密：原生和兼容 CRUD 共用投影、行锁、有效配置校验及掩码保留。新增二级凭据、自定义 URL、映射、发件人、默认接收人、TLS 和短信配置的回读编辑。metadata 按实际消费分类，保留未知隐藏数据；标记无原值、字段改类降密及非法更新整体拒绝。HTTP header 按名称保留，实际充当令牌的备用字段同样脱敏。
+- 实际投递：SMTP/SendGrid 消费 From address 和 From name；SMTP 的 465 端口使用隐式 TLS，其他默认端口要求 STARTTLS，显式兼容禁用时仍优先 STARTTLS，缺能力才允许明文。新增真实握手前 AUTH/DATA/凭据不泄漏回归；原明文发送、短信发送方与通知 header/receiver 也有实际协议检查。尚未实现上游全部 sslMode 枚举。
+- OAuth：原始 UserInfo 支持上游八个字段的点路径映射，新用户实际使用 username、联系人、验证标志和资料；已有账号及 MFA 联系人不被外部登录改写，不按同名或邮箱自动绑定。内置提供商的自定义 scopes 实际进入登录与绑定 URL，无 scope 协议明确拒绝。Okta 完整 issuer 路径生效，保留旧配置兼容。
+- 网络授权：Generic/Okta 使用 DNS 固定、禁止代理与跳转、有界响应和超时。内网访问由真实全局管理员通过专用接口显式批准，绑定当前配置及随机代次；普通租户、虚拟管理员、owner 名称和 metadata 开关均不能授权。改配置、撤销或重新批准使旧流程失效；登录、绑定和 MFA 最终提交均重新校验。IPv6 字面地址解析也补有真实 HTTP 回归。
+- 前端：Glory/Sapid 提供上下文配置、明确轮换/清空、metadata 编辑和审批状态；新增五项真实后端浏览器流程验证配置效果、映射登录及密码确认绑定/解绑。
+
+整体等价仍未证明。下一优先级为更多 Provider 专用语义、完整 SMTP sslMode、OIDC discovery/URL 模板/ID token 验证，以及更多数据库和云目录来源。真实云、支付、Windows 域 IWA、集群和可信硬件验收仍需独立证据；静态声明继续保持 299/299，不等同整体完成率。操作说明见 `docs/provider-configuration.md` 和 `docs/oauth-providers.md`。
+
+## 第十三阶段已验收状态（2026-11-12）
+
+本阶段接通 Active Directory、Azure Blob/GCS 和真实 Kerberos 登录，并补齐 Glory/Sapid 配置与资源访问。部署前须顺序应用迁移至 046；集群实例需统一升级后再启用新认证及存储配置。
+
+最终后端回归：39 个测试程序、503 次执行、0 失败、0 忽略；204 个显式 PostgreSQL 测试函数逐名核对通过。前端 7 项原生测试、WASM 检查、Trunk release、浏览器夹具和 31 项真实后端浏览器检查通过。浏览器没有 API 拦截；新 Kerberos 场景使用独立 KDC/JDK 签发的真实票据，验证 AP-REP、MFA 和 JWT，保留原生 WebAuthn、购物车等既有检查。完整范围及证据见 `docs/phase13-gap-assessment.json`。
+
+- AD：使用二进制 objectGUID 的混合字节序稳定关联账号，缺失 GUID 时沿用上游 sAMAccountName 后备；按 UAC 的 ACCOUNTDISABLE 位转换禁用状态。DN、OU、用户名改变保留本地 UUID、密码、MFA 和提供商绑定。补齐资料、地址、时间及受限字段映射；坏 GUID、时间、含糊 UAC 和不完整分页均整体拒绝。
+- 云存储：Azure SharedKey/SAS、GCS JSON API/服务账号 OAuth/V4 签名接入正常 CRUD、上传、下载、删除及 transcript 路径。公开 Domain/Endpoint 与实际 API 分开，域名路径和 path_prefix 进入真实对象 key；GCS 的对象 API 和令牌地址分别校验并固定 DNS。配置写入和兼容接口脱敏、掩码保留、非法配置原子回滚均有回归。
+- 资源访问：上传返回资源 ID，普通用户可直接刷新、下载和删除本人对象，不依赖管理员列表。私有云链接 15 分钟过期，刷新接口禁止缓存；local/S3 使用 Bearer 认证下载代理，本地上传不再返回本机路径。授权基于固定 UUID、实际租户和当前提供商，拒绝跨租户、他人资源及旧用户名复用接管。
+- Kerberos：校验 Base64 MIT keytab、完整客户端主体、realm、HTTP SPN、密钥版本和真实票据；AES128/256 的双向 AP-REP 已由独立 JDK 验证。PostgreSQL 防重放账本跨连接池共享；普通 JWT/OAuth、MFA、密钥表脱敏和配置撤销的并发检查均已验证。前端使用真实 Negotiate 请求并共用 MFA 流程。
+
+整体功能等价仍未证明。当前 WORKGROUP 机器上的真实票据与浏览器集成不代表已验收 Windows 域自动 IWA；云协议夹具也不代表真实云账号、生产集群或支付机构验收。下一优先级是 Provider 原生配置闭环：已有 Generic OAuth 的自定义 URL、邮件发件人和通知二级凭据缺少正常编辑入口，非存储 metadata 缺少安全回显；user_mapping 尚无运行时消费，内建 OAuth 的自定义 scopes 尚未接入授权请求。此外仍需更多数据库/云目录、云提供商、协议互操作及专用前端。AD 分组函数在上游仍为 TODO；退款仍属可选扩展。静态声明维持 299/299，不换算为整体完成率。配置说明见 `docs/cloud-storage.md` 和 `docs/kerberos.md`。
 
 ## 第十二阶段已验收状态（2026-11-12）
 

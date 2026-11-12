@@ -88,6 +88,9 @@ impl OAuthProviderTrait for AppleProvider {
         })?;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: claims.sub.clone(),
             username: claims.email.clone().unwrap_or(claims.sub.clone()),
             display_name: claims.email.clone().unwrap_or_default(),

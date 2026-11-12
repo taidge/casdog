@@ -111,9 +111,14 @@ async fn policy(
     if !live || c.attempts >= 5 || stamp(&user) != c.credential_stamp {
         return Err(denied());
     }
-    let org: Organization = sqlx::query_as(
-        "SELECT * FROM organizations WHERE name=$1 AND NOT is_deleted AND NOT disable_signin",
-    )
+    // A keytab/configuration revocation must serialize with the transaction
+    // that exchanges a Kerberos MFA proof for a JWT, as it does at first factor.
+    let kerberos = c.context["primary_factor"].as_str() == Some("kerberos");
+    let org: Organization = sqlx::query_as(if kerberos {
+        "SELECT * FROM organizations WHERE name=$1 AND NOT is_deleted AND NOT disable_signin FOR SHARE"
+    } else {
+        "SELECT * FROM organizations WHERE name=$1 AND NOT is_deleted AND NOT disable_signin"
+    })
     .bind(&user.owner)
     .fetch_optional(&mut *conn)
     .await?
@@ -147,6 +152,13 @@ async fn policy(
         None,
     )?;
     let app = if let Some(id) = &c.application_id {
+        if kerberos {
+            sqlx::query("SELECT id FROM applications WHERE id=$1 AND NOT is_deleted FOR SHARE")
+                .bind(id)
+                .fetch_optional(&mut *conn)
+                .await?
+                .ok_or_else(denied)?;
+        }
         let app = application_conn(conn, id).await?;
         if app.organization != user.owner
             || (match c.context["primary_factor"].as_str() {

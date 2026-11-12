@@ -691,6 +691,9 @@ fn is_user_secret(column: &str) -> bool {
 }
 
 fn resource_response(resource: LegacyResource, mut value: Value) -> Value {
+    if resource.table == "providers" {
+        value = crate::services::provider_configuration_service::project(value);
+    }
     if resource.table == "organizations" {
         fn mask_organization(value: &mut Value) {
             match value {
@@ -974,6 +977,18 @@ async fn legacy_add(
         resource.table,
     )
     .await?;
+    if resource.table == "providers" {
+        let provider =
+            crate::services::ProviderService::create_configuration(&pool, object).await?;
+        let object = resource_response(
+            resource,
+            serde_json::to_value(provider)
+                .map_err(|_| AppError::Internal("Provider projection failed".into()))?,
+        );
+        return Ok(Json(
+            json!({"status":"ok","data":true,"data2":object.clone(),"object":object}),
+        ));
+    }
     let insert_columns = body_columns(&object, &columns, &["created_at", "updated_at"])?;
     if insert_columns.is_empty() {
         return Err(AppError::Validation(
@@ -1079,6 +1094,23 @@ async fn legacy_update(
     }
     let lookup = exact_lookup(&existing)?;
     let mut object = prepare_body(resource, body, &columns)?;
+    if resource.table == "providers" {
+        let provider = crate::services::ProviderService::update_configuration(
+            &pool,
+            existing["id"]
+                .as_str()
+                .ok_or_else(|| AppError::Validation("Provider ID missing".into()))?,
+            object,
+            existing["owner"].as_str(),
+        )
+        .await?;
+        let object = resource_response(
+            resource,
+            serde_json::to_value(provider)
+                .map_err(|_| AppError::Internal("Provider projection failed".into()))?,
+        );
+        return Ok(Json(json!({"status":"ok","data":true,"object":object})));
+    }
     if resource.table == "organizations" {
         for field in [
             "master_password",
@@ -1502,7 +1534,10 @@ fn to_casdoor_value(value: Value) -> Value {
                 .into_iter()
                 .map(|(key, value)| {
                     // User-defined map keys are data, not schema field names.
-                    let value = if matches!(key.as_str(), "properties" | "attributes") {
+                    let value = if matches!(
+                        key.as_str(),
+                        "properties" | "attributes" | "user_mapping" | "http_headers"
+                    ) {
                         value
                     } else {
                         to_casdoor_value(value)

@@ -168,7 +168,7 @@ pub async fn begin_link(
     res: &mut Response,
     body: JsonBody<LinkRequest>,
 ) -> AppResult<Json<Value>> {
-    let proof = recent_proof(depot, req)?;
+    let mut proof = recent_proof(depot, req)?;
     let payload = body.into_inner();
     let id = proof["user_id"].as_str().unwrap();
     if payload
@@ -193,6 +193,11 @@ pub async fn begin_link(
         .or(payload.provider)
         .ok_or_else(|| AppError::Validation("Provider required".into()))?;
     let provider = social_login::provider_for_application(&pool, &app, &name).await?;
+    let oauth = social_login::oauth_provider(&provider)?;
+    proof["provider_stamp"] =
+        json!(crate::services::providers::oauth_provider::configuration_stamp(&provider));
+    proof["network_binding"] =
+        json!(social_login::network_binding(&mut *pool.acquire().await?, &provider, false).await?);
     let origin = social_login::public_origin()?;
     let redirect_uri = format!(
         "{origin}/api/auth/{}/callback",
@@ -208,7 +213,7 @@ pub async fn begin_link(
         context: proof,
     };
     let (state, browser) = social_state_service::create_flow(&pool, &flow).await?;
-    let url = social_login::oauth_provider(&provider)?.get_auth_url(&redirect_uri, &state, None);
+    let url = oauth.get_auth_url(&redirect_uri, &state, None);
     social_login::set_cookie(
         res,
         "casdog_oauth_browser",
@@ -244,6 +249,7 @@ pub async fn finalize_link(
     if current.id != provider.id {
         return Err(denied("Provider configuration changed"));
     }
+    social_login::lock_provider_stamp(&mut tx, &flow.context, &current).await?;
     let id = flow
         .context
         .get("user_id")

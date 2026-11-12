@@ -209,6 +209,23 @@ pub fn page(app: AppState) -> Element {
                 .build(scope)
             })
         });
+        let kerberos = when(scope.bond(move || mode.get().is_empty()), move || {
+            widget(move |scope| {
+                stack((label("Use your browser's domain credentials for Kerberos. No username or password is sent by this button."),action(scope,"Sign in with Kerberos",busy,message,move ||async move {
+                let reference=if application.get().is_empty(){"admin/app-built-in".to_string()}else{application.get()};
+                let context=login_context(String::new(),String::new(),reference.clone());
+                let mut url=url::Url::parse(&api::build_url(&app.api_base.get(),"/api/kerberos-login")).or_else(|_|url::Url::parse(&format!("{}{}",web_sys::window().and_then(|w|w.location().origin().ok()).unwrap_or_default(),api::build_url(&app.api_base.get(),"/api/kerberos-login")))).map_err(|_|"Invalid Kerberos endpoint")?;
+                url.query_pairs_mut().append_pair("application",&reference);
+                for key in ["response_type","client_id","redirect_uri","scope","state","nonce","code_challenge","code_challenge_method"] {
+                    let alias=match key {"response_type"=>"responseType","client_id"=>"clientId","redirect_uri"=>"redirectUri","code_challenge"=>"codeChallenge","code_challenge_method"=>"codeChallengeMethod",_=>key};
+                    if let Some(value)=context[alias].as_str(){url.query_pairs_mut().append_pair(key,value);}
+                }
+                let value=api::kerberos_login(url.as_str()).await?;
+
+                accept(app,value,mode,methods,method,password_value)
+            }))).build(scope)
+            })
+        });
         let challenge = when(scope.bond(move || !mode.get().is_empty()), move || {
             widget(move |scope| {
                 let choices = methods.get().into_iter().map(|s| (s.clone(), s)).collect();
@@ -291,6 +308,7 @@ pub fn page(app: AppState) -> Element {
         stack((
             heading("Sign in"),
             credentials,
+            kerberos,
             challenge,
             notice(message),
             action(scope, "Sign in", busy, message, move || async move {

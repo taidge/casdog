@@ -8,6 +8,10 @@ const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 const { chromium } = require('../web/node_modules/playwright');
 const { startDirectory } = require('./ldap-browser-fixture.cjs');
+const { startCloudStorage }=require('./cloud-browser-fixture.cjs');
+const {startKerberos}=require('./kerberos-browser-fixture.cjs');
+const {startOAuthDirectory}=require('./oauth-browser-fixture.cjs');
+const {startSmtpRelay}=require('./smtp-browser-fixture.cjs');
 
 const project = path.resolve(__dirname, '..');
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {
@@ -15,7 +19,7 @@ const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--f
   encoding: 'utf8',
   windowsHide: true,
 }));
-const artifacts = path.join(metadata.target_directory, 'phase12', 'browser-e2e');
+const artifacts = path.join(metadata.target_directory, 'phase14', 'browser-e2e');
 const origin = process.env.CASDOG_E2E_BASE_URL || 'http://localhost:18085';
 const database = process.env.CASDOG_TEST_DATABASE_URL;
 assert.ok(database, 'CASDOG_TEST_DATABASE_URL must identify a migrated disposable database');
@@ -47,7 +51,9 @@ function browserTrace(){
 
 async function main() {
   await fs.mkdir(artifacts, { recursive: true });
-  const mail = [];
+  const mail = [],notificationRequests=[];
+  const oauthDirectory=await startOAuthDirectory(),smtpRelay=await startSmtpRelay();
+  const cloud=await startCloudStorage();
   const scimToken=crypto.randomBytes(24).toString('hex'),scimRequests=[];
   let scimUsers=[];
   const appBundle = Buffer.from(JSON.stringify({manifest:{id:'browser-portal',type:'app',version:'1.0',variables:[{name:'appUrl',label:{en:'Application URL'},type:'url',required:true}]},files:{'application.json':{redirectUris:['{{appUrl}}/callback']}}}));
@@ -60,6 +66,7 @@ async function main() {
   ]};
   const mailServer = http.createServer(async (request, response) => {
     const pathname = new URL(request.url, 'http://localhost').pathname;
+    if(pathname==='/notifications'&&request.method==='POST'){const chunks=[];for await(const chunk of request)chunks.push(chunk);notificationRequests.push({headers:request.headers,body:JSON.parse(Buffer.concat(chunks).toString())});response.writeHead(200,{'Content-Type':'application/json'});response.end('{}');return;}
     if(request.method==='GET'&&pathname==='/scim/v2/Users'){
       scimRequests.push(request.headers.authorization);
       if(request.headers.authorization!==`Bearer ${scimToken}`){response.writeHead(401);response.end('{}');return;}
@@ -82,14 +89,19 @@ async function main() {
   await new Promise(resolve => mailServer.listen(0, '127.0.0.1', resolve));
   const mailEndpoint = `http://127.0.0.1:${mailServer.address().port}/mail`;
   let directoryUsername='';
+  const adGuidTail=crypto.randomBytes(6).toString('hex'),adGuid=`00112233-4455-6677-8899-${adGuidTail}`;
+  let adState={guidTail:adGuidTail,name:'',dn:'cn=browser,ou=initial,dc=example,dc=test',disabled:false};
+  const adDirectory=await startDirectory(()=>adState.name,()=>adState);
   const directory=await startDirectory(()=>directoryUsername);
-  let server, browser, page, runtimeImage;
+  let server, browser, page, runtimeImage, kerberos;
   let startupError;
   const serverOutput = [];
   const checks = [];
+  checks.push=(...values)=>{for(const value of values)console.log(`PASS: ${value}`);return Array.prototype.push.apply(checks,values);};
   const runtimeErrors = [];
   const secretsThatMustNotBeLogged=[];
   try {
+    kerberos=await startKerberos(project,metadata.target_directory);
     if (!process.env.CASDOG_E2E_BASE_URL) {
       const url = new URL(origin);
       const probe = net.createServer();
@@ -154,6 +166,7 @@ async function main() {
       return value;
     }
     async function fill(name, value, secret = false) {
+      await page.evaluate(() => new Promise(requestAnimationFrame));
       const input = secret ? page.getByLabel(name, { exact: true }) : page.getByRole('textbox', { name, exact: true });
       await input.fill(value);
       await page.evaluate(() => new Promise(requestAnimationFrame));
@@ -223,14 +236,15 @@ async function main() {
     await navigate('Site settings','Site settings');
     await page.getByRole('button',{name:'Load site settings',exact:true}).click();
     await page.getByText('Site settings loaded.',{exact:true}).waitFor();
-    const previousPool=(await api('GET','/api/get-setting',undefined,admin.token)).data.runtime.generation;
+    const previousSettings=(await api('GET','/api/get-setting',undefined,admin.token)).data;
+    const previousPool=previousSettings.runtime.generation,desiredOpen=previousSettings.runtime.effectiveMaxOpen===8?9:8;
     await fill('Audit retention days','30');
-    await fill('Maximum open connections','8');await fill('Maximum idle connections','1');await fill('Connection lifetime (seconds)','60');
+    await fill('Maximum open connections',String(desiredOpen));await fill('Maximum idle connections','1');await fill('Connection lifetime (seconds)','60');
     await page.getByRole('button',{name:'Save site settings',exact:true}).click();
     await page.getByText('Audit retention and connection pool settings are active.',{exact:true}).waitFor();
     const poolSettings=(await api('GET','/api/get-setting',undefined,admin.token)).data;
     assert.equal(poolSettings.recordRetentionDays,30);assert.equal(poolSettings.runtime.poolSettingsApplied,true);
-    assert.equal(poolSettings.runtime.effectiveMaxOpen,8);assert.equal(poolSettings.runtime.effectiveMaxIdle,1);assert.notEqual(poolSettings.runtime.generation,previousPool);
+    assert.equal(poolSettings.runtime.effectiveMaxOpen,desiredOpen);assert.equal(poolSettings.runtime.effectiveMaxIdle,1);assert.notEqual(poolSettings.runtime.generation,previousPool);
     await page.screenshot({path:path.join(artifacts,'site-settings.png'),fullPage:true});
     checks.push('Global settings UI applies real SQLx and Diesel pool limits to a new generation while retaining active audit retention');
     scimUsers=[{schemas:['urn:ietf:params:scim:schemas:core:2.0:User'],id:`scim-id-${suffix}`,userName:`scim-ui-${suffix}`,displayName:'SCIM browser user',active:true,title:'SCIM engineer',locale:'en',preferredLanguage:'en',addresses:[{primary:true,formatted:'Browser work address',locality:'Shanghai',region:'SH'}]}];
@@ -250,6 +264,138 @@ async function main() {
     assert.deepEqual(scimProfile.address,['Browser work address']);assert.ok(scimRequests.includes(`Bearer ${scimToken}`));
     await page.screenshot({path:path.join(artifacts,'scim-syncer.png'),fullPage:true});
     checks.push('SCIM source configured and run through Glory imports a real authenticated HTTP directory user and standard profile fields');
+    adState.name=`ad-ui-${suffix}`;
+    await page.getByRole('button',{name:'New resource',exact:true}).click();
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'Active Directory'});
+    await page.getByText('Directory synchronization is read-only.',{exact:false}).waitFor();
+    assert.equal(await page.getByRole('combobox',{name:'Database type',exact:true}).isVisible(),false);
+    await fill('Owner','built-in');await fill('Name',`browser-ad-${suffix}`);await fill('Organization','built-in');
+    await fill('Host',adDirectory.url);await fill('Base DN','dc=example,dc=test');await fill('Bind DN','cn=service,dc=example,dc=test');await fill('Bind password','search-password',true);
+    assert.equal(await page.getByRole('checkbox',{name:'Read external source only',exact:true}).isChecked(),true);
+    await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:`browser-ad-${suffix}`,exact:true}).click();
+    const runAd=async()=>{const completed=page.waitForResponse(response=>/\/api\/syncers\/[^/]+\/run$/.test(new URL(response.url()).pathname)&&response.request().method()==='POST');await page.getByRole('button',{name:'Run selected syncer',exact:true}).click();const response=await completed;assert.ok(response.ok(),await response.text());await page.getByText('Synchronization completed.',{exact:false}).waitFor();};
+    await runAd();
+    const adAccount=(await api('GET',`/api/get-user?id=built-in/${adState.name}`,undefined,admin.token)).data;
+    assert.equal(adAccount.externalId||adAccount.external_id,adGuid);
+    adState={...adState,name:`ad-renamed-${suffix}`,dn:'cn=renamed,ou=moved,dc=example,dc=test',disabled:true};
+    await runAd();
+    const movedAd=await api('GET',`/api/users/${adAccount.id}`,undefined,admin.token);
+    assert.equal(movedAd.name,adState.name);assert.equal(movedAd.is_forbidden,true);assert.equal(movedAd.external_id,adGuid);
+    await page.screenshot({path:path.join(artifacts,'ad-syncer.png'),fullPage:true});
+    checks.push('Active Directory configured through the directory form imports binary GUID, then preserves its user UUID across DN/name moves and applies the account-disabled bit');
+    for(const [kind,label,secret] of [['Azure Blob','azure',cloud.key],['Google Cloud Storage','gcs',JSON.stringify(cloud.serviceAccount)],['MinIO','minio','browser-minio-secret']]){
+      const providerName=`browser-${label}-${suffix}`,display=`Browser ${label} storage`;
+      secretsThatMustNotBeLogged.push(secret);
+      await navigate('Providers','Providers');await page.getByRole('button',{name:'New resource',exact:true}).click();
+      await page.getByRole('combobox',{name:'Category',exact:true}).selectOption({label:'Storage'});
+      await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:kind});
+      await fill('Owner','built-in');await fill('Name',providerName);await fill('Display name',display);
+      await fill('Client ID / API key',label==='azure'?'browseraccount':'browser-access');await fill('Client secret',secret,true);
+      await fill('Bucket / container','browser-fixtures');await fill('Storage region','us-east-1');await fill('Storage path prefix','ui-prefix');
+      if(label==='minio')await fill('Endpoint URL / paths',cloud.origin);
+      else await fill('Metadata (JSON)',JSON.stringify({storageApiEndpoint:cloud.origin}));
+      await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+      await page.getByRole('button',{name:display,exact:true}).click();assert.ok(['','***'].includes(await page.getByLabel('Client secret',{exact:true}).inputValue()));
+      await fill('Display name',display+' edited');
+      await page.getByRole('button',{name:'Save resource',exact:true}).click();await page.getByText('Resource saved.',{exact:true}).waitFor();
+      const filename=`browser-${label}-${suffix}.txt`,payload=Buffer.from(`Real ${kind} browser storage bytes`);
+      const upload=await context.request.post(`${origin}/api/upload-resource`,{headers:{Authorization:`Bearer ${admin.token}`},multipart:{owner:'built-in',provider:`built-in/${providerName}`,file:{name:filename,mimeType:'text/plain',buffer:payload}}});
+      assert.ok(upload.ok(),await upload.text());
+      const resource=(await api('GET','/api/resources',undefined,admin.token)).data.find(value=>value.file_name===filename);assert.ok(resource);
+      await navigate('Resources','Resources');await fill('Filter resources',filename);await page.getByRole('button',{name:resource.name,exact:true}).click();
+      const freshResponse=page.waitForResponse(response=>response.url().includes(`/api/resource-url/${resource.id}`));
+      await page.getByRole('button',{name:'Get fresh resource URL',exact:true}).click();const fresh=await(await freshResponse).json();assert.ok(fresh.url);assert.equal(fresh.access,label==='minio'?'proxy':'signed');
+      const [download]=await Promise.all([page.waitForEvent('download'),page.getByRole('button',{name:'Download selected resource',exact:true}).click()]);
+      const downloaded=await download.createReadStream();const chunks=[];for await(const chunk of downloaded)chunks.push(chunk);assert.deepEqual(Buffer.concat(chunks),payload);
+      await page.getByRole('button',{name:'Delete selected resource',exact:true}).click();await page.getByText('Resource deleted.',{exact:true}).waitFor();
+      assert.ok(!(await api('GET','/api/resources',undefined,admin.token)).data.some(value=>value.id===resource.id));
+      checks.push(`${kind} provider saves through the UI without exposing or clearing credentials; real upload, fresh access URL, bearer-backed browser download and remote object deletion succeed`);
+    }
+    const oauthProviderName=`browser-custom-oauth-${suffix}`,oauthDisplay='Browser Custom OAuth',oauthSecondary=crypto.randomBytes(24).toString('hex');
+    secretsThatMustNotBeLogged.push(oauthDirectory.clientSecret,oauthSecondary,smtpRelay.password);
+    await navigate('Providers','Providers');await page.getByRole('button',{name:'New resource',exact:true}).click();
+    await page.getByRole('combobox',{name:'Category',exact:true}).selectOption({label:'OAuth'});
+    await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'Custom'});
+    await fill('Owner','built-in');await fill('Name',oauthProviderName);await fill('Display name',oauthDisplay);
+    await fill('Client ID / API key',oauthDirectory.clientId);await fill('Client secret',oauthDirectory.clientSecret,true);await fill('Secondary client secret',oauthSecondary,true);
+    await fill('OAuth authorization URL',oauthDirectory.origin+'/authorize');await fill('OAuth token URL',oauthDirectory.origin+'/token');await fill('OAuth user info URL',oauthDirectory.origin+'/userinfo');
+    await fill('Scopes / discovery targets','profile contacts browser.custom');await fill('OAuth user mapping (JSON)',JSON.stringify(oauthDirectory.mapping));await fill('HTTP headers (JSON)',JSON.stringify({'X-Browser-Config':oauthSecondary}));
+    const saveProvider=async(id)=>{const pending=page.waitForResponse(response=>response.request().method()===(id?'PUT':'POST')&&new URL(response.url()).pathname===(id?`/api/providers/${id}`:'/api/providers'));await page.getByRole('button',{name:'Save resource',exact:true}).click();const response=await pending;assert.ok(response.ok(),await response.text());await page.getByText('Resource saved.',{exact:true}).waitFor();return response.json();};
+    const createdOAuth=await saveProvider();
+    await page.getByRole('button',{name:oauthDisplay,exact:true}).click();await page.waitForFunction(()=>document.querySelector('[aria-label="Client secret"]')?.value==='***');
+    assert.equal(await page.getByLabel('Secondary client secret',{exact:true}).inputValue(),'***');
+    assert.deepEqual(JSON.parse(await page.getByRole('textbox',{name:'OAuth user mapping (JSON)',exact:true}).inputValue()),oauthDirectory.mapping);
+    await page.getByRole('checkbox',{name:'Clear saved secondary client secret',exact:true}).check();await saveProvider(createdOAuth.id);
+    assert.ok(!(await api('GET',`/api/providers/${createdOAuth.id}`,undefined,admin.token)).client_secret2);
+    await fill('Secondary client secret',oauthSecondary,true);await saveProvider(createdOAuth.id);
+    await fill('Client secret','',true);await fill('Display name',oauthDisplay+' reviewed');await saveProvider(createdOAuth.id);
+    const reviewedOAuth=await api('GET',`/api/providers/${createdOAuth.id}`,undefined,admin.token);assert.equal(reviewedOAuth.client_secret,'***');assert.deepEqual(reviewedOAuth.http_headers,{'X-Browser-Config':'***'});assert.ok(!JSON.stringify(reviewedOAuth).includes(oauthSecondary));
+    await page.getByRole('button',{name:'Approve private OAuth endpoints',exact:true}).click();await page.getByText('Private OAuth endpoints approved.',{exact:true}).waitFor();
+    const approvalStatus=page.waitForResponse(response=>new URL(response.url()).pathname===`/api/providers/${createdOAuth.id}/network-approval`&&response.request().method()==='GET');
+    await page.getByRole('button',{name:'Load private OAuth approval',exact:true}).click();const approvalValue=await(await approvalStatus).json();assert.equal(approvalValue.allow_private,true);assert.equal(approvalValue.stale,false);await page.getByText('Private OAuth endpoints are approved for the saved configuration.',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Revoke private OAuth approval',exact:true}).click();await page.getByText('Private OAuth endpoint approval revoked.',{exact:true}).waitFor();assert.equal((await api('GET',`/api/providers/${createdOAuth.id}/network-approval`,undefined,admin.token)).allow_private,false);
+    await page.getByRole('button',{name:'Approve private OAuth endpoints',exact:true}).click();await page.getByText('Private OAuth endpoints approved.',{exact:true}).waitFor();
+    const oauthApp=await api('POST','/api/applications',{owner:'admin',name:`browser-custom-app-${suffix}`,display_name:'Browser custom identity',organization:'built-in',enable_idp_signup:true,enable_signup:true,providers:[{name:`built-in/${oauthProviderName}`,canSignIn:true,canSignUp:true,canUnlink:true}]},admin.token);
+    checks.push('Custom OAuth URLs, scopes and object mapping save in the Provider UI; secondary credentials rotate/clear, blank primary edits retain secrets, and a real global administrator explicitly approves private endpoints');
+    const smtpName=`browser-smtp-${suffix}`;
+    await page.getByRole('button',{name:'New resource',exact:true}).click();await page.getByRole('combobox',{name:'Category',exact:true}).selectOption({label:'Email'});await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'SMTP'});
+    await fill('Owner','built-in');await fill('Name',smtpName);await fill('Display name','Browser SMTP relay');await fill('Client ID / API key',smtpRelay.username);await fill('Client secret',smtpRelay.password,true);
+    await fill('From address','sender@browser.test');await fill('From name','Browser Sender');await fill('Host / Endpoint',smtpRelay.host);await fill('Port',String(smtpRelay.port));await page.getByRole('checkbox',{name:'Allow plaintext SMTP',exact:true}).check();
+    const smtpProvider=await saveProvider();await page.getByRole('button',{name:'Browser SMTP relay',exact:true}).click();await page.waitForFunction(()=>document.querySelector('[aria-label="From name"]')?.value==='Browser Sender');
+    await fill('Client secret','',true);await fill('Display name','Browser SMTP retained');await saveProvider(smtpProvider.id);
+    await api('POST','/api/send-email',{provider:smtpProvider.id,to:'recipient@browser.test',title:'UI configured SMTP',content:'Real SMTP body'},admin.token);
+    assert.ok(smtpRelay.authentications.some(value=>value.accepted));assert.equal(smtpRelay.messages.length,1);assert.match(smtpRelay.messages[0],/From: (?:"Browser Sender"|Browser Sender) <sender@browser\.test>/);assert.match(smtpRelay.messages[0],/Real SMTP body/);
+    checks.push('SMTP Provider UI persists separate From address/name and explicit TLS setting; blank password edit preserves credentials and the real SMTP relay authenticates and receives the configured From header');
+    const notifyName=`browser-notify-${suffix}`,notifySecret=crypto.randomBytes(24).toString('hex');secretsThatMustNotBeLogged.push(notifySecret);
+    await page.getByRole('button',{name:'New resource',exact:true}).click();await page.getByRole('combobox',{name:'Category',exact:true}).selectOption({label:'Notification'});await page.getByRole('combobox',{name:'Type',exact:true}).selectOption({label:'Custom HTTP'});
+    await fill('Owner','built-in');await fill('Name',notifyName);await fill('Display name','Browser private notification');await fill('Endpoint URL / paths',`http://127.0.0.1:${mailServer.address().port}/notifications`);await fill('Default receiver','browser-room');await fill('Metadata (JSON)',JSON.stringify([['X-Browser-Secret',notifySecret]]));
+    const notifyProvider=await saveProvider();await page.getByRole('button',{name:'Browser private notification',exact:true}).click();await page.waitForFunction(()=>{try{return JSON.parse(document.querySelector('[aria-label="Metadata (JSON)"]')?.value)?.[0]?.[1]==='***';}catch{return false;}});
+    const maskedNotify=await api('GET',`/api/providers/${notifyProvider.id}`,undefined,admin.token);assert.deepEqual(JSON.parse(maskedNotify.metadata),[['X-Browser-Secret','***']]);assert.ok(!JSON.stringify(maskedNotify).includes(notifySecret));
+    await fill('Display name','Browser private notification retained');await saveProvider(notifyProvider.id);
+    await api('POST','/api/send-notification',{provider:notifyProvider.id,title:'Metadata retained',content:'Real notification'},admin.token);assert.equal(notificationRequests.at(-1).headers['x-browser-secret'],notifySecret);assert.equal(notificationRequests.at(-1).body.receiver,'browser-room');
+    const notifySecondary=crypto.randomBytes(24).toString('hex');secretsThatMustNotBeLogged.push(notifySecondary);
+    await fill('Secondary client secret',JSON.stringify([['X-Browser-Secondary',notifySecondary]]),true);await saveProvider(notifyProvider.id);
+    await fill('Secondary client secret','',true);await fill('Display name','Browser notification secondary retained');await saveProvider(notifyProvider.id);
+    await api('POST','/api/send-notification',{provider:notifyProvider.id,title:'Secondary retained',content:'Real secondary notification'},admin.token);assert.equal(notificationRequests.at(-1).headers['x-browser-secondary'],notifySecondary);assert.equal(notificationRequests.at(-1).headers['x-browser-secret'],undefined);
+    await page.getByRole('checkbox',{name:'Clear saved secondary client secret',exact:true}).check();await saveProvider(notifyProvider.id);
+    await page.getByRole('checkbox',{name:'Clear all saved metadata',exact:true}).check();await saveProvider(notifyProvider.id);
+    assert.ok(!(await api('GET',`/api/providers/${notifyProvider.id}`,undefined,admin.token)).metadata);
+    await api('POST','/api/send-notification',{provider:notifyProvider.id,title:'Metadata removed',content:'Real notification after explicit removal'},admin.token);assert.equal(notificationRequests.at(-1).headers['x-browser-secret'],undefined);assert.equal(notificationRequests.at(-1).headers['x-browser-secondary'],undefined);
+    checks.push('Notification metadata and secondary headers remain masked and effective after ordinary UI edits; default receiver and credential precedence reach the real server, and explicit clear removes the previous secrets');
+    const keytab=kerberos.keytab;secretsThatMustNotBeLogged.push(keytab);
+    const organizationRecord=(await api('GET','/api/organizations',undefined,admin.token)).data.find(value=>value.name==='built-in');
+    await navigate('Organizations','Organizations');await page.getByRole('button',{name:organizationRecord.display_name||organizationRecord.name,exact:true}).click();
+    await page.waitForFunction(expected=>document.querySelector('input[aria-label="Kerberos realm"]')?.value===expected,organizationRecord.kerberos_realm||'');
+    await fill('Kerberos realm',kerberos.realm);await fill('Kerberos KDC host',`127.0.0.1:${kerberos.port}`);await fill('Kerberos HTTP service',kerberos.serviceName);await fill('Kerberos keytab (base64)',keytab,true);
+    const saveKerberos=async()=>{const pending=page.waitForResponse(response=>new URL(response.url()).pathname===`/api/organizations/${organizationRecord.id}`&&response.request().method()==='PUT');await page.getByRole('button',{name:'Save resource',exact:true}).click();const response=await pending;const body=response.request().postDataJSON();console.log(`Kerberos organization save: status=${response.status()} realm=${body.kerberos_realm} kdc=${body.kerberos_kdc_host} service=${body.kerberos_service_name} keytabChars=${String(body.kerberos_keytab||'').length}`);assert.ok(response.ok(),await response.text());await page.getByText('Resource saved.',{exact:true}).waitFor();};
+    await saveKerberos();
+    await page.waitForFunction(()=>document.querySelector('input[aria-label="Kerberos keytab (base64)"]')?.value==='***');
+    await fill('Kerberos KDC host',`localhost:${kerberos.port}`);await saveKerberos();
+    const kerberosOrg=await api('GET','/api/get-organization?id=admin/built-in',undefined,admin.token);assert.equal(kerberosOrg.data.kerberosKeytab,'***');
+    const challengeContext=await browser.newContext(),challengePage=await challengeContext.newPage();
+    try {
+      await challengePage.goto(origin);await challengePage.getByRole('button',{name:'Sign in',exact:true}).first().click();
+      await challengePage.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
+      await challengePage.getByRole('textbox',{name:'Username',exact:true}).fill('this-must-not-be-proof');
+      await challengePage.getByRole('textbox',{name:'Application',exact:true}).fill('admin/app-built-in');
+      const rawChallenge=await challengeContext.request.get(`${origin}/api/kerberos-login?application=admin%2Fapp-built-in`);
+      assert.equal(rawChallenge.status(),401);assert.equal(rawChallenge.headers()['www-authenticate'],'Negotiate');
+      // Chromium may keep Negotiate 401s inside its OS authentication stack.
+      // This isolated page observes the real request; the API request above
+      // verifies the unmodified wire challenge without waiting for OS credentials.
+      const authNetwork=await challengeContext.newCDPSession(challengePage);await authNetwork.send('Network.enable');
+      let resolveChallenge;const challengeHeaders=new Promise(resolve=>{resolveChallenge=resolve;});
+      authNetwork.on('Network.responseReceivedExtraInfo',event=>{if(event.statusCode===401&&Object.entries(event.headers).some(([name,value])=>name.toLowerCase()==='www-authenticate'&&String(value).startsWith('Negotiate')))resolveChallenge(true);});
+      const negotiation=challengePage.waitForRequest(request=>new URL(request.url()).pathname==='/api/kerberos-login',{timeout:5000});
+      const click=challengePage.getByRole('button',{name:'Sign in with Kerberos',exact:true}).click({timeout:5000}).catch(()=>{});
+      const challengeRequest=await negotiation;
+      assert.equal(new URL(challengeRequest.url()).searchParams.has('name'),false);assert.equal(challengeRequest.headers().authorization,undefined);
+      const cdpObserved=await Promise.race([challengeHeaders,new Promise(resolve=>setTimeout(()=>resolve(false),1500))]);
+      console.log(`Kerberos: raw wire 401 Negotiate verified; browser challenge headers exposed by CDP: ${cdpObserved}`);
+      await authNetwork.detach();
+    } finally {await challengeContext.close();}
+    checks.push('Kerberos organization fields retain a masked keytab; real HTTP returns 401 Negotiate and an isolated browser invokes the real endpoint without username or bearer proof (automatic domain IWA is not claimed)');
     const logProvider=await api('POST','/api/providers',{owner:'built-in',name:`browser-log-${suffix}`,display_name:'Browser OpenClaw telemetry',category:'Log',type:'Agent',sub_type:'OpenClaw'},admin.token);
     const logApplication=await api('POST','/api/applications',{owner:'admin',name:`browser-telemetry-${suffix}`,display_name:'Browser telemetry',organization:'built-in'},admin.token);
     await navigate('Telemetry','Telemetry receivers');
@@ -269,11 +415,12 @@ async function main() {
     secretsThatMustNotBeLogged.push(currentExporter);assert.notEqual(exporter,currentExporter);
     assert.equal((await exportTrace(exporter)).status(),401);assert.equal((await exportTrace(currentExporter)).status(),200);
     assert.equal(await page.getByLabel('Exporter token',{exact:true}).getAttribute('type'),'password');
-    await page.getByRole('button',{name:/^Revoke receiver /}).first().click();
+    const receiverId=(await api('GET','/api/telemetry/receivers',undefined,admin.token)).data.find(value=>value.provider===logProvider.id).id;
+    await page.getByRole('button',{name:`Revoke receiver ${receiverId}`,exact:true}).click();
     await page.getByText('Receiver revoked.',{exact:true}).waitFor();
     assert.equal((await exportTrace(currentExporter)).status(),401);
     assert.equal(await page.getByLabel('Exporter token',{exact:true}).count(),0);
-    await page.getByText(/^Receiver .* · built-in · Disabled$/).waitFor();
+    await page.getByText(`Receiver ${receiverId} · built-in · Disabled`,{exact:true}).waitFor();
     await page.screenshot({path:path.join(artifacts,'telemetry-revoked.png'),fullPage:true});
     checks.push('Telemetry UI approves a real receiver; OTLP protobuf persists an Entry and rotation/revocation immediately reject old exporter tokens');
 
@@ -375,6 +522,23 @@ async function main() {
     await page.getByText('Profile saved.', { exact: true }).waitFor();
     assert.equal((await api('GET', '/api/get-account', undefined, token)).display_name, 'Browser profile saved');
     checks.push('Profile changes persisted through the authenticated API');
+
+    const localUserId=(await api('GET','/api/get-account',undefined,token)).id;
+    await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();
+    oauthDirectory.setIdentity({id:`login-subject-${suffix}`,username:`custom-user-${suffix}`,displayName:'Mapped Custom Person',email:`custom-${suffix}@example.test`,avatarUrl:'https://example.test/avatar.png'});
+    await fill('Application',oauthApp.id);await page.getByRole('button',{name:`Sign in with ${oauthDisplay} reviewed`,exact:true}).click();await page.getByRole('heading',{name:'Identity and access management'}).waitFor();
+    const customToken=await page.evaluate(()=>JSON.parse(localStorage.getItem('casdog.auth.token'))),customAccount=await api('GET','/api/get-account',undefined,customToken);
+    assert.equal(customAccount.name,`custom-user-${suffix}`);assert.equal(customAccount.display_name,'Mapped Custom Person');assert.equal(customAccount.email,`custom-${suffix}@example.test`);assert.equal(customAccount.email_verified,true);assert.equal(customAccount.phone,'+14155552671');assert.equal(customAccount.avatar,'https://example.test/avatar.png');assert.equal(customAccount.properties.oauth_profile.phoneVerified,true);assert.equal(customAccount.mfa_enabled,false);
+    assert.equal(customAccount.provider_ids[`oauth:${createdOAuth.id}`],`login-subject-${suffix}`);assert.ok(oauthDirectory.requests.some(value=>value.kind==='authorize'&&value.scope==='profile contacts browser.custom'));
+    checks.push('Provider UI configured Generic OAuth performs real browser authorization, server-side token/user-info requests and maps nested stable ID, name, verified contacts and avatar into a normal authenticated account');
+    await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.getByRole('heading',{name:'Sign in',exact:true}).waitFor();await signIn(password);await page.getByRole('heading',{name:'Identity and access management'}).waitFor();token=await page.evaluate(()=>JSON.parse(localStorage.getItem('casdog.auth.token')));
+    oauthDirectory.setIdentity({id:`bound-subject-${suffix}`,username:`bound-${suffix}`,displayName:'Remote Binding',email:`binding-${suffix}@example.test`,avatarUrl:'https://example.test/binding.png'});
+    await navigate('Account','Account settings');await page.getByRole('button',{name:'Linked accounts',exact:true}).click();await fill('Application',oauthApp.id);await page.getByRole('button',{name:'Load sign-in providers',exact:true}).click();
+    await page.getByRole('button',{name:`Link ${oauthDisplay} reviewed`,exact:true}).click();await page.getByRole('heading',{name:'Linked accounts',exact:true}).waitFor();await page.getByRole('button',{name:`Unlink ${oauthDisplay} reviewed`,exact:true}).waitFor();
+    assert.equal((await api('GET','/api/get-account',undefined,token)).provider_ids[`oauth:${createdOAuth.id}`],`bound-subject-${suffix}`);assert.equal((await api('GET','/api/get-account',undefined,token)).id,localUserId);
+    assert.equal(oauthDirectory.requests.filter(value=>value.kind==='authorize').length,2);assert.ok(oauthDirectory.requests.filter(value=>value.kind==='authorize').every(value=>value.scope==='profile contacts browser.custom'));assert.equal(oauthDirectory.requests.filter(value=>value.kind==='token').length,2);assert.equal(oauthDirectory.requests.filter(value=>value.kind==='userinfo').length,2);
+    await fill('Current password',password,true);await page.getByRole('button',{name:`Unlink ${oauthDisplay} reviewed`,exact:true}).click();await page.getByText('Account unlinked.',{exact:true}).waitFor();assert.equal((await api('GET','/api/get-account',undefined,token)).provider_ids?.[`oauth:${createdOAuth.id}`],undefined);
+    checks.push('Existing local account links a distinct mapped OAuth subject through the real authorization server and explicitly unlinks it with password proof without changing the local user UUID');
 
     const wallet=await api('POST','/api/providers',{owner:'built-in',name:`browser-wallet-${suffix}`,display_name:'Browser wallet',category:'Payment',type:'Balance'},admin.token);
     const billingRole=await api('POST','/api/roles',{owner:'built-in',name:`browser-paid-${suffix}`,display_name:'Browser paid member',is_enabled:true},admin.token);
@@ -729,6 +893,38 @@ async function main() {
     assert.equal(reusedRecovery.ok(),false);
     assert.equal(await page.evaluate(()=>localStorage.getItem('casdog.auth.token')),null);
     checks.push('Trusted local JSON MFA backup restores through the admin UI, keeps secrets out of browser storage, enforces password MFA and consumes the original recovery code once');
+    await context.request.post(`${origin}/api/auth/password/session/cancel`,{headers:{Origin:origin},data:{}});
+    const kerberosAdmin=await api('POST','/api/login',{owner:'built-in',name:'admin',password:'123'});
+    const kerberosOrgName=`browser-kerberos-org-${suffix}`;
+    await api('POST','/api/organizations',{owner:'admin',name:kerberosOrgName,display_name:'Kerberos browser tenant',kerberos_realm:kerberos.realm,kerberos_kdc_host:`127.0.0.1:${kerberos.port}`,kerberos_service_name:kerberos.serviceName,kerberos_keytab:kerberos.keytab},kerberosAdmin.token);
+    const kerberosUserId=crypto.randomUUID(),kerberosSeed=Array.from(crypto.randomBytes(32),byte=>'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'[byte&31]).join('');
+    const kerberosRestore=await api('POST',`/api/upload-users-with-mfa?owner=${encodeURIComponent(kerberosOrgName)}`,[{id:kerberosUserId,owner:kerberosOrgName,name:'alice',displayName:'Kerberos browser user',password:'KerberosLocalPassword42!',passwordType:'plain',mfaEnabled:true,preferredMfaType:'app',totpSecret:kerberosSeed}],kerberosAdmin.token);
+    assert.equal(kerberosRestore.failed,0,kerberosRestore.errors?.join('; '));assert.equal(kerberosRestore.created,1);
+    const kerberosTotpReadyAt=(Math.floor(Date.now()/30000)+2)*30000+1000;
+    const kerberosProfile=await api('GET',`/api/users/${kerberosUserId}`,undefined,kerberosAdmin.token);assert.equal(kerberosProfile.owner,kerberosOrgName);assert.equal(kerberosProfile.mfa_enabled,true);
+    secretsThatMustNotBeLogged.push(kerberosSeed);
+    console.log('Kerberos: tenant user and MFA restored through the normal API');
+    const kerberosApp=await api('POST','/api/applications',{owner:'admin',name:`browser-kerberos-${suffix}`,display_name:'Kerberos browser',organization:kerberosOrgName,enable_password:true},kerberosAdmin.token);
+    await page.reload();await navigate('Sign in','Sign in');await fill('Application',kerberosApp.id);
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    const kerberosProof=await kerberos.issue('alice','spnego');secretsThatMustNotBeLogged.push(kerberosProof.token);
+    await context.setExtraHTTPHeaders({Authorization:`Negotiate ${kerberosProof.token}`});
+    const kerberosResult=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/kerberos-login');
+    await page.getByRole('button',{name:'Sign in with Kerberos',exact:true}).click();
+    const accepted=await kerberosResult;await context.setExtraHTTPHeaders({});console.log(`Kerberos: real browser ticket response ${accepted.status()}`);
+    assert.equal(accepted.status(),200);await kerberos.verify(kerberosProof.id,(await accepted.allHeaders())['www-authenticate']);
+    console.log('Kerberos: JDK verified the server AP-REP');
+    const pendingKerberos=await accepted.json();assert.equal(pendingKerberos.mfa_required,true);assert.equal(pendingKerberos.token,'');
+    await page.getByRole('combobox',{name:'Verification method',exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>localStorage.getItem('casdog.auth.token')),null);
+    console.log('Kerberos: waiting for a fresh TOTP window after trusted backup restoration');
+    while(Date.now()<kerberosTotpReadyAt)await new Promise(resolve=>setTimeout(resolve,Math.min(5000,kerberosTotpReadyAt-Date.now())));
+    await fill('Verification code',totp(kerberosSeed));await page.getByRole('button',{name:'Sign in',exact:true}).last().click();
+    await page.getByRole('heading',{name:'Identity and access management'}).waitFor();
+    const kerberosToken=await page.evaluate(()=>JSON.parse(localStorage.getItem('casdog.auth.token')));
+    assert.equal((await api('GET','/api/get-account',undefined,kerberosToken)).id,kerberosUserId);
+    await page.screenshot({path:path.join(artifacts,'kerberos-login.png'),fullPage:true});
+    checks.push('Independent Kerby/JDK service ticket passes the real Kerberos UI endpoint, JDK verifies AP-REP, and browser MFA gates the final JWT; native Windows automatic IWA is not claimed');
     assert.deepEqual(runtimeErrors, []);
     for(const secret of secretsThatMustNotBeLogged)assert.ok(!serverOutput.join('').includes(secret),'Request tracing must omit query secrets');
     await fs.writeFile(path.join(artifacts, 'results.json'), JSON.stringify({ passed: true, checks, runtimeErrors, apiInterception: false }, null, 2));
@@ -742,6 +938,7 @@ async function main() {
     throw error;
   } finally {
     if (browser) await browser.close();
+    if(kerberos)await kerberos.close();
     if (server?.pid && server.exitCode === null) {
       const closed = new Promise(resolve => server.once('close', resolve));
       server.kill();
@@ -750,7 +947,7 @@ async function main() {
     if (runtimeImage) await fs.unlink(runtimeImage).catch(() => {});
     await fs.writeFile(path.join(artifacts, 'server.log'), serverOutput.join(''));
     await new Promise(resolve => mailServer.close(resolve));
-    await directory.close();
+    await directory.close();await adDirectory.close();await cloud.close();await oauthDirectory.close();await smtpRelay.close();
   }
 }
 

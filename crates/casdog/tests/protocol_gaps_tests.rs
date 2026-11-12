@@ -872,12 +872,15 @@ async fn ordinary_upload_download_delete_preserves_legacy_references_and_denies_
     let uploaded: Value = response.take_json().await.unwrap();
     assert_eq!(status, Some(StatusCode::OK), "{uploaded}");
     assert_eq!(uploaded["name"], "notes.txt");
-    let (id, object): (String, String) =
-        sqlx::query_as("SELECT id,name FROM resources WHERE owner=$1")
+    let (id, object, internal_url): (String, String, String) =
+        sqlx::query_as("SELECT id,name,url FROM resources WHERE owner=$1")
             .bind(&f.owner)
             .fetch_one(&f.pool)
             .await
             .unwrap();
+    assert_eq!(uploaded["id"], id);
+    assert_eq!(uploaded["url"], format!("/api/download-resource/{id}"));
+    assert!(!uploaded.to_string().contains("file://"));
     assert_ne!(object, "notes.txt");
     let object_path = bucket.join(&object);
     assert!(object_path.exists());
@@ -976,7 +979,7 @@ async fn ordinary_upload_download_delete_preserves_legacy_references_and_denies_
     );
     sqlx::query("UPDATE resources SET url=$2 WHERE id=$1")
         .bind(&id)
-        .bind(uploaded["url"].as_str().unwrap())
+        .bind(&internal_url)
         .execute(&f.pool)
         .await
         .unwrap();

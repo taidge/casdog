@@ -113,6 +113,9 @@ impl OAuthProviderTrait for WeChatProvider {
             .map_err(|e| AppError::Internal(format!("WeChat user parse failed: {}", e)))?;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.unionid.clone().unwrap_or(user.openid.clone()),
             username: user.openid,
             display_name: user.nickname.unwrap_or_default(),

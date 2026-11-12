@@ -83,6 +83,9 @@ impl OAuthProviderTrait for GitHubProvider {
             .map_err(|e| AppError::Internal(format!("GitHub user parse failed: {}", e)))?;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.id.to_string(),
             username: user.login.clone(),
             display_name: user.name.unwrap_or(user.login),

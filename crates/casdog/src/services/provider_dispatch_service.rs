@@ -621,18 +621,12 @@ fn email_provider_from_record(
             .ok_or_else(|| {
                 AppError::Validation("SendGrid provider requires an API key".to_string())
             })?;
-        let from_address = sender
-            .map(ToOwned::to_owned)
-            .or_else(|| provider.client_id2.clone())
-            .or_else(|| provider.receiver.clone())
-            .or_else(|| provider.client_id.clone())
-            .ok_or_else(|| {
-                AppError::Validation("SendGrid provider requires a sender address".to_string())
-            })?;
-        Ok(Box::new(SendGridEmailProvider::from_provider_record(
-            &api_key,
-            &from_address,
-        )))
+        let from_address =
+            crate::services::provider_configuration_service::email_sender(provider, sender)?;
+        Ok(Box::new(
+            SendGridEmailProvider::from_provider_record(&api_key, &from_address.email.to_string())
+                .with_sender(&from_address),
+        ))
     } else if provider_type.contains("custom http") {
         let endpoint = provider.endpoint.clone().ok_or_else(|| {
             AppError::Validation("Custom HTTP Email provider requires endpoint".to_string())
@@ -653,11 +647,9 @@ fn email_provider_from_record(
         let password = provider.client_secret.clone().ok_or_else(|| {
             AppError::Validation("SMTP provider requires client_secret password".to_string())
         })?;
-        let from_address = sender
-            .map(ToOwned::to_owned)
-            .or_else(|| provider.client_id2.clone())
-            .or_else(|| provider.receiver.clone())
-            .unwrap_or_else(|| username.clone());
+        let from_address =
+            crate::services::provider_configuration_service::email_sender(provider, sender)?
+                .to_string();
         Ok(Box::new(SmtpEmailProvider::from_provider_record(
             &host,
             port,

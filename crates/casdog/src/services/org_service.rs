@@ -384,7 +384,8 @@ impl OrgService {
                     if !(0..=365000).contains(&days) {
                         return Err(AppError::Validation(
                             "Record retention days must be between 0 and 365000".into(),
-                        ).into());
+                        )
+                        .into());
                     }
                     org.record_retention_days = days;
                 }

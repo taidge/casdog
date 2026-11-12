@@ -19,6 +19,8 @@ enum FieldKind {
     Text,
     TextArea,
     Password,
+    SecondaryCredential,
+    ProviderContent,
     Number,
     Toggle,
     Json,
@@ -39,6 +41,32 @@ fn update(editor: Cage<String>, key: &str, value: Value, message: Cage<String>) 
 fn read(editor: Cage<String>, key: &str) -> Value {
     serde_json::from_str::<Value>(&editor.get()).unwrap_or(Value::Null)[key].clone()
 }
+fn provider_field_visible(editor: Cage<String>, key: &str) -> bool {
+    let category = read(editor, "category");
+    let category = category.as_str().unwrap_or("");
+    match key {
+        "custom_auth_url"
+        | "custom_token_url"
+        | "custom_user_info_url"
+        | "custom_logo"
+        | "user_mapping" => category == "OAuth",
+        "method" | "issuer_url" => matches!(category, "OAuth" | "SAML"),
+        "client_id2" => matches!(category, "Email" | "OAuth" | "Payment" | "Notification"),
+        "client_secret2" => matches!(category, "Email" | "OAuth" | "Payment" | "Notification"),
+        "host" | "port" | "disable_ssl" => matches!(category, "Email" | "LDAP"),
+        "receiver" => matches!(category, "Email" | "SMS" | "Notification"),
+        "title" => matches!(category, "Email" | "SMS" | "Notification"),
+        "app_id" | "sign_name" | "template_code" => category == "SMS",
+        "region_id" => matches!(category, "Storage" | "SMS"),
+        "domain" => {
+            category == "Storage" || (category == "OAuth" && read(editor, "type") == "Okta")
+        }
+        "bucket" | "path_prefix" => category == "Storage",
+        "cert" => category == "SAML",
+        "http_headers" => matches!(category, "OAuth" | "Notification" | "Email" | "SMS"),
+        _ => true,
+    }
+}
 pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>) -> Element {
     boxed(widget(move |scope| {
         let raw = scope.cage(false);
@@ -46,10 +74,43 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
         for field in fields_for_resource(config.slug) {
             let key = field.key;
             let name = field.label;
+            let accessible = scope.bond(move || {
+                if config.slug == "syncers"
+                    && matches!(
+                        read(editor, "type").as_str(),
+                        Some("LDAP" | "Active Directory")
+                    )
+                {
+                    match key {
+                        "database" => "Base DN",
+                        "table" => "LDAP search filter",
+                        "user" => "Bind DN",
+                        "password" => "Bind password",
+                        _ => name,
+                    }
+                    .to_string()
+                } else if config.slug == "providers" {
+                    match (key, read(editor, "category").as_str()) {
+                        ("disable_ssl", Some("Email")) => "Allow plaintext SMTP".into(),
+                        ("client_id2", Some("Email")) => "From address".into(),
+                        ("client_secret2", Some("Email")) => "From name".into(),
+                        ("region_id", Some("SMS")) => "SMS region".into(),
+                        ("domain", Some("OAuth")) if read(editor, "type") == "Okta" => {
+                            "Okta issuer base".into()
+                        }
+                        ("content", Some("OAuth")) if read(editor, "type") == "WeChat" => {
+                            "WeChat private key / content".into()
+                        }
+                        _ => name.to_string(),
+                    }
+                } else {
+                    name.to_string()
+                }
+            });
             let control: Element = match field.kind {
                 FieldKind::Toggle => boxed(
                     sapid::checkbox()
-                        .label(name)
+                        .label(accessible)
                         .checked(scope.bond(move || read(editor, key).as_bool().unwrap_or(false)))
                         .on_checked_change(move |v| update(editor, key, json!(v), message)),
                 ),
@@ -61,7 +122,7 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                     let selected_values = values.clone();
                     boxed(
                         sapid::native_select(key)
-                            .name(name)
+                            .name(accessible)
                             .value(scope.bond(move || {
                                 let current = read(editor, key);
                                 selected_values
@@ -78,13 +139,51 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                                     .and_then(|index| values.get(index))
                                     .cloned()
                                     .unwrap_or_default();
-                                if config.slug == "syncers" && key == "type" && value == "SCIM" && read(editor, "type") != "SCIM" {
-                                    if let Ok(Value::Object(mut data)) = serde_json::from_str::<Value>(&editor.get()) {
+                                if config.slug == "syncers"
+                                    && key == "type"
+                                    && value == "SCIM"
+                                    && read(editor, "type") != "SCIM"
+                                {
+                                    if let Ok(Value::Object(mut data)) =
+                                        serde_json::from_str::<Value>(&editor.get())
+                                    {
                                         data.insert("type".into(), json!("SCIM"));
                                         data.insert("is_read_only".into(), json!(true));
                                         data.insert("table_columns".into(), json!([]));
-                                        for field in ["database_type", "ssl_mode", "database", "table", "affiliation_table"] { data.insert(field.into(), Value::Null); }
-                                        for field in ["host", "user", "password"] { data.insert(field.into(), json!("")); }
+                                        for field in [
+                                            "database_type",
+                                            "ssl_mode",
+                                            "database",
+                                            "table",
+                                            "affiliation_table",
+                                        ] {
+                                            data.insert(field.into(), Value::Null);
+                                        }
+                                        for field in ["host", "user", "password"] {
+                                            data.insert(field.into(), json!(""));
+                                        }
+                                        editor.set(crate::api::pretty_json(&Value::Object(data)));
+                                        message.set(String::new());
+                                        return;
+                                    }
+                                }
+                                if config.slug == "syncers"
+                                    && key == "type"
+                                    && matches!(value.as_str(), "LDAP" | "Active Directory")
+                                    && read(editor, "type").as_str() != Some(value.as_str())
+                                {
+                                    if let Ok(Value::Object(mut data)) =
+                                        serde_json::from_str::<Value>(&editor.get())
+                                    {
+                                        data.insert("type".into(), json!(value));
+                                        data.insert("is_read_only".into(), json!(true));
+                                        data.insert("table_columns".into(), json!([]));
+                                        data.insert("database_type".into(), Value::Null);
+                                        data.insert("affiliation_table".into(), Value::Null);
+                                        data.insert("database".into(), json!(""));
+                                        data.insert("table".into(), json!(""));
+                                        data.insert("port".into(), json!(389));
+                                        data.insert("ssl_mode".into(), json!("disable"));
                                         editor.set(crate::api::pretty_json(&Value::Object(data)));
                                         message.set(String::new());
                                         return;
@@ -102,7 +201,19 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                     scope.effect(move || {
                         let value = read(editor, key);
                         draft.set(if is_json {
-                            crate::api::pretty_json(&value)
+                            if config.slug == "providers"
+                                && matches!(key, "metadata" | "user_mapping" | "http_headers")
+                            {
+                                value.as_str().map(str::to_owned).unwrap_or_else(|| {
+                                    if value.is_null() {
+                                        "{}".into()
+                                    } else {
+                                        crate::api::pretty_json(&value)
+                                    }
+                                })
+                            } else {
+                                crate::api::pretty_json(&value)
+                            }
                         } else if is_tags {
                             value
                                 .as_array()
@@ -126,7 +237,15 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                     let change = move |next: String| {
                         draft.set(next.clone());
                         let parsed = if is_json {
-                            serde_json::from_str(&next).map_err(|e| e.to_string())
+                            serde_json::from_str::<Value>(&next)
+                                .map(|v| {
+                                    if config.slug == "providers" && key == "metadata" {
+                                        json!(v.to_string())
+                                    } else {
+                                        v
+                                    }
+                                })
+                                .map_err(|e| e.to_string())
                         } else if is_number {
                             next.parse::<serde_json::Number>()
                                 .map(Value::Number)
@@ -146,25 +265,80 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                             Err(error) => message.set(format!("{name}: {error}")),
                         }
                     };
-                    if matches!(kind, FieldKind::Json | FieldKind::TextArea) {
+                    if matches!(kind, FieldKind::ProviderContent) {
+                        boxed(stack((
+                            when(
+                                scope.bond(move || read(editor, "type") == "WeChat"),
+                                move || {
+                                    widget(move |scope| {
+                                        sapid::password_input()
+                                            .name("WeChat private key / content")
+                                            .value(draft)
+                                            .on_value_change(change)
+                                            .build(scope)
+                                    })
+                                },
+                            ),
+                            when(
+                                scope.bond(move || read(editor, "type") != "WeChat"),
+                                move || {
+                                    widget(move |scope| {
+                                        sapid::textarea()
+                                            .name("Content / discovery ports")
+                                            .value(draft)
+                                            .on_value_change(change)
+                                            .rows(5)
+                                            .build(scope)
+                                    })
+                                },
+                            ),
+                        )))
+                    } else if matches!(kind, FieldKind::Json | FieldKind::TextArea) {
                         boxed(
                             sapid::textarea()
-                                .name(name)
+                                .name(accessible)
                                 .value(draft)
                                 .on_value_change(change)
                                 .rows(5),
                         )
+                    } else if matches!(kind, FieldKind::SecondaryCredential) {
+                        boxed(stack((
+                            when(
+                                scope.bond(move || read(editor, "category") == "Email"),
+                                move || {
+                                    widget(move |scope| {
+                                        sapid::text_field()
+                                            .name("From name")
+                                            .value(draft)
+                                            .on_value_change(change)
+                                            .build(scope)
+                                    })
+                                },
+                            ),
+                            when(
+                                scope.bond(move || read(editor, "category") != "Email"),
+                                move || {
+                                    widget(move |scope| {
+                                        sapid::password_input()
+                                            .name("Secondary client secret")
+                                            .value(draft)
+                                            .on_value_change(change)
+                                            .build(scope)
+                                    })
+                                },
+                            ),
+                        )))
                     } else if matches!(kind, FieldKind::Password) {
                         boxed(
                             sapid::password_input()
-                                .name(name)
+                                .name(accessible)
                                 .value(draft)
                                 .on_value_change(change),
                         )
                     } else {
                         boxed(
                             sapid::text_field()
-                                .name(name)
+                                .name(accessible)
                                 .value(draft)
                                 .required(field.required)
                                 .on_value_change(change),
@@ -172,12 +346,83 @@ pub fn form(config: ResourceConfig, editor: Cage<String>, message: Cage<String>)
                     }
                 }
             };
-            let sql_only = config.slug == "syncers" && ["database_type", "ssl_mode", "port", "database", "table", "affiliation_table"].contains(&key);
-            widgets.push(boxed(stack((label(name), control)).class_fn(move || if sql_only && read(editor,"type")=="SCIM" {"stack hidden".into()} else {"stack".into()})));
+            let title = scope.bond(move || {
+                if config.slug == "syncers"
+                    && matches!(
+                        read(editor, "type").as_str(),
+                        Some("LDAP" | "Active Directory")
+                    )
+                {
+                    match key {
+                        "database" => "Base DN",
+                        "table" => "LDAP search filter (blank uses directory default)",
+                        "user" => "Bind DN",
+                        "password" => "Bind password",
+                        _ => name,
+                    }
+                } else if config.slug == "providers" {
+                    match (key, read(editor, "category").as_str()) {
+                        ("disable_ssl", Some("Email")) => "Allow plaintext SMTP",
+                        ("client_id2", Some("Email")) => "From address",
+                        ("client_secret2", Some("Email")) => "From name",
+                        ("region_id", Some("SMS")) => "SMS region",
+                        ("domain", Some("OAuth")) if read(editor, "type") == "Okta" => {
+                            "Okta issuer base"
+                        }
+                        _ => name,
+                    }
+                } else {
+                    name
+                }
+            });
+            widgets.push(boxed(
+                stack((text().content_fn(move || title.get().to_string()), control)).class_fn(
+                    move || {
+                        let directory = matches!(
+                            read(editor, "type").as_str(),
+                            Some("LDAP" | "Active Directory")
+                        );
+                        let hidden = (config.slug == "providers"
+                            && !provider_field_visible(editor, key))
+                            || config.slug == "syncers"
+                                && ((read(editor, "type") == "SCIM"
+                                    && [
+                                        "database_type",
+                                        "ssl_mode",
+                                        "port",
+                                        "database",
+                                        "table",
+                                        "affiliation_table",
+                                    ]
+                                    .contains(&key))
+                                    || (directory
+                                        && ["database_type", "affiliation_table", "ssl_mode"]
+                                            .contains(&key)));
+                        if hidden {
+                            "stack hidden".into()
+                        } else {
+                            "stack".into()
+                        }
+                    },
+                ),
+            ));
         }
         let structured = stack(widgets);
         stack((
+            stack((
             when(scope.bond(move || config.slug=="syncers" && read(editor,"type")=="SCIM"), || label("SCIM reads users from Host/Users. Enter an HTTPS base URL, or local HTTP for testing. Leave Username blank and put a Bearer token in Password; enter both for Basic authentication. Empty mappings use standard SCIM fields. Only read-only synchronization is supported.")),
+            when(scope.bond(move || config.slug=="syncers" && matches!(read(editor,"type").as_str(),Some("LDAP"|"Active Directory"))),||label("Directory synchronization is read-only. Host accepts ldap:// or ldaps://; use Base DN and an optional LDAP filter, not SQL database/table names. Empty mappings use directory defaults. Active Directory tracks objectGUID across DN/OU/name changes and reads the account-disabled bit. Use starttls with ldap:// or ldaps:// for encrypted connections.")),
+            when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="Storage"),||label("Storage: Bucket is the container/bucket; Region is used by S3/MinIO. Domain takes precedence over Endpoint as the public/CDN base for Azure Blob and Google Cloud Storage. For Azure Blob and Google Cloud Storage, Domain's path and Path prefix become part of the stored object key. MinIO/S3 Endpoint is the storage API origin. Without a public base, resource access uses a fresh signed URL or authenticated download. Azure Client ID is the account name and Client secret is its base64 account key. Google Cloud Storage Client secret is the full service_account JSON, including private_key and token_uri; keep it out of Content. Metadata may contain the advanced storageApiEndpoint API-origin override; this is separate from the public/CDN base.")),
+            when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="OAuth"),||label("Custom OAuth uses the authorization, token and user info URLs. Scopes are sent during sign-in and account linking. User mapping maps id, username, displayName, email, emailVerified, phone, phoneVerified or avatarUrl to dot-separated response paths, for example {\"id\":\"data.employeeId\",\"displayName\":\"data.name\"}. Changing identity configuration requires starting a new sign-in.")),
+            when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="OAuth" && read(editor,"type")=="Okta"),||label("Okta issuer base is the complete authorization-server URL, including any path such as https://example.okta.com/oauth2/default. The provider appends /v1/authorize, /v1/token and /v1/userinfo. Issuer URL is a fallback when the issuer base is empty.")),
+            when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="Email"),||label("From address uses the secondary client ID; From name uses the secondary client secret field as a public display name. SMTP Host and Port select the mail server. Port 465 uses implicit TLS; other ports require STARTTLS by default. Allow plaintext SMTP permits a trusted relay without STARTTLS, while still upgrading to TLS whenever the relay offers STARTTLS.")),
+            when(scope.bond(move || config.slug=="providers" && read(editor,"category")=="SMS"),||label("Twilio uses the client ID as account SID and client secret as auth token. Sender uses application ID, then signature, then default receiver. HTTP SMS uses Endpoint and the client secret API key.")),
+            when(scope.bond(move || config.slug=="providers"),||label("Saved secrets are masked. Leave a secret blank to retain it; enter a new value to rotate it. Use the explicit clear controls to remove saved credentials. Metadata shows only safe or masked configuration; JSON objects merge by key and {} retains existing keys. Do not place credentials in public text fields.")),
+            when(scope.bond(move || config.slug=="organizations"),||label("Kerberos uses your browser's integrated authentication. Configure the realm, KDC host and HTTP service plus a base64 MIT keytab. The masked *** value preserves the saved keytab. Clear all four fields together to disable it.")),
+            )),
+            when(scope.bond(move || config.slug=="syncers" && matches!(read(editor,"type").as_str(),Some("LDAP"|"Active Directory"))),move ||widget(move |scope| {
+                sapid::checkbox().label("Use StartTLS with ldap://").checked(scope.bond(move ||read(editor,"ssl_mode")=="starttls")).on_checked_change(move |checked|update(editor,"ssl_mode",json!(if checked{"starttls"}else{"disable"}),message)).build(scope)
+            })),
             sapid::button()
                 .label("Switch structured / JSON editor")
                 .on_press(move || raw.set(!raw.get())),
@@ -287,6 +532,30 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 key: "is_enabled",
                 label: "Enabled",
                 kind: FieldKind::Toggle,
+                required: false,
+            },
+            FieldDef {
+                key: "kerberos_realm",
+                label: "Kerberos realm",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "kerberos_kdc_host",
+                label: "Kerberos KDC host",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "kerberos_service_name",
+                label: "Kerberos HTTP service",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "kerberos_keytab",
+                label: "Kerberos keytab (base64)",
+                kind: FieldKind::Password,
                 required: false,
             },
         ],
@@ -1211,6 +1480,14 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                         label: "OAuth".into(),
                     },
                     SelectOption {
+                        value: "SAML".into(),
+                        label: "SAML".into(),
+                    },
+                    SelectOption {
+                        value: "LDAP".into(),
+                        label: "LDAP".into(),
+                    },
+                    SelectOption {
                         value: "Email".into(),
                         label: "Email".into(),
                     },
@@ -1274,6 +1551,10 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                         label: "LinkedIn".into(),
                     },
                     SelectOption {
+                        value: "Okta".into(),
+                        label: "Okta".into(),
+                    },
+                    SelectOption {
                         value: "WeChat".into(),
                         label: "WeChat".into(),
                     },
@@ -1292,6 +1573,18 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                     SelectOption {
                         value: "PayPal".into(),
                         label: "PayPal".into(),
+                    },
+                    SelectOption {
+                        value: "Azure Blob".into(),
+                        label: "Azure Blob".into(),
+                    },
+                    SelectOption {
+                        value: "Google Cloud Storage".into(),
+                        label: "Google Cloud Storage".into(),
+                    },
+                    SelectOption {
+                        value: "MinIO".into(),
+                        label: "MinIO".into(),
                     },
                     SelectOption {
                         value: "AWS S3".into(),
@@ -1365,7 +1658,7 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
             FieldDef {
                 key: "content",
                 label: "Content / discovery ports",
-                kind: FieldKind::TextArea,
+                kind: FieldKind::ProviderContent,
                 required: false,
             },
             FieldDef {
@@ -1378,6 +1671,114 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 key: "client_secret",
                 label: "Client secret",
                 kind: FieldKind::Password,
+                required: false,
+            },
+            FieldDef {
+                key: "client_id2",
+                label: "Secondary client ID",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "client_secret2",
+                label: "Secondary client secret",
+                kind: FieldKind::SecondaryCredential,
+                required: false,
+            },
+            FieldDef {
+                key: "custom_auth_url",
+                label: "OAuth authorization URL",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "custom_token_url",
+                label: "OAuth token URL",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "custom_user_info_url",
+                label: "OAuth user info URL",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "custom_logo",
+                label: "Custom logo URL",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "user_mapping",
+                label: "OAuth user mapping (JSON)",
+                kind: FieldKind::Json,
+                required: false,
+            },
+            FieldDef {
+                key: "method",
+                label: "Authentication method",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "issuer_url",
+                label: "Issuer URL",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "receiver",
+                label: "Default receiver",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "title",
+                label: "Message title",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "disable_ssl",
+                label: "Disable implicit TLS",
+                kind: FieldKind::Toggle,
+                required: false,
+            },
+            FieldDef {
+                key: "app_id",
+                label: "SMS sender / application ID",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "sign_name",
+                label: "SMS signature / From number",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "template_code",
+                label: "SMS template code",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "http_headers",
+                label: "HTTP headers (JSON)",
+                kind: FieldKind::Json,
+                required: false,
+            },
+            FieldDef {
+                key: "cert",
+                label: "Identity provider certificate",
+                kind: FieldKind::TextArea,
+                required: false,
+            },
+            FieldDef {
+                key: "provider_url",
+                label: "Provider URL",
+                kind: FieldKind::Text,
                 required: false,
             },
             FieldDef {
@@ -1395,6 +1796,24 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
             FieldDef {
                 key: "domain",
                 label: "Domain",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "bucket",
+                label: "Bucket / container",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "region_id",
+                label: "Storage region",
+                kind: FieldKind::Text,
+                required: false,
+            },
+            FieldDef {
+                key: "path_prefix",
+                label: "Storage path prefix",
                 kind: FieldKind::Text,
                 required: false,
             },
@@ -1647,6 +2066,10 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                         label: "Database".into(),
                     },
                     SelectOption {
+                        value: "Active Directory".into(),
+                        label: "Active Directory".into(),
+                    },
+                    SelectOption {
                         value: "LDAP".into(),
                         label: "LDAP".into(),
                     },
@@ -1674,6 +2097,10 @@ fn fields_for_resource(slug: &str) -> Vec<FieldDef> {
                 key: "ssl_mode",
                 label: "SSL mode",
                 kind: FieldKind::Select(vec![
+                    SelectOption {
+                        value: "starttls".into(),
+                        label: "StartTLS (LDAP)".into(),
+                    },
                     SelectOption {
                         value: "disable".into(),
                         label: "Disable".into(),

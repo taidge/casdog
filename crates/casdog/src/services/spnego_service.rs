@@ -1,7 +1,8 @@
-//! SPNEGO / Kerberos token parsing and validation.
+//! SPNEGO / Kerberos framing and legacy diagnostic parsing.
 //!
-//! Decodes untrusted ticket metadata for diagnostics. Ticket parsing alone does
-//! not authenticate a client; no keytab/GSSAPI verifier is currently implemented.
+//! Diagnostic metadata never authenticates a client. The login endpoint uses
+//! `KerberosService` for keytab-backed cryptographic verification and shared
+//! replay protection; `extract_identity` deliberately rejects caller claims.
 
 use base64::Engine;
 
@@ -450,8 +451,9 @@ impl SpnegoService {
         Ok((header_len + length, &data[header_len..header_len + length]))
     }
 
-    /// Authentication is unavailable until a cryptographic ticket verifier exists.
-    /// Neither request headers, query parameters, nor parsed ticket metadata prove identity.
+    /// Legacy identity extraction never authenticates. Call `KerberosService`
+    /// for ticket verification; headers, query names and parsed metadata alone
+    /// are not proof of identity.
     pub fn extract_identity(
         _negotiate_token: Option<&str>,
         _proxy_header: Option<&str>,

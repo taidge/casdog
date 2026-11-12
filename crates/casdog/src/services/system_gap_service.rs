@@ -68,6 +68,12 @@ pub async fn client(url: &Url, allow_private: bool) -> AppResult<reqwest::Client
         ));
     }
     let host = url.host_str().ok_or_else(|| invalid("URL host required"))?;
+    // URL authority syntax includes brackets for IPv6; socket resolution and
+    // DNS override keys require the address without those brackets.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
     let addresses: Vec<_> = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443))),

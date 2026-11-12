@@ -13,6 +13,7 @@ use crate::services::{GroupService, PermissionService, ResourceService, RoleServ
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UploadResponse {
+    pub id: String,
     pub name: String,
     pub url: String,
     pub size: u64,
@@ -534,9 +535,19 @@ pub async fn upload_resource(
             &file_bytes,
         )
         .await?;
+        let id = value["id"]
+            .as_str()
+            .ok_or_else(|| AppError::Internal("Uploaded transcript has no resource ID".into()))?
+            .to_string();
+        let url = value["url"].as_str().unwrap_or_default();
         return Ok(Json(UploadResponse {
+            id: id.clone(),
             name: value["name"].as_str().unwrap_or_default().into(),
-            url: value["url"].as_str().unwrap_or_default().into(),
+            url: if url.starts_with("file://") {
+                format!("/api/download-resource/{id}")
+            } else {
+                url.into()
+            },
             size: file_size as u64,
             file_type: "application/jsonl".into(),
         }));
@@ -563,7 +574,7 @@ pub async fn upload_resource(
     } else {
         None
     };
-    let (storage, _) = crate::services::protocol_gap_service::storage_for_owner(
+    let (storage, local_root) = crate::services::protocol_gap_service::storage_for_owner(
         &principal,
         &owner,
         provider.as_ref(),
@@ -582,6 +593,8 @@ pub async fn upload_resource(
     } else {
         format!("{tag}/{filename}")
     };
+    let object_key =
+        crate::services::protocol_gap_service::storage_object_key(provider.as_ref(), &object_key)?;
 
     if object_key.len() > 1024 || ext.chars().count() > 50 {
         return Err(AppError::Validation(
@@ -618,12 +631,21 @@ pub async fn upload_resource(
         },
     };
 
-    if let Err(error) = ResourceService::create(&pool, resource_req).await {
-        let _ = storage.delete(&object_key).await;
-        return Err(error);
-    }
+    let resource = match ResourceService::create(&pool, resource_req).await {
+        Ok(resource) => resource,
+        Err(error) => {
+            let _ = storage.delete(&object_key).await;
+            return Err(error);
+        }
+    };
+    let url = if local_root.is_some() {
+        format!("/api/download-resource/{}", resource.id)
+    } else {
+        url
+    };
 
     Ok(Json(UploadResponse {
+        id: resource.id,
         name: file_name,
         url,
         size: file_size as u64,
@@ -635,9 +657,9 @@ fn authorize_file(
     principal: &crate::hoops::authz::Principal,
     resource: &crate::models::ResourceResponse,
 ) -> Result<(), AppError> {
-    let own = resource.user == principal.id
-        || resource.user == principal.name
-        || resource.user == format!("{}/{}", principal.owner, principal.name);
+    // New uploads pin the stable UUID. Historical name-only rows require an
+    // administrator; a later account reusing that name cannot inherit a file.
+    let own = resource.user == principal.id;
     if principal.global_admin() || (principal.owner == resource.owner && (principal.admin || own)) {
         Ok(())
     } else {
@@ -672,12 +694,13 @@ async fn resource_storage(
             "Storage provider belongs to another organization".into(),
         ));
     }
-    let provider: Option<crate::models::Provider> =
-        sqlx::query_as("SELECT * FROM providers WHERE owner=$1 AND name=$2 AND category='Storage'")
-            .bind(owner)
-            .bind(name)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let provider: Option<crate::models::Provider> = sqlx::query_as(
+        "SELECT * FROM providers WHERE owner=$1 AND name=$2 AND category='Storage' FOR SHARE",
+    )
+    .bind(owner)
+    .bind(name)
+    .fetch_optional(&mut *conn)
+    .await?;
     if provider.is_none() && name != "local" {
         return Err(AppError::NotFound("Storage provider not found".into()));
     }
@@ -765,6 +788,49 @@ async fn resource_storage(
             .as_ref()
             .ok_or_else(|| AppError::NotFound("Storage provider missing".into()))?;
         let endpoint = provider.endpoint.as_deref().unwrap_or("");
+        let cloud = provider.provider_type.eq_ignore_ascii_case("Azure Blob")
+            || provider
+                .provider_type
+                .eq_ignore_ascii_case("Google Cloud Storage");
+        if cloud {
+            let (public, _) = crate::services::providers::cloud_public_configuration(provider)?;
+            let base = if public.is_empty() {
+                if let Some(api) =
+                    crate::services::protocol_gap_service::storage_api_endpoint(provider)?
+                {
+                    api
+                } else if provider.provider_type.eq_ignore_ascii_case("Azure Blob") {
+                    format!(
+                        "https://{}.blob.core.windows.net",
+                        provider.client_id.as_deref().unwrap_or("")
+                    )
+                } else {
+                    "https://storage.googleapis.com".into()
+                }
+            } else {
+                public
+            };
+            let base = reqwest::Url::parse(&format!("{}/{}/", base.trim_end_matches('/'), bucket))
+                .map_err(|_| AppError::Validation("Invalid legacy cloud URL base".into()))?;
+            let url = reqwest::Url::parse(&resource.url)
+                .map_err(|_| AppError::Validation("Invalid legacy cloud object URL".into()))?;
+            if url.origin() != base.origin()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(AppError::Validation(
+                    "Legacy URL does not match storage provider".into(),
+                ));
+            }
+            key = urlencoding::decode(url.path().strip_prefix(base.path()).ok_or_else(|| {
+                AppError::Validation("Legacy URL does not match storage bucket".into())
+            })?)
+            .map_err(|_| AppError::Validation("Invalid legacy cloud object key".into()))?
+            .into_owned();
+            relative_object_key(&key)?;
+            return Ok((storage, key));
+        }
         let base = if endpoint.is_empty() {
             format!(
                 "https://{}.s3.{}.amazonaws.com",
@@ -782,6 +848,77 @@ async fn resource_storage(
     }
     relative_object_key(&key)?;
     Ok((storage, key))
+}
+
+/// Refresh an authorized resource's temporary cloud URL. Other providers use
+/// the authenticated application download proxy rather than assuming a bucket
+/// is public or returning a local filesystem path.
+#[endpoint(tags("Resources"), summary = "Refresh resource access URL")]
+pub async fn resource_url(
+    depot: &mut Depot,
+    req: &mut Request,
+    res: &mut Response,
+) -> Result<(), AppError> {
+    res.headers_mut().insert(
+        salvo::http::header::CACHE_CONTROL,
+        "no-store".parse().expect("static header"),
+    );
+    res.headers_mut().insert(
+        salvo::http::header::PRAGMA,
+        "no-cache".parse().expect("static header"),
+    );
+    let pool = depot
+        .obtain::<sqlx::PgPool>()
+        .cloned()
+        .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
+    let principal = crate::hoops::authz::Principal::from_depot(depot)?;
+    let id = req
+        .param::<String>("id")
+        .ok_or_else(|| AppError::Validation("Resource ID required".into()))?;
+    let mut tx = pool.begin().await?;
+    let resource: crate::models::Resource = sqlx::query_as(
+        "SELECT resources.*,user_id AS \"user\" FROM resources WHERE id=$1 FOR SHARE",
+    )
+    .bind(&id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Resource not found".into()))?;
+    let resource: crate::models::ResourceResponse = resource.into();
+    authorize_file(&principal, &resource)?;
+    let (storage, key) = resource_storage(&mut tx, &principal, &resource).await?;
+    let reference = resource.provider.as_deref().unwrap_or("local");
+    let (owner, name) = reference
+        .split_once('/')
+        .unwrap_or((&resource.owner, reference));
+    let provider: Option<crate::models::Provider> = sqlx::query_as(
+        "SELECT * FROM providers WHERE owner=$1 AND name=$2 AND category='Storage' FOR SHARE",
+    )
+    .bind(owner)
+    .bind(name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let cloud = provider.as_ref().is_some_and(|p| {
+        p.provider_type.eq_ignore_ascii_case("Azure Blob")
+            || p.provider_type.eq_ignore_ascii_case("Google Cloud Storage")
+    });
+    let (url, access, expires_at) = if cloud {
+        let (public, _) = crate::services::providers::cloud_public_configuration(
+            provider.as_ref().expect("cloud provider"),
+        )?;
+        let signed = public.is_empty();
+        (
+            storage.get_url(&key).await?,
+            if signed { "signed" } else { "public" },
+            signed.then(|| chrono::Utc::now() + chrono::Duration::minutes(15)),
+        )
+    } else {
+        (format!("/api/download-resource/{id}"), "proxy", None)
+    };
+    tx.commit().await?;
+    res.render(Json(
+        serde_json::json!({"url":url,"access":access,"expires_at":expires_at}),
+    ));
+    Ok(())
 }
 
 /// Delete a resource and its file from storage.

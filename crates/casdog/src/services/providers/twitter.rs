@@ -98,6 +98,9 @@ impl OAuthProviderTrait for TwitterProvider {
         let user = user_resp.data;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.id,
             username: user.username.clone(),
             display_name: user.name,

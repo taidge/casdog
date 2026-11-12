@@ -83,6 +83,9 @@ impl OAuthProviderTrait for LinkedInProvider {
             .map_err(|e| AppError::Internal(format!("LinkedIn user parse failed: {}", e)))?;
 
         Ok(ProviderUserInfo {
+            email_verified: false,
+            phone: None,
+            phone_verified: false,
             id: user.sub.clone(),
             username: user.email.clone().unwrap_or(user.sub),
             display_name: user.name.unwrap_or_default(),

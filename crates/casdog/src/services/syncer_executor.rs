@@ -803,6 +803,24 @@ impl SyncerExecutor {
         let invalid = || {
             AppError::Validation("Invalid Active Directory GUID, userAccountControl or timestamp; no accounts were imported".into())
         };
+        // These AD attributes are single-valued. Ambiguous case variants or
+        // binary/invalid text must never silently select an enabled state.
+        for name in ["userAccountControl", "whenCreated", "whenChanged"] {
+            let matching = entry
+                .attrs
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                .collect::<Vec<_>>();
+            if matching.len() > 1
+                || matching.iter().any(|(_, values)| values.len() != 1)
+                || entry
+                    .bin_attrs
+                    .keys()
+                    .any(|key| key.eq_ignore_ascii_case(name))
+            {
+                return Err(invalid());
+            }
+        }
         let mut row: Map<String, Value> = entry
             .attrs
             .iter()

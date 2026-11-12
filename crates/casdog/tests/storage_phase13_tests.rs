@@ -796,7 +796,29 @@ fn api(pool: &PgPool, principal: Principal) -> Service {
                     .inject(principal),
             )
             .hoop(identity)
+            .hoop(casdog::hoops::AuthzFilter)
+            .push(
+                Router::with_path("get-provider")
+                    .get(casdog::handlers::casdoor_compat::get_provider),
+            )
+            .push(
+                Router::with_path("get-providers")
+                    .get(casdog::handlers::casdoor_compat::get_providers),
+            )
+            .push(
+                Router::with_path("update-provider")
+                    .post(casdog::handlers::casdoor_compat::update_provider),
+            )
+            .push(
+                Router::with_path("add-provider")
+                    .post(casdog::handlers::casdoor_compat::add_provider),
+            )
             .push(Router::with_path("providers").post(casdog::handlers::provider::create_provider))
+            .push(
+                Router::with_path("providers/{id}")
+                    .get(casdog::handlers::provider::get_provider)
+                    .put(casdog::handlers::provider::update_provider),
+            )
             .push(
                 Router::with_path("upload-resource")
                     .post(casdog::handlers::upload::upload_resource),
@@ -804,6 +826,9 @@ fn api(pool: &PgPool, principal: Principal) -> Service {
             .push(
                 Router::with_path("download-resource/{id}")
                     .get(casdog::handlers::upload::download_resource),
+            )
+            .push(
+                Router::with_path("resource-url/{id}").get(casdog::handlers::upload::resource_url),
             )
             .push(
                 Router::with_path("delete-resource/{id}")
@@ -851,6 +876,207 @@ async fn database() -> PgPool {
         .unwrap()
 }
 
+fn user_token(id: &str, owner: &str, name: &str, admin: bool) -> String {
+    let config = casdog::config::AppConfig::get();
+    let now = chrono::Utc::now();
+    jsonwebtoken::encode(&jsonwebtoken::Header::default(),&json!({"sub":id,"owner":owner,"name":name,"is_admin":admin,"iat":now.timestamp(),"exp":now.timestamp()+3600,"issued_at_ms":now.timestamp_millis(),"iss":config.jwt.issuer}),&jsonwebtoken::EncodingKey::from_secret(config.jwt.secret.as_bytes())).unwrap()
+}
+async fn protected_request(
+    service: &Service,
+    path: &str,
+    token: Option<&str>,
+    post: bool,
+) -> Response {
+    let builder = if post {
+        TestClient::post(format!("http://localhost/api/{path}"))
+    } else {
+        TestClient::get(format!("http://localhost/api/{path}"))
+    };
+    if let Some(token) = token {
+        builder
+            .add_header("Authorization", format!("Bearer {token}"), true)
+            .send(service)
+            .await
+    } else {
+        builder.send(service).await
+    }
+}
+
+async fn protected_file_authorization(pool: &PgPool, owner: &str) {
+    let real = Service::new(casdog::routes::create_router())
+        .hoop(salvo::affix_state::AffixList::new().inject(pool.clone()));
+    let buyer = uuid::Uuid::new_v4().to_string();
+    let other = uuid::Uuid::new_v4().to_string();
+    let tenant_admin = uuid::Uuid::new_v4().to_string();
+    let global = uuid::Uuid::new_v4().to_string();
+    let foreign = uuid::Uuid::new_v4().to_string();
+    let foreign_owner = format!("{owner}-other");
+    for (id, tenant, name, admin) in [
+        (&buyer, owner, "buyer", false),
+        (&other, owner, "other", false),
+        (&tenant_admin, owner, "tenant-admin", true),
+        (&global, "built-in", owner, true),
+        (&foreign, foreign_owner.as_str(), "foreign", true),
+    ] {
+        sqlx::query("INSERT INTO users(id,owner,name,display_name,password_hash,is_admin) VALUES($1,$2,$3,$3,'unused',$4)").bind(id).bind(tenant).bind(name).bind(admin).execute(pool).await.unwrap();
+    }
+    let buyer_token = user_token(&buyer, owner, "buyer", false);
+    let other_token = user_token(&other, owner, "other", false);
+    let tenant_token = user_token(&tenant_admin, owner, "tenant-admin", true);
+    let global_token = user_token(&global, "built-in", owner, true);
+    let foreign_token = user_token(&foreign, &foreign_owner, "foreign", true);
+    // A real ordinary user gets the resource UUID directly from upload. No
+    // administrator list, SQL lookup or identity rewrite is needed to download.
+    let mut response = TestClient::post("http://localhost/api/upload-resource")
+        .add_header("Authorization", format!("Bearer {buyer_token}"), true)
+        .add_header(
+            "Content-Type",
+            "multipart/form-data; boundary=cloud-boundary",
+            true,
+        )
+        .body(multipart(owner, "local"))
+        .send(&real)
+        .await;
+    let status = response.status_code;
+    let uploaded: Value = response.take_json().await.unwrap();
+    assert_eq!(status, Some(StatusCode::OK), "{uploaded}");
+    let id = uploaded["id"]
+        .as_str()
+        .expect("upload returns resource UUID")
+        .to_string();
+    assert!(uuid::Uuid::parse_str(&id).is_ok());
+    assert_eq!(uploaded["url"], format!("/api/download-resource/{id}"));
+    assert!(!uploaded.to_string().contains("file://"));
+    assert_eq!(
+        protected_request(&real, "resources", Some(&buyer_token), false)
+            .await
+            .status_code,
+        Some(StatusCode::FORBIDDEN)
+    );
+    for (path, post) in [
+        (format!("resource-url/{id}"), false),
+        (format!("download-resource/{id}"), false),
+        (format!("delete-resource/{id}"), true),
+    ] {
+        assert_eq!(
+            protected_request(&real, &path, None, post)
+                .await
+                .status_code,
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        for token in [&other_token, &foreign_token] {
+            assert_eq!(
+                protected_request(&real, &path, Some(token), post)
+                    .await
+                    .status_code,
+                Some(StatusCode::FORBIDDEN)
+            );
+        }
+    }
+    for token in [&buyer_token, &tenant_token, &global_token] {
+        let mut response =
+            protected_request(&real, &format!("resource-url/{id}"), Some(token), false).await;
+        let status = response.status_code;
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let value: Value = response.take_json().await.unwrap();
+        assert_eq!(status, Some(StatusCode::OK), "{value}");
+        assert_eq!(value["access"], "proxy");
+        assert!(value["expires_at"].is_null());
+        assert_eq!(value["url"], format!("/api/download-resource/{id}"));
+        let mut download = protected_request(
+            &real,
+            &format!("download-resource/{id}"),
+            Some(token),
+            false,
+        )
+        .await;
+        assert_eq!(download.status_code, Some(StatusCode::OK));
+        assert_eq!(download.take_string().await.unwrap(), "cloud actual object");
+    }
+    // UUID ownership survives rename. A preexisting account taking the old name
+    // must not inherit either pinned resources or legacy name-only rows.
+    sqlx::query("UPDATE users SET name='renamed-buyer' WHERE id=$1")
+        .bind(&buyer)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET name='buyer' WHERE id=$1")
+        .bind(&other)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        protected_request(
+            &real,
+            &format!("resource-url/{id}"),
+            Some(&buyer_token),
+            false
+        )
+        .await
+        .status_code,
+        Some(StatusCode::OK)
+    );
+    assert_eq!(
+        protected_request(
+            &real,
+            &format!("resource-url/{id}"),
+            Some(&other_token),
+            false
+        )
+        .await
+        .status_code,
+        Some(StatusCode::FORBIDDEN)
+    );
+    sqlx::query("UPDATE resources SET user_id='buyer' WHERE id=$1")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .unwrap();
+    for token in [&buyer_token, &other_token] {
+        assert_eq!(
+            protected_request(&real, &format!("resource-url/{id}"), Some(token), false)
+                .await
+                .status_code,
+            Some(StatusCode::FORBIDDEN)
+        );
+    }
+    assert_eq!(
+        protected_request(
+            &real,
+            &format!("resource-url/{id}"),
+            Some(&tenant_token),
+            false
+        )
+        .await
+        .status_code,
+        Some(StatusCode::OK)
+    );
+    sqlx::query("UPDATE resources SET user_id=$2 WHERE id=$1")
+        .bind(&id)
+        .bind(&buyer)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        protected_request(
+            &real,
+            &format!("delete-resource/{id}"),
+            Some(&buyer_token),
+            true
+        )
+        .await
+        .status_code,
+        Some(StatusCode::OK)
+    );
+    for id in [&buyer, &other, &tenant_admin, &global, &foreign] {
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
 async fn normal_route(gcs: bool) {
     let pool = database().await;
     let f = Fixture::new(gcs).await;
@@ -861,7 +1087,7 @@ async fn normal_route(gcs: bool) {
     } else {
         STANDARD.encode(ACCOUNT_KEY)
     };
-    let provider = json!({"owner":owner,"name":"storage","display_name":"Native cloud fixture","category":"Storage","type":if gcs {"Google Cloud Storage"} else {"Azure Blob"},"client_id":if gcs {""} else {"fixtureaccount"},"client_secret":secret,"bucket":"assets","metadata":json!({"storageApiEndpoint":f.endpoint}).to_string()});
+    let provider = json!({"owner":owner,"name":"storage","display_name":"Native cloud fixture","category":"Storage","type":if gcs {"Google Cloud Storage"} else {"Azure Blob"},"client_id":if gcs {""} else {"fixtureaccount"},"client_secret":secret,"bucket":"assets","metadata":json!({"storageApiEndpoint":f.endpoint,"secretAccessKey":"fixture-secret"}).to_string()});
     let mut response = TestClient::post("http://localhost/api/providers")
         .json(&provider)
         .send(&service)
@@ -871,6 +1097,112 @@ async fn normal_route(gcs: bool) {
     assert_eq!(status, Some(StatusCode::OK), "{text}");
     assert!(!text.contains(TEST_PRIVATE_KEY));
     assert!(!text.contains(&STANDARD.encode(ACCOUNT_KEY)));
+    assert!(!text.contains("fixture-secret"));
+    let saved_response: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(saved_response["bucket"], "assets");
+    assert_eq!(
+        serde_json::from_str::<Value>(saved_response["metadata"].as_str().unwrap()).unwrap(),
+        json!({"storageApiEndpoint":f.endpoint})
+    );
+    sqlx::query("UPDATE providers SET client_secret2='secondary-fixture-secret' WHERE owner=$1 AND name='storage'").bind(&owner).execute(&pool).await.unwrap();
+    for route in [
+        format!("get-provider?id={owner}/storage"),
+        format!("get-providers?owner={owner}"),
+    ] {
+        let mut response = TestClient::get(format!("http://localhost/api/{route}"))
+            .send(&service)
+            .await;
+        let status = response.status_code;
+        let result: Value = response.take_json().await.unwrap();
+        assert_eq!(status, Some(StatusCode::OK), "{result}");
+        let masked = if result["data"].is_array() {
+            &result["data"][0]
+        } else {
+            &result["data"]
+        };
+        assert_eq!(masked["clientSecret"], "***");
+        assert_eq!(masked["clientSecret2"], "***");
+        assert!(!result.to_string().contains(&secret));
+        assert!(!result.to_string().contains("secondary-fixture-secret"));
+    }
+    let mut response = TestClient::post(format!(
+        "http://localhost/api/update-provider?id={owner}/storage"
+    ))
+    .json(&json!({"owner":owner,"name":"storage","clientSecret":"***","clientSecret2":"***"}))
+    .send(&service)
+    .await;
+    let status = response.status_code;
+    let result: Value = response.take_json().await.unwrap();
+    assert_eq!(status, Some(StatusCode::OK), "{result}");
+    assert_eq!(result["object"]["clientSecret"], "***");
+    let retained: (String, String) = sqlx::query_as(
+        "SELECT client_secret,client_secret2 FROM providers WHERE owner=$1 AND name='storage'",
+    )
+    .bind(&owner)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        retained,
+        (secret.clone(), "secondary-fixture-secret".into())
+    );
+    let before: Value =
+        sqlx::query_scalar("SELECT to_jsonb(p) FROM providers p WHERE owner=$1 AND name='storage'")
+            .bind(&owner)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for (index, invalid) in [
+        json!({"owner":owner,"name":"storage","clientSecret":"invalid-key","displayName":"must-rollback-key"}),
+        json!({"owner":owner,"name":"storage","domain":"https://cdn.example.test/a/%2e%2e/escape","displayName":"must-rollback-path"}),
+    ].into_iter().enumerate() {
+        let mut response = TestClient::post(format!(
+            "http://localhost/api/update-provider?id={owner}/storage"
+        ))
+        .json(&invalid)
+        .send(&service)
+        .await;
+        let status = response.status_code;
+        let error = response.take_string().await.unwrap();
+        let body:Value=serde_json::from_str(&error).unwrap();
+        if index == 0 {
+            assert_eq!(status,Some(StatusCode::INTERNAL_SERVER_ERROR),"{error}");
+            assert_eq!(body["message"],"Configuration error");
+        } else {
+            assert_eq!(status,Some(StatusCode::BAD_REQUEST),"{error}");
+            assert_eq!(body["message"],"Validation error");
+        }
+        let after: Value = sqlx::query_scalar(
+            "SELECT to_jsonb(p) FROM providers p WHERE owner=$1 AND name='storage'",
+        )
+        .bind(&owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before);
+    }
+    let mut invalid_add = provider.clone();
+    invalid_add["name"] = json!("invalid-legacy");
+    invalid_add["client_secret"] = json!("invalid-key");
+    let mut response = TestClient::post("http://localhost/api/add-provider")
+        .json(&invalid_add)
+        .send(&service)
+        .await;
+    let status = response.status_code;
+    let error = response.take_string().await.unwrap();
+    assert_eq!(status, Some(StatusCode::INTERNAL_SERVER_ERROR), "{error}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&error).unwrap()["message"],
+        "Configuration error"
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM providers WHERE owner=$1 AND name='invalid-legacy'",
+    )
+    .bind(&owner)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
     let mut response = upload(&service, &owner, "storage").await;
     let status = response.status_code;
     let value: Value = response.take_json().await.unwrap();
@@ -891,6 +1223,50 @@ async fn normal_route(gcs: bool) {
         .await;
     assert_eq!(download.status_code, Some(StatusCode::OK));
     assert_eq!(download.take_string().await.unwrap(), "cloud actual object");
+    // Signed links are regenerated from the saved key and current provider,
+    // never from an expired or tampered persisted resource URL.
+    sqlx::query("UPDATE resources SET url='https://expired.invalid/old-signed-url' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut response = TestClient::get(format!("http://localhost/api/resource-url/{id}"))
+        .send(&service)
+        .await;
+    assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+    let status = response.status_code;
+    let fresh: Value = response.take_json().await.unwrap();
+    assert_eq!(status, Some(StatusCode::OK), "{fresh}");
+    assert_eq!(fresh["access"], "signed");
+    assert!(fresh["expires_at"].as_str().is_some());
+    assert!(signed_url_valid(
+        &Url::parse(fresh["url"].as_str().unwrap()).unwrap(),
+        gcs
+    ));
+    let provider_id = saved_response["id"].as_str().unwrap();
+    let mut response=TestClient::put(format!("http://localhost/api/providers/{provider_id}")).json(&json!({"domain":"https://cdn.current.example.test/new-prefix","path_prefix":"future-only"})).send(&service).await;
+    let status = response.status_code;
+    let updated: Value = response.take_json().await.unwrap();
+    assert_eq!(status, Some(StatusCode::OK), "{updated}");
+    assert_eq!(updated["path_prefix"], "future-only");
+    let mut response = TestClient::get(format!("http://localhost/api/resource-url/{id}"))
+        .send(&service)
+        .await;
+    let fresh: Value = response.take_json().await.unwrap();
+    assert_eq!(fresh["access"], "public");
+    assert!(fresh["expires_at"].is_null());
+    assert_eq!(
+        fresh["url"],
+        format!("https://cdn.current.example.test/assets/{key}")
+    );
+    assert_eq!(
+        TestClient::put(format!("http://localhost/api/providers/{provider_id}"))
+            .json(&json!({"domain":"","path_prefix":""}))
+            .send(&service)
+            .await
+            .status_code,
+        Some(StatusCode::OK)
+    );
     let foreign = api(&pool, principal("other-tenant", false));
     let before = f.state.requests.load(Ordering::SeqCst);
     let tokens = f.state.token_requests.load(Ordering::SeqCst);
@@ -973,6 +1349,7 @@ async fn normal_route(gcs: bool) {
         Some(StatusCode::OK)
     );
     assert!(f.state.objects.lock().unwrap().is_empty());
+    protected_file_authorization(&pool, &owner).await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM resources WHERE owner=$1")
         .bind(&owner)
         .fetch_one(&pool)

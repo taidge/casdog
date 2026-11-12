@@ -4,6 +4,10 @@
 /target/
 **/*.rs.bk
 
+# Runtime uploads can contain private user files.
+/uploads/
+/crates/casdog/uploads/
+
 # Common build artifacts
 *.log
 npm-debug.log*
