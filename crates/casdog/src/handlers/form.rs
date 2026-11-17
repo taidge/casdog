@@ -14,7 +14,7 @@ pub async fn get_forms(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -34,7 +34,7 @@ pub async fn get_forms(
 #[endpoint(tags("Form"), summary = "Get form by ID")]
 pub async fn get_form(depot: &mut Depot, id: PathParam<String>) -> AppResult<Json<FormResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -48,7 +48,7 @@ pub async fn add_form(
     body: JsonBody<CreateFormRequest>,
 ) -> AppResult<Json<FormResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -63,7 +63,7 @@ pub async fn update_form(
     body: JsonBody<UpdateFormRequest>,
 ) -> AppResult<Json<FormResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -77,7 +77,7 @@ pub async fn delete_form(
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

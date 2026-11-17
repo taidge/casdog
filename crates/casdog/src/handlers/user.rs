@@ -27,7 +27,7 @@ pub async fn list_users(
     req: &mut Request,
 ) -> Result<Json<UserListResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_service = UserService::new(pool);
@@ -68,7 +68,7 @@ pub async fn create_user(
     req: JsonBody<CreateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_service = UserService::new(pool);
@@ -93,7 +93,7 @@ pub async fn get_user(
     id: PathParam<String>,
 ) -> Result<Json<UserResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_service = UserService::new(pool);
@@ -120,7 +120,7 @@ pub async fn update_user(
     req: JsonBody<UpdateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_service = UserService::new(pool);
@@ -147,7 +147,7 @@ pub async fn delete_user(
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_service = UserService::new(pool);

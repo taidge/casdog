@@ -106,7 +106,7 @@ fn validate_credential_epoch(claims: &Claims, changed: Option<String>) -> AppRes
 
 pub fn insert_claims(depot: &mut Depot, claims: Claims) {
     super::authz::set_application_identity(depot, false);
-    depot.inject(
+    depot.insert_typed(
         crate::services::key_credentials_service::CredentialIdentity::User(
             super::authz::Principal {
                 id: claims.sub.clone(),
@@ -150,7 +150,7 @@ pub async fn authenticate_request(req: &Request, depot: &mut Depot) -> AppResult
         return Ok(false);
     };
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Authentication("Credential validation unavailable".into()))?;
     match source {

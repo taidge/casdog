@@ -16,7 +16,7 @@ use salvo::test::{ResponseExt, TestClient};
 //
 // We deliberately do NOT inject a database pool or Casbin service so that
 // route-existence tests can run without external dependencies.  Handlers that
-// try to `depot.obtain::<Pool<Postgres>>()` will get an error and return 500,
+// try to `depot.get_typed::<Pool<Postgres>>()` will get an error and return 500,
 // which is acceptable -- we are testing the *routing* layer, not the handler
 // logic.
 // ---------------------------------------------------------------------------

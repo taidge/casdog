@@ -12,7 +12,7 @@ pub async fn get_user_application(
     user_id: QueryParam<String, true>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -53,7 +53,7 @@ pub async fn get_organization_applications(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -93,7 +93,7 @@ pub async fn get_default_application(
     owner: QueryParam<String, true>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 

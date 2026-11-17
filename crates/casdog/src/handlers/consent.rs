@@ -69,11 +69,11 @@ pub async fn grant_consent(
     body: JsonBody<ConsentRequest>,
 ) -> AppResult<Json<ConsentGrantResponse>> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_id = depot
@@ -148,11 +148,11 @@ pub async fn revoke_consent(
     body: JsonBody<ConsentRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_id = depot

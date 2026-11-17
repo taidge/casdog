@@ -17,7 +17,7 @@ pub async fn list_sessions(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -56,7 +56,7 @@ pub async fn get_session(
     id: PathParam<String>,
 ) -> AppResult<Json<SessionResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -70,7 +70,7 @@ pub async fn create_session(
     body: JsonBody<CreateSessionRequest>,
 ) -> AppResult<Json<SessionResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -85,7 +85,7 @@ pub async fn update_session(
     body: JsonBody<UpdateSessionRequest>,
 ) -> AppResult<Json<SessionResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -96,7 +96,7 @@ pub async fn update_session(
 #[endpoint(tags("sessions"), summary = "Delete session")]
 pub async fn delete_session(depot: &mut Depot, id: PathParam<String>) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -110,7 +110,7 @@ pub async fn is_session_duplicated(
     body: JsonBody<CheckSessionDuplicatedRequest>,
 ) -> AppResult<Json<SessionDuplicatedResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

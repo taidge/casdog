@@ -52,7 +52,7 @@ pub struct RuntimeSettingsService;
 impl RuntimeSettingsService {
     pub fn pool(depot: &Depot) -> AppResult<PgPool> {
         depot
-            .obtain::<PgPool>()
+            .get_typed::<PgPool>()
             .cloned()
             .map_err(|_| AppError::Internal("Database unavailable".into()))
     }

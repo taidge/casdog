@@ -52,7 +52,7 @@ fn context(depot: &Depot) -> AppResult<(PgPool, Principal)> {
         return Err(service::denied());
     }
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .map_err(|_| AppError::Internal("Database unavailable".into()))?
         .clone();
     Ok((pool, principal))
@@ -290,7 +290,7 @@ pub async fn get_mcp_access_token(depot: &mut Depot, req: &mut Request) -> AppRe
         .and_then(|value| value.strip_prefix("Bearer ").map(str::to_string))
         .ok_or_else(|| AppError::Authentication("Session bearer required".into()))?;
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .map_err(|_| AppError::Internal("Database unavailable".into()))?;
     let owner = req
         .query::<String>("owner")

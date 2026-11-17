@@ -21,7 +21,7 @@ Kerberos ticket authentication is currently unavailable: unverified identity cla
 - **Authorization Engine**: [Casbin](https://casbin.org/) — RBAC / ABAC policy engine
 - **Frontend**: Glory 0.7.0 and Sapid 0.7.1, compiled to WebAssembly with Trunk
 - **Runtime**: Tokio async runtime
-- **Language**: Rust 2024 Edition (requires Rust 1.93+)
+- **Language**: Rust 2024 Edition (requires Rust 1.95+)
 
 ## Features
 
@@ -114,7 +114,7 @@ Pluggable provider configuration:
 
 ### Prerequisites
 
-- Rust 1.93+
+- Rust 1.95+
 - PostgreSQL
 
 ### Running

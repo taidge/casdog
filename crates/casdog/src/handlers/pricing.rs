@@ -14,7 +14,7 @@ pub async fn list_pricings(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -37,7 +37,7 @@ pub async fn get_pricing(
     id: PathParam<String>,
 ) -> AppResult<Json<PricingResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -51,7 +51,7 @@ pub async fn create_pricing(
     body: JsonBody<CreatePricingRequest>,
 ) -> AppResult<Json<PricingResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -66,7 +66,7 @@ pub async fn update_pricing(
     body: JsonBody<UpdatePricingRequest>,
 ) -> AppResult<Json<PricingResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -80,7 +80,7 @@ pub async fn delete_pricing(
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

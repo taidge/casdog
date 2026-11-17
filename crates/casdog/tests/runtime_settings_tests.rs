@@ -419,17 +419,17 @@ struct PoolProbeGate {
 #[handler]
 async fn pool_generation_probe(req: &mut Request, depot: &mut Depot) -> Json<Value> {
     let generation = depot
-        .obtain::<std::sync::Arc<casdog::runtime_pool::PoolGeneration>>()
+        .get_typed::<std::sync::Arc<casdog::runtime_pool::PoolGeneration>>()
         .unwrap()
         .clone();
-    let pool = depot.obtain::<PgPool>().unwrap();
+    let pool = depot.get_typed::<PgPool>().unwrap();
     let mut tx = pool.begin().await.unwrap();
     let before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *tx)
         .await
         .unwrap();
     if req.query::<bool>("hold") == Some(true) {
-        let gate = depot.obtain::<PoolProbeGate>().unwrap();
+        let gate = depot.get_typed::<PoolProbeGate>().unwrap();
         gate.entered.notify_one();
         gate.release.notified().await;
     }

@@ -74,7 +74,7 @@ impl Handler for RecordFilter {
         let action = derive_action(&method, &uri);
 
         // Log the request asynchronously so we do not block the response
-        if let Ok(pool) = depot.obtain::<Pool<Postgres>>() {
+        if let Ok(pool) = depot.get_typed::<Pool<Postgres>>() {
             let pool = pool.clone();
             tokio::spawn(async move {
                 let _ = RecordService::log_action(

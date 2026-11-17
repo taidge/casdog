@@ -238,11 +238,11 @@ impl RuntimePools {
         ctrl: &mut FlowCtrl,
     ) {
         let generation = self.0.current();
-        depot.inject(generation.sqlx.clone());
-        depot.inject(generation.diesel.clone());
-        depot.inject(generation.casbin.clone());
-        depot.inject(self.0.clone());
-        depot.inject(generation);
+        depot.insert_typed(generation.sqlx.clone());
+        depot.insert_typed(generation.diesel.clone());
+        depot.insert_typed(generation.casbin.clone());
+        depot.insert_typed(self.0.clone());
+        depot.insert_typed(generation);
         ctrl.call_next(req, depot, res).await;
     }
 }

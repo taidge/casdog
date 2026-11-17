@@ -19,7 +19,7 @@ struct Identity {
 }
 #[handler]
 async fn identify(depot: &mut Depot) {
-    if let Some(p) = depot.obtain::<Option<Identity>>().unwrap().clone() {
+    if let Some(p) = depot.get_typed::<Option<Identity>>().unwrap().clone() {
         depot.insert("user_id", p.id);
         depot.insert("user_owner", p.owner);
         depot.insert("user_name", p.name);

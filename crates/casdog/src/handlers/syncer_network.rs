@@ -30,7 +30,7 @@ fn inputs(depot: &Depot, id: String) -> AppResult<(PgPool, Principal, String)> {
         return Err(AppError::Validation("Syncer ID required".into()));
     }
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     Ok((pool, actor, id))

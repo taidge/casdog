@@ -16,7 +16,7 @@ pub async fn list_records(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -41,7 +41,7 @@ pub async fn filter_records(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -69,7 +69,7 @@ pub async fn get_record(
     id: PathParam<String>,
 ) -> AppResult<Json<RecordResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -83,7 +83,7 @@ pub async fn create_record(
     body: JsonBody<CreateRecordRequest>,
 ) -> AppResult<Json<RecordResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -98,7 +98,7 @@ pub async fn update_record(
     body: JsonBody<UpdateRecordRequest>,
 ) -> AppResult<Json<RecordResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -112,7 +112,7 @@ pub async fn delete_record(
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

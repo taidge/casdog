@@ -85,7 +85,7 @@ pub(crate) fn set_cookie(res: &mut Response, name: &str, value: &str, seconds: u
 }
 pub(crate) fn pg_pool(depot: &Depot) -> AppResult<PgPool> {
     depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool not available".into()))
 }
@@ -367,7 +367,7 @@ pub async fn get_provider_auth_url(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     let transport = depot
-        .obtain::<std::sync::Arc<crate::services::wechat_flow::WeChatTestTransport>>()
+        .get_typed::<std::sync::Arc<crate::services::wechat_flow::WeChatTestTransport>>()
         .ok()
         .cloned();
     let (oauth, context) =
@@ -427,7 +427,7 @@ pub async fn provider_callback(
     }
     require_provider_stamp(&flow.context, &provider)?;
     let transport = depot
-        .obtain::<std::sync::Arc<crate::services::wechat_flow::WeChatTestTransport>>()
+        .get_typed::<std::sync::Arc<crate::services::wechat_flow::WeChatTestTransport>>()
         .ok()
         .cloned();
     let oauth =

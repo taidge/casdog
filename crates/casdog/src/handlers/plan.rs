@@ -14,7 +14,7 @@ pub async fn list_plans(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -34,7 +34,7 @@ pub async fn list_plans(
 #[endpoint(tags("plans"), summary = "Get plan by ID")]
 pub async fn get_plan(depot: &mut Depot, id: PathParam<String>) -> AppResult<Json<PlanResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -48,7 +48,7 @@ pub async fn create_plan(
     body: JsonBody<CreatePlanRequest>,
 ) -> AppResult<Json<PlanResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -63,7 +63,7 @@ pub async fn update_plan(
     body: JsonBody<UpdatePlanRequest>,
 ) -> AppResult<Json<PlanResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -77,7 +77,7 @@ pub async fn delete_plan(
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

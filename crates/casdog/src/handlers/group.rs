@@ -17,7 +17,7 @@ pub async fn list_groups(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -36,7 +36,7 @@ pub async fn list_groups(
 #[endpoint(tags("groups"), summary = "Get group by ID")]
 pub async fn get_group(depot: &mut Depot, id: PathParam<String>) -> AppResult<Json<GroupResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -50,7 +50,7 @@ pub async fn create_group(
     body: JsonBody<CreateGroupRequest>,
 ) -> AppResult<Json<GroupResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -65,7 +65,7 @@ pub async fn update_group(
     body: JsonBody<UpdateGroupRequest>,
 ) -> AppResult<Json<GroupResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -76,7 +76,7 @@ pub async fn update_group(
 #[endpoint(tags("groups"), summary = "Delete group")]
 pub async fn delete_group(depot: &mut Depot, id: PathParam<String>) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -90,7 +90,7 @@ pub async fn add_user_to_group(
     body: JsonBody<AddUserToGroupRequest>,
 ) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -105,7 +105,7 @@ pub async fn remove_user_from_group(
     body: JsonBody<RemoveUserFromGroupRequest>,
 ) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -120,7 +120,7 @@ pub async fn get_users_in_group(
     id: PathParam<String>,
 ) -> AppResult<Json<Vec<String>>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

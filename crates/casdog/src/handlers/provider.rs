@@ -14,7 +14,7 @@ pub async fn list_providers(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -37,7 +37,7 @@ pub async fn get_provider(
     id: PathParam<String>,
 ) -> AppResult<Json<ProviderResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -51,7 +51,7 @@ pub async fn create_provider(
     body: JsonBody<CreateProviderRequest>,
 ) -> AppResult<Json<ProviderResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -66,7 +66,7 @@ pub async fn update_provider(
     body: JsonBody<UpdateProviderRequest>,
 ) -> AppResult<Json<ProviderResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -77,7 +77,7 @@ pub async fn update_provider(
 #[endpoint(tags("providers"), summary = "Delete provider")]
 pub async fn delete_provider(depot: &mut Depot, id: PathParam<String>) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

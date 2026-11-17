@@ -16,6 +16,7 @@ fn theme() -> Value {
 }
 #[test]
 fn safe_theme_styles_and_html_have_explicit_tenant_and_global_url_boundaries() {
+    AppConfig::load().unwrap();
     validate_theme(&theme(), false).unwrap();
     let mut links = theme();
     links["footerHtml"] = json!(

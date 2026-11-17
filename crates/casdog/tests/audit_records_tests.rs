@@ -64,7 +64,7 @@ struct Actor {
 }
 #[handler]
 async fn identify(depot: &mut Depot) {
-    let actor = depot.obtain::<Actor>().unwrap().clone();
+    let actor = depot.get_typed::<Actor>().unwrap().clone();
     depot.insert("user_owner", actor.owner);
     depot.insert("user_name", actor.name);
 }

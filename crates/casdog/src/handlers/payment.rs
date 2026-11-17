@@ -45,7 +45,7 @@ pub async fn list_payments(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -68,7 +68,7 @@ pub async fn get_payment(
     id: PathParam<String>,
 ) -> AppResult<Json<PaymentResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -82,7 +82,7 @@ pub async fn create_payment(
     body: JsonBody<CreatePaymentRequest>,
 ) -> AppResult<Json<PaymentResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -97,7 +97,7 @@ pub async fn update_payment(
     body: JsonBody<UpdatePaymentRequest>,
 ) -> AppResult<Json<PaymentResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -111,7 +111,7 @@ pub async fn delete_payment(
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -128,7 +128,7 @@ pub async fn notify_payment(
     req: &mut Request,
 ) -> AppResult<Json<PaymentResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let raw_body = req
@@ -239,7 +239,7 @@ pub async fn invoice_payment(
     id: QueryParam<String, true>,
 ) -> AppResult<Json<InvoicePaymentResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let payment = PaymentFlowService::invoice_payment(&pool, id.as_str()).await?;

@@ -16,7 +16,7 @@ pub async fn list_enforcers(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -39,7 +39,7 @@ pub async fn get_enforcer(
     id: PathParam<String>,
 ) -> AppResult<Json<CasbinEnforcerResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -53,7 +53,7 @@ pub async fn create_enforcer(
     body: JsonBody<CreateCasbinEnforcerRequest>,
 ) -> AppResult<Json<CasbinEnforcerResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -68,7 +68,7 @@ pub async fn update_enforcer(
     body: JsonBody<UpdateCasbinEnforcerRequest>,
 ) -> AppResult<Json<CasbinEnforcerResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -79,7 +79,7 @@ pub async fn update_enforcer(
 #[endpoint(tags("casbin-enforcers"), summary = "Delete casbin enforcer")]
 pub async fn delete_enforcer(depot: &mut Depot, id: PathParam<String>) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

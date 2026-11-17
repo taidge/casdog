@@ -32,7 +32,7 @@ impl CredentialIdentity {
 
 pub fn application_identity(depot: &Depot) -> bool {
     matches!(
-        depot.obtain::<CredentialIdentity>(),
+        depot.get_typed::<CredentialIdentity>(),
         Ok(CredentialIdentity::Application { .. })
     )
 }
@@ -191,7 +191,7 @@ pub fn insert_identity(depot: &mut Depot, identity: CredentialIdentity) {
     if let CredentialIdentity::Application { application_id, .. } = &identity {
         depot.insert("application_identity", application_id.clone());
     }
-    depot.inject(identity);
+    depot.insert_typed(identity);
 }
 
 pub async fn authenticate(

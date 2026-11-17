@@ -6,7 +6,7 @@ use crate::error::{AppError, AppResult};
 #[endpoint(tags("Dashboard"), summary = "Get dashboard statistics")]
 pub async fn get_dashboard(depot: &mut Depot) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -44,7 +44,7 @@ pub async fn get_dashboard(depot: &mut Depot) -> AppResult<Json<serde_json::Valu
 #[endpoint(tags("Dashboard"), summary = "Get Prometheus-style metrics")]
 pub async fn get_metrics(depot: &mut Depot) -> AppResult<String> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

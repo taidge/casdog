@@ -587,7 +587,7 @@ async fn mcp_sync_negotiates_http_session_sse_pagination_and_preserves_denials()
 
 #[salvo::handler]
 async fn fixture_identity(depot: &mut salvo::Depot) {
-    let principal = depot.obtain::<Principal>().unwrap().clone();
+    let principal = depot.get_typed::<Principal>().unwrap().clone();
     depot.insert("user_id", principal.id);
     depot.insert("user_owner", principal.owner);
     depot.insert("user_name", principal.name);

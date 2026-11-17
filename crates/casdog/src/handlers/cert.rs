@@ -14,7 +14,7 @@ pub async fn list_certs(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -36,7 +36,7 @@ pub async fn get_cert(
     id: PathParam<String>,
 ) -> AppResult<Json<CertificateResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -50,7 +50,7 @@ pub async fn create_cert(
     body: JsonBody<CreateCertificateRequest>,
 ) -> AppResult<Json<CertificateResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -65,7 +65,7 @@ pub async fn update_cert(
     body: JsonBody<UpdateCertificateRequest>,
 ) -> AppResult<Json<CertificateResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -76,7 +76,7 @@ pub async fn update_cert(
 #[endpoint(tags("certificates"), summary = "Delete certificate")]
 pub async fn delete_cert(depot: &mut Depot, id: PathParam<String>) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

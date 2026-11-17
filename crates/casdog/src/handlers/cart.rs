@@ -21,7 +21,7 @@ fn actor(depot: &Depot, req: &Request) -> AppResult<Principal> {
 }
 fn pool(depot: &Depot) -> AppResult<PgPool> {
     depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database unavailable".into()))
 }

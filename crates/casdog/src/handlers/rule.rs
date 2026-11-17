@@ -15,7 +15,7 @@ pub async fn list_rules(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<RuleListResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -34,7 +34,7 @@ pub async fn list_rules(
 #[endpoint(tags("Rule"), summary = "Get global rules")]
 pub async fn get_global_rules(depot: &mut Depot) -> AppResult<Json<RuleListResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -45,7 +45,7 @@ pub async fn get_global_rules(depot: &mut Depot) -> AppResult<Json<RuleListRespo
 #[endpoint(tags("Rule"), summary = "Get rule by ID")]
 pub async fn get_rule(depot: &mut Depot, id: PathParam<String>) -> AppResult<Json<RuleResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -58,7 +58,7 @@ pub async fn create_rule(
     body: JsonBody<CreateRuleRequest>,
 ) -> AppResult<Json<RuleResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -72,7 +72,7 @@ pub async fn update_rule(
     body: JsonBody<UpdateRuleRequest>,
 ) -> AppResult<Json<RuleResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -87,7 +87,7 @@ pub async fn delete_rule(
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

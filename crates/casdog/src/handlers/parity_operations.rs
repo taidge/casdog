@@ -33,7 +33,7 @@ pub fn routes() -> Router {
 }
 fn db(depot: &Depot) -> AppResult<PgPool> {
     depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database unavailable".into()))
 }

@@ -29,7 +29,7 @@ pub async fn list_applications(
     req: &mut Request,
 ) -> Result<Json<ApplicationListResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);
@@ -71,14 +71,14 @@ pub async fn create_application(
         ));
     }
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);
 
     let response = app_service.create(req.into_inner()).await?;
     let pg_pool = depot
-        .obtain::<sqlx::PgPool>()
+        .get_typed::<sqlx::PgPool>()
         .map_err(|_| AppError::Internal("Database unavailable".into()))?;
     crate::services::key_credentials_service::mark_static_application(
         pg_pool,
@@ -109,7 +109,7 @@ pub async fn trust_credentials(
         .filter(|s| !s.is_empty() && s.len() <= 255)
         .ok_or_else(|| AppError::Validation("Application ID or owner/name required".into()))?;
     let pool = depot
-        .obtain::<sqlx::PgPool>()
+        .get_typed::<sqlx::PgPool>()
         .map_err(|_| AppError::Internal("Database unavailable".into()))?;
     let id: String=sqlx::query_scalar("SELECT id FROM applications WHERE NOT is_deleted AND ((strpos($1,'/')>0 AND owner||'/'||name=$1) OR (strpos($1,'/')=0 AND id=$1))")
         .bind(reference).fetch_optional(pool).await?.ok_or_else(||AppError::NotFound("Application not found".into()))?;
@@ -133,7 +133,7 @@ pub async fn get_application(
     id: PathParam<String>,
 ) -> Result<Json<ApplicationResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);
@@ -160,7 +160,7 @@ pub async fn update_application(
     req: JsonBody<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);
@@ -187,7 +187,7 @@ pub async fn delete_application(
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool);

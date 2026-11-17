@@ -20,7 +20,7 @@ pub struct Principal {
 struct ApplicationIdentity(bool);
 
 pub(crate) fn set_application_identity(depot: &mut Depot, value: bool) {
-    depot.inject(ApplicationIdentity(value));
+    depot.insert_typed(ApplicationIdentity(value));
 }
 
 impl Principal {
@@ -44,7 +44,7 @@ impl Principal {
             name: read("user_name")?,
             admin: depot.get::<bool>("is_admin").copied().unwrap_or(false),
             application_identity: depot
-                .obtain::<ApplicationIdentity>()
+                .get_typed::<ApplicationIdentity>()
                 .is_ok_and(|kind| kind.0),
         })
     }
@@ -527,7 +527,7 @@ async fn authorize(req: &mut Request, depot: &Depot) -> AppResult<()> {
     }
 
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Authorization database unavailable".into()))?;
     let body = if matches!(method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
         let bytes = req
@@ -855,7 +855,7 @@ async fn authorize_application_policy(
     p: &Principal,
 ) -> AppResult<()> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Authorization database unavailable".into()))?;
     let path = req
         .uri()

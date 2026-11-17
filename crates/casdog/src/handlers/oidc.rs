@@ -46,7 +46,7 @@ pub async fn app_openid_configuration(
 /// JSON Web Key Set endpoint
 #[endpoint(tags("oidc"), summary = "JSON Web Key Set")]
 pub async fn jwks(depot: &mut Depot) -> Json<Jwks> {
-    let pool = match depot.obtain::<Pool<Postgres>>() {
+    let pool = match depot.get_typed::<Pool<Postgres>>() {
         Ok(pool) => pool.clone(),
         Err(_) => return Json(Jwks { keys: vec![] }),
     };
@@ -70,7 +70,7 @@ pub async fn app_jwks(
     depot: &mut Depot,
     application: salvo::oapi::extract::PathParam<String>,
 ) -> Json<Jwks> {
-    let pool = match depot.obtain::<Pool<Postgres>>() {
+    let pool = match depot.get_typed::<Pool<Postgres>>() {
         Ok(pool) => pool.clone(),
         Err(_) => return Json(Jwks { keys: vec![] }),
     };
@@ -227,7 +227,7 @@ pub async fn userinfo(
         .ok_or(StatusCode::UNAUTHORIZED)?
         .to_string();
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .clone();
     let mut scopes: Option<String> = None;

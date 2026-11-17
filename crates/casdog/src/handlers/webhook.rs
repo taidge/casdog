@@ -14,7 +14,7 @@ pub async fn list_webhooks(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -36,7 +36,7 @@ pub async fn get_webhook(
     id: PathParam<String>,
 ) -> AppResult<Json<WebhookResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -50,7 +50,7 @@ pub async fn create_webhook(
     body: JsonBody<CreateWebhookRequest>,
 ) -> AppResult<Json<WebhookResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -65,7 +65,7 @@ pub async fn update_webhook(
     body: JsonBody<UpdateWebhookRequest>,
 ) -> AppResult<Json<WebhookResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -76,7 +76,7 @@ pub async fn update_webhook(
 #[endpoint(tags("webhooks"), summary = "Delete webhook")]
 pub async fn delete_webhook(depot: &mut Depot, id: PathParam<String>) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

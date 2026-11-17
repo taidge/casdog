@@ -9,11 +9,11 @@ authors = ["Casdog Team"]
 license = "MIT"
 repository = "https://github.com/taidge/casdog"
 homepage = "https://github.com/taidge/casdog"
-rust-version = "1.93"
+rust-version = "1.95"
 
 [workspace.dependencies]
 # Web framework
-salvo = { version = "0.89", features = [
+salvo = { version = "1.2.0", features = [
     "oapi",
     "jwt-auth",
     "cors",
@@ -77,7 +77,7 @@ urlencoding = "2"
 # Crypto
 rsa = { version = "0.9", features = ["pem"] }
 p256 = { version = "0.13", features = ["pem", "jwk"] }
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 sha1 = "0.10"
 
 # HTTP client

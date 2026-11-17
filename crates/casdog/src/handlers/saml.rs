@@ -146,11 +146,11 @@ async fn load_current_user(depot: &Depot, pool: &DieselPool) -> AppResult<Option
 #[endpoint(tags("SAML"), summary = "Get SAML IdP metadata")]
 pub async fn saml_metadata(req: &mut Request, depot: &mut Depot) -> Result<String, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool.clone());
@@ -189,7 +189,7 @@ pub async fn get_saml_login(
     depot: &mut Depot,
 ) -> AppResult<Json<SamlLoginResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let provider_id = req
@@ -249,11 +249,11 @@ pub async fn saml_redirect(
     let login_hint = req.query::<String>("login_hint");
 
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool.clone());

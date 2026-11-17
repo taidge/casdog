@@ -17,7 +17,7 @@ pub async fn list_invitations(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -41,7 +41,7 @@ pub async fn get_invitation(
     id: PathParam<String>,
 ) -> AppResult<Json<InvitationResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -55,7 +55,7 @@ pub async fn create_invitation(
     body: JsonBody<CreateInvitationRequest>,
 ) -> AppResult<Json<InvitationResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -70,7 +70,7 @@ pub async fn update_invitation(
     body: JsonBody<UpdateInvitationRequest>,
 ) -> AppResult<Json<InvitationResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -84,7 +84,7 @@ pub async fn delete_invitation(
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -101,7 +101,7 @@ pub async fn verify_invitation(
     body: JsonBody<VerifyInvitationRequest>,
 ) -> AppResult<Json<VerifyInvitationResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -115,7 +115,7 @@ pub async fn send_invitation(
     body: JsonBody<SendInvitationRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

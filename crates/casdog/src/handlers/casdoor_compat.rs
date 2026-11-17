@@ -119,7 +119,7 @@ async fn authorize_legacy_object(
     {
         return Ok(action == "update");
     }
-    if let Ok(casbin) = depot.obtain::<CasbinService>() {
+    if let Ok(casbin) = depot.get_typed::<CasbinService>() {
         let allowed = casbin
             .check_permission(
                 &format!("{}/{}", principal.owner, principal.name),
@@ -1232,7 +1232,7 @@ async fn legacy_delete(
 
 fn pg_pool(depot: &Depot) -> AppResult<Pool<Postgres>> {
     depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))
         .cloned()
 }
@@ -2248,7 +2248,7 @@ fn casbin_service(depot: &mut Depot) -> AppResult<CasbinService> {
         ));
     }
     depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))
         .cloned()
 }

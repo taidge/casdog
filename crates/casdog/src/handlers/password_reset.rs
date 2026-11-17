@@ -14,7 +14,7 @@ pub async fn request_password_reset(
     body: JsonBody<RequestPasswordReset>,
 ) -> AppResult<Json<PasswordResetReceipt>> {
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .map_err(|_| AppError::Internal("Database unavailable".into()))?;
     // Ignore caller-supplied forwarding headers. A trusted proxy integration may
     // supply its verified client address separately in a future deployment policy.
@@ -34,7 +34,7 @@ pub async fn reset_password(
     body: JsonBody<CompletePasswordReset>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .map_err(|_| AppError::Internal("Database unavailable".into()))?;
     PasswordResetService::complete(pool, body.into_inner()).await?;
     Ok(Json(

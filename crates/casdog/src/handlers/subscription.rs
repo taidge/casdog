@@ -14,7 +14,7 @@ pub async fn list_subscriptions(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -38,7 +38,7 @@ pub async fn get_subscription(
     id: PathParam<String>,
 ) -> AppResult<Json<SubscriptionResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -52,7 +52,7 @@ pub async fn create_subscription(
     body: JsonBody<CreateSubscriptionRequest>,
 ) -> AppResult<Json<SubscriptionResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -67,7 +67,7 @@ pub async fn update_subscription(
     body: JsonBody<UpdateSubscriptionRequest>,
 ) -> AppResult<Json<SubscriptionResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -81,7 +81,7 @@ pub async fn delete_subscription(
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
