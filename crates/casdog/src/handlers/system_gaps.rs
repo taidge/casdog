@@ -19,13 +19,13 @@ pub fn routes() -> Router {
 
 fn pool(depot: &Depot) -> AppResult<PgPool> {
     depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database unavailable".into()))
 }
 fn config(depot: &Depot) -> SystemGapConfig {
     depot
-        .obtain::<SystemGapConfig>()
+        .get_typed::<SystemGapConfig>()
         .cloned()
         .unwrap_or_else(|_| SystemGapConfig::from_env())
 }

@@ -76,7 +76,7 @@ pub async fn list_verifications(
     user: QueryParam<String, false>,
 ) -> AppResult<Json<Vec<VerificationResponse>>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -90,7 +90,7 @@ pub async fn get_verification(
     id: PathParam<String>,
 ) -> AppResult<Json<VerificationResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -107,7 +107,7 @@ pub async fn get_verification_by_query(
     id: QueryParam<String, true>,
 ) -> AppResult<Json<VerificationResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -123,7 +123,7 @@ pub async fn send_verification_code(
     body: JsonBody<SendVerificationCodeRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -207,7 +207,7 @@ pub async fn send_verification_code(
         ));
     }
     let diesel = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let dispatch = ProviderDispatchService::new(pool.clone()).with_diesel_pool(diesel);
@@ -294,7 +294,7 @@ pub async fn verify_code(
     body: JsonBody<VerifyCodeRequest>,
 ) -> AppResult<Json<VerifyCodeResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -333,7 +333,7 @@ pub async fn verify_code(
 #[endpoint(tags("verification"), summary = "Get captcha")]
 pub async fn get_captcha(depot: &mut Depot, req: &mut Request) -> AppResult<Json<CaptchaResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let application = req.query::<String>("application");
@@ -351,7 +351,7 @@ pub async fn verify_captcha(
     body: JsonBody<VerifyCaptchaRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let payload = body.into_inner();
@@ -381,7 +381,7 @@ pub async fn get_email_and_phone(
     body: JsonBody<GetEmailAndPhoneRequest>,
 ) -> AppResult<Json<EmailAndPhoneResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -427,7 +427,7 @@ pub async fn reset_email_or_phone(
     body: JsonBody<ResetEmailOrPhoneRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let user = current_user(depot, &pool)

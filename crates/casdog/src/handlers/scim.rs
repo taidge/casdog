@@ -47,7 +47,7 @@ pub async fn list_scim_users(
     count: QueryParam<i64, false>,
 ) -> Result<Json<ScimListResponse<ScimUser>>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -103,7 +103,7 @@ pub async fn get_scim_user(
     id: PathParam<String>,
 ) -> Result<Json<ScimUser>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 

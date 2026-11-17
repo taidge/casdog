@@ -146,11 +146,11 @@ pub async fn impersonate_user(
     body: JsonBody<ImpersonateUserRequest>,
 ) -> AppResult<Json<ImpersonateUserResponse>> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let admin_user_id = depot
@@ -260,11 +260,11 @@ pub async fn exit_impersonate_user(
     req: &mut Request,
 ) -> AppResult<Json<ExitImpersonateResponse>> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let claims = depot

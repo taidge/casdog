@@ -154,11 +154,11 @@ pub async fn signup_begin(
     req: &mut Request,
 ) -> AppResult<Json<WebauthnBeginResponse>> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_id = depot
@@ -203,7 +203,7 @@ pub async fn signup_finish(
     body: JsonBody<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let request_id = parse_query(req, "requestId")
@@ -540,7 +540,7 @@ pub async fn list_credentials(
     depot: &mut Depot,
 ) -> AppResult<Json<Vec<WebauthnCredentialResponse>>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_id = depot
@@ -573,7 +573,7 @@ pub async fn delete_credential(
     req: &mut Request,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let (claims, token, _) = registration_proof(depot, req, true)?;

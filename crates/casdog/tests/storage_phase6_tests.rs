@@ -463,7 +463,7 @@ async fn s3_rejects_unsafe_keys_endpoints_and_partial_credentials_without_reques
 
 #[salvo::handler]
 async fn fixture_identity(depot: &mut Depot) {
-    let principal = depot.obtain::<Principal>().unwrap().clone();
+    let principal = depot.get_typed::<Principal>().unwrap().clone();
     depot.insert("user_id", principal.id);
     depot.insert("user_owner", principal.owner);
     depot.insert("user_name", principal.name);

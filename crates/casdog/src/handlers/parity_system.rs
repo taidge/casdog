@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 fn pool(depot: &Depot) -> AppResult<PgPool> {
     depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database unavailable".into()))
 }

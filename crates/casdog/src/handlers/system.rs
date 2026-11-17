@@ -88,7 +88,7 @@ pub async fn get_version_info() -> AppResult<Json<SystemInfoResponse>> {
 )]
 pub async fn get_prometheus_info(depot: &mut Depot) -> AppResult<String> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

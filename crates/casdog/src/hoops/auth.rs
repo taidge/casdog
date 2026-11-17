@@ -150,7 +150,7 @@ pub async fn authenticate_request(req: &Request, depot: &mut Depot) -> AppResult
         return Ok(false);
     };
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Authentication("Credential validation unavailable".into()))?;
     match source {

@@ -294,7 +294,7 @@ pub async fn refresh_engines(depot: &mut Depot) -> AppResult<Json<serde_json::Va
     clear_cli_caches();
 
     let casbin_service = depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
     casbin_service.reload().await?;

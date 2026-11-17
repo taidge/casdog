@@ -781,7 +781,7 @@ async fn native_cloud_validation_errors_redirects_and_credentials_never_leak() {
 
 #[salvo::handler]
 async fn identity(depot: &mut Depot) {
-    let p = depot.obtain::<Principal>().unwrap().clone();
+    let p = depot.get_typed::<Principal>().unwrap().clone();
     depot.insert("user_id", p.id);
     depot.insert("user_owner", p.owner);
     depot.insert("user_name", p.name);

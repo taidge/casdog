@@ -12,7 +12,7 @@ pub async fn get_permissions_by_submitter(
     submitter: QueryParam<String, true>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -43,7 +43,7 @@ pub async fn get_permissions_by_role(
     role_id: QueryParam<String, true>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 

@@ -39,7 +39,7 @@ pub async fn get_orders(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -69,7 +69,7 @@ pub async fn get_orders(
 #[endpoint(tags("Order"), summary = "Get order by ID")]
 pub async fn get_order(depot: &mut Depot, id: PathParam<String>) -> AppResult<Json<OrderResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -83,7 +83,7 @@ pub async fn add_order(
     body: JsonBody<CreateOrderRequest>,
 ) -> AppResult<Json<OrderResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -98,7 +98,7 @@ pub async fn update_order(
     body: JsonBody<UpdateOrderRequest>,
 ) -> AppResult<Json<OrderResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -112,7 +112,7 @@ pub async fn delete_order(
     id: PathParam<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -131,7 +131,7 @@ pub async fn pay_order(
     provider_name: QueryParam<String, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let order_id = id
@@ -175,7 +175,7 @@ pub async fn cancel_order(
     id: QueryParam<String, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let order_id = id
@@ -214,7 +214,7 @@ pub async fn reconcile_order(
         ));
     }
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".into()))?
         .clone();
     let order_id = id

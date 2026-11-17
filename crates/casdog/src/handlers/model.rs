@@ -14,7 +14,7 @@ pub async fn list_models(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -36,7 +36,7 @@ pub async fn get_model(
     id: PathParam<String>,
 ) -> AppResult<Json<CasbinModelResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -50,7 +50,7 @@ pub async fn create_model(
     body: JsonBody<CreateCasbinModelRequest>,
 ) -> AppResult<Json<CasbinModelResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -65,7 +65,7 @@ pub async fn update_model(
     body: JsonBody<UpdateCasbinModelRequest>,
 ) -> AppResult<Json<CasbinModelResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -76,7 +76,7 @@ pub async fn update_model(
 #[endpoint(tags("casbin-models"), summary = "Delete casbin model")]
 pub async fn delete_model(depot: &mut Depot, id: PathParam<String>) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

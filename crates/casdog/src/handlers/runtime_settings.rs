@@ -23,7 +23,7 @@ pub async fn get_setting(depot: &mut Depot) -> AppResult<Json<Value>> {
         ));
     }
     let mut data = RuntimeSettingsService::read(&pool).await?;
-    if let Ok(manager) = depot.obtain::<crate::runtime_pool::RuntimePoolManager>() {
+    if let Ok(manager) = depot.get_typed::<crate::runtime_pool::RuntimePoolManager>() {
         data["runtime"] = manager
             .status(&crate::services::runtime_settings_service::RuntimeSettings::parse(&data)?);
     }
@@ -39,7 +39,7 @@ pub async fn update_setting(depot: &mut Depot, req: &mut Request) -> AppResult<J
     let mut result =
         RuntimeSettingsService::update(&RuntimeSettingsService::pool(depot)?, &principal, &value)
             .await?;
-    if let Ok(manager) = depot.obtain::<crate::runtime_pool::RuntimePoolManager>() {
+    if let Ok(manager) = depot.get_typed::<crate::runtime_pool::RuntimePoolManager>() {
         let _ = manager.refresh().await; // persisted-but-failed remains truthful
         let status = manager
             .status(&crate::services::runtime_settings_service::RuntimeSettings::parse(&value)?);

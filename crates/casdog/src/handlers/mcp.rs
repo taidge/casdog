@@ -65,7 +65,7 @@ async fn handle_tool_call(
         return Ok(mcp_error(id, -32001, "insufficient_scope", None));
     };
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".into()))?
         .clone();
     let claims = match validate_session_claims(&pool, token).await {

@@ -186,7 +186,7 @@ pub async fn get_ldaps(
     owner: QueryParam<String, false>,
 ) -> AppResult<Json<Vec<LdapConfigResponse>>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -213,7 +213,7 @@ pub async fn get_ldap(
     id: QueryParam<String, true>,
 ) -> AppResult<Json<LdapConfigResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -228,7 +228,7 @@ pub async fn add_ldap(
     body: JsonBody<LdapConfigRequest>,
 ) -> AppResult<Json<LdapConfigResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let req = body.into_inner();
@@ -292,7 +292,7 @@ pub async fn update_ldap(
     body: JsonBody<LdapConfigRequest>,
 ) -> AppResult<Json<LdapConfigResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let req = body.into_inner();
@@ -358,7 +358,7 @@ pub async fn delete_ldap(
     body: JsonBody<DeleteLdapRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let req = body.into_inner();
@@ -379,7 +379,7 @@ pub async fn get_ldap_users(
     id: QueryParam<String, true>,
 ) -> AppResult<Json<LdapUsersResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let provider = get_ldap_provider(&pool, id.as_str()).await?;
@@ -422,7 +422,7 @@ pub async fn get_ldap_provider_public(
     id: QueryParam<String, true>,
 ) -> AppResult<Json<ProviderResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
     let provider = get_ldap_provider(&pool, id.as_str()).await?;

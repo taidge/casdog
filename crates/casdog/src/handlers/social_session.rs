@@ -255,7 +255,7 @@ pub async fn consume_social_session(
         }
     }
     let diesel = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let auth = AuthService::new(UserService::new(diesel));
@@ -297,7 +297,7 @@ pub async fn send_social_mfa_code(
     let pool = pg_pool(depot)?;
     let initial = state::load_completion(&pool, &secret).await?;
     let diesel = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let dispatch = ProviderDispatchService::new(pool.clone()).with_diesel_pool(diesel);

@@ -20,7 +20,7 @@ fn context(depot: &Depot) -> AppResult<(PgPool, Principal)> {
     }
     Ok((
         depot
-            .obtain::<PgPool>()
+            .get_typed::<PgPool>()
             .cloned()
             .map_err(|_| AppError::Internal("Database unavailable".into()))?,
         principal,

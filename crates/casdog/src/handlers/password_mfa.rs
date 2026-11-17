@@ -316,7 +316,7 @@ pub async fn login(
     let context = json!({"response_type":request.response_type,"redirect_uri":request.redirect_uri,"scope":request.scope,"state":request.state,"nonce":request.nonce,"code_challenge":request.code_challenge,"code_challenge_method":request.code_challenge_method,"master_stamp":proof_hash(org_master.as_deref().unwrap_or_default()),"client_id":client_id});
     request.passcode = None;
     let diesel = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let auth = AuthService::new(UserService::new(diesel.clone())).with_pg_pool(pg.clone());
@@ -568,7 +568,7 @@ pub(crate) async fn primary_login_result(
             (org.password_expire_days > 0).then_some(org.password_expire_days),
         )?;
     let diesel = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let auth = AuthService::new(UserService::new(diesel));

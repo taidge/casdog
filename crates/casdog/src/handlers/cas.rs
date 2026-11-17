@@ -14,7 +14,7 @@ pub async fn service_validate(
     service: QueryParam<String, true>,
 ) -> Result<String, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -46,7 +46,7 @@ pub async fn validate(
     service: QueryParam<String, true>,
 ) -> Result<String, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -67,7 +67,7 @@ pub async fn proxy_validate(
     service: QueryParam<String, true>,
 ) -> Result<String, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -88,7 +88,7 @@ pub async fn proxy_validate(
 #[endpoint(tags("CAS"), summary = "CAS proxy")]
 pub async fn proxy(depot: &mut Depot, req: &mut Request) -> Result<String, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let pgt = req.query::<String>("pgt").unwrap_or_default();
@@ -121,7 +121,7 @@ pub async fn proxy(depot: &mut Depot, req: &mut Request) -> Result<String, AppEr
 #[endpoint(tags("CAS"), summary = "CAS SAML validate")]
 pub async fn saml_validate(depot: &mut Depot, req: &mut Request) -> Result<String, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let target = req

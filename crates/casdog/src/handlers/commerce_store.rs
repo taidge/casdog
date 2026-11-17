@@ -49,7 +49,7 @@ pub async fn catalog(depot: &mut Depot, req: &Request) -> AppResult<Json<Value>>
     let principal = actor(depot, req)?;
     let (page, size) = page(req)?;
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .map_err(|_| AppError::Internal("Database unavailable".into()))?;
     let products: Vec<Value> = sqlx::query_scalar(
         "SELECT to_jsonb(p)-'is_deleted' FROM products p WHERE owner=$1 AND NOT is_deleted AND lower(state) IN ('active','published','on sale') ORDER BY created_at DESC,id LIMIT $2 OFFSET $3",
@@ -112,7 +112,7 @@ pub async fn purchases(depot: &mut Depot, req: &Request) -> AppResult<Json<Value
     let principal = actor(depot, req)?;
     let (page, size) = page(req)?;
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .map_err(|_| AppError::Internal("Database unavailable".into()))?;
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders o LEFT JOIN order_benefits b ON b.order_id=o.id WHERE o.owner=$1 AND NOT o.is_deleted AND o.buyer_id=$2")
         .bind(&principal.owner).bind(&principal.id).fetch_one(pool).await?;

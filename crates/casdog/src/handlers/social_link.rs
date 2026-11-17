@@ -199,7 +199,7 @@ pub async fn begin_link(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     let transport = depot
-        .obtain::<std::sync::Arc<crate::services::wechat_flow::WeChatTestTransport>>()
+        .get_typed::<std::sync::Arc<crate::services::wechat_flow::WeChatTestTransport>>()
         .ok()
         .cloned();
     let (oauth, context) =

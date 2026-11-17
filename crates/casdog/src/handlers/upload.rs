@@ -134,11 +134,11 @@ async fn require_upload_context(
     req: &mut Request,
 ) -> Result<(DieselPool, Pool<Postgres>, String), AppError> {
     let diesel_pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let is_admin = depot.get::<bool>("is_admin").copied().unwrap_or(false);
@@ -183,7 +183,7 @@ async fn upload_users_mode(
         ));
     }
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool not available".into()))?;
     let content_type = req.header::<String>("content-type").unwrap_or_default();
@@ -428,7 +428,7 @@ pub async fn upload_resource(
     req: &mut Request,
 ) -> Result<Json<UploadResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -868,7 +868,7 @@ pub async fn resource_url(
         "no-cache".parse().expect("static header"),
     );
     let pool = depot
-        .obtain::<sqlx::PgPool>()
+        .get_typed::<sqlx::PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let principal = crate::hoops::authz::Principal::from_depot(depot)?;
@@ -940,7 +940,7 @@ pub async fn delete_resource_with_file(
     req: &mut Request,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<sqlx::PgPool>()
+        .get_typed::<sqlx::PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let principal = crate::hoops::authz::Principal::from_depot(depot)?;
@@ -996,7 +996,7 @@ pub async fn download_resource(
     res: &mut Response,
 ) -> Result<(), AppError> {
     let pool = depot
-        .obtain::<sqlx::PgPool>()
+        .get_typed::<sqlx::PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let principal = crate::hoops::authz::Principal::from_depot(depot)?;

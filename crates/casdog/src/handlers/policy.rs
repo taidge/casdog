@@ -29,7 +29,7 @@ pub async fn enforce(
     req: JsonBody<EnforceRequest>,
 ) -> Result<Json<EnforceResponse>, AppError> {
     let casbin_service = depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
 
@@ -47,7 +47,7 @@ pub async fn enforce(
 )]
 pub async fn get_policies(depot: &mut Depot) -> Result<Json<PolicyListResponse>, AppError> {
     let casbin_service = depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
 
@@ -70,7 +70,7 @@ pub async fn add_policy(
     req: JsonBody<PolicyRequest>,
 ) -> Result<Json<PolicyActionResponse>, AppError> {
     let casbin_service = depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
 
@@ -93,7 +93,7 @@ pub async fn remove_policy(
     req: JsonBody<PolicyRequest>,
 ) -> Result<Json<PolicyActionResponse>, AppError> {
     let casbin_service = depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
 
@@ -115,7 +115,7 @@ pub async fn batch_enforce(
     req: JsonBody<BatchEnforceRequest>,
 ) -> Result<Json<BatchEnforceResponse>, AppError> {
     let casbin_service = depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
 
@@ -135,7 +135,7 @@ pub async fn batch_enforce(
 )]
 pub async fn get_all_objects(depot: &mut Depot) -> Result<Json<StringListResponse>, AppError> {
     let casbin_service = depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
 
@@ -153,7 +153,7 @@ pub async fn get_all_objects(depot: &mut Depot) -> Result<Json<StringListRespons
 )]
 pub async fn get_all_actions(depot: &mut Depot) -> Result<Json<StringListResponse>, AppError> {
     let casbin_service = depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
 
@@ -171,7 +171,7 @@ pub async fn get_all_actions(depot: &mut Depot) -> Result<Json<StringListRespons
 )]
 pub async fn get_all_roles(depot: &mut Depot) -> Result<Json<StringListResponse>, AppError> {
     let casbin_service = depot
-        .obtain::<CasbinService>()
+        .get_typed::<CasbinService>()
         .map_err(|_| AppError::Internal("Casbin service not initialized".to_string()))?
         .clone();
 

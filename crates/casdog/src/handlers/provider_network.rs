@@ -28,7 +28,7 @@ fn inputs(depot: &Depot, id: String) -> AppResult<(PgPool, Principal, String)> {
         ));
     }
     let pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     if id.is_empty() || id.len() > 200 {

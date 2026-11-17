@@ -13,7 +13,7 @@ struct Identity {
 
 #[handler]
 async fn identify(depot: &mut Depot) {
-    let identity = depot.obtain::<Identity>().unwrap().clone();
+    let identity = depot.get_typed::<Identity>().unwrap().clone();
     depot.insert("user_owner", identity.owner);
     depot.insert("user_name", identity.name);
     depot.insert("user_id", identity.id);

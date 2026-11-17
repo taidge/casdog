@@ -16,7 +16,7 @@ pub async fn list_adapters(
     page_size: QueryParam<i64, false>,
 ) -> AppResult<Json<serde_json::Value>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -38,7 +38,7 @@ pub async fn get_adapter(
     id: PathParam<String>,
 ) -> AppResult<Json<CasbinAdapterResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -52,7 +52,7 @@ pub async fn create_adapter(
     body: JsonBody<CreateCasbinAdapterRequest>,
 ) -> AppResult<Json<CasbinAdapterResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -67,7 +67,7 @@ pub async fn update_adapter(
     body: JsonBody<UpdateCasbinAdapterRequest>,
 ) -> AppResult<Json<CasbinAdapterResponse>> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 
@@ -78,7 +78,7 @@ pub async fn update_adapter(
 #[endpoint(tags("casbin-adapters"), summary = "Delete casbin adapter")]
 pub async fn delete_adapter(depot: &mut Depot, id: PathParam<String>) -> AppResult<StatusCode> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not found".to_string()))?
         .clone();
 

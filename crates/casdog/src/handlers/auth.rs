@@ -151,12 +151,12 @@ pub async fn signup(
     req: JsonBody<SignupRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_service = UserService::new(pool);
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let auth_service = AuthService::new(user_service).with_pg_pool(pg_pool);
@@ -179,12 +179,12 @@ pub async fn login(
     req: JsonBody<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let user_service = UserService::new(pool.clone());
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let auth_service = AuthService::new(user_service).with_pg_pool(pg_pool);
@@ -212,7 +212,7 @@ pub async fn get_app_login(
     req: &mut Request,
 ) -> AppResult<Json<ApplicationResponse>> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let app_service = AppService::new(pool.clone());
@@ -233,7 +233,7 @@ pub async fn get_app_login(
             })?;
 
             let pg_pool = depot
-                .obtain::<PgPool>()
+                .get_typed::<PgPool>()
                 .map_err(|_| AppError::Internal("Database unavailable".into()))?;
             let application_id = crate::services::protocol_gap_service::application_for_user_code(
                 pg_pool, &user_code,
@@ -282,7 +282,7 @@ pub async fn get_captcha_status(
     req: &mut Request,
 ) -> AppResult<Json<CaptchaStatusResponse>> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -318,11 +318,11 @@ pub async fn device_auth(
     req: &mut Request,
 ) -> AppResult<Json<serde_json::Value>> {
     let diesel = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let pg_pool = depot
-        .obtain::<PgPool>()
+        .get_typed::<PgPool>()
         .cloned()
         .map_err(|_| AppError::Internal("Database pool unavailable".into()))?;
     let mut value = if req
@@ -385,7 +385,7 @@ pub async fn oauth_register(
     body: JsonBody<DynamicClientRegistrationRequest>,
 ) -> AppResult<Json<DynamicClientRegistrationResponse>> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -452,7 +452,7 @@ pub async fn oauth_register(
     let app_service = AppService::new(pool);
     let application = app_service.create(create_request).await?;
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".into()))?;
     crate::services::key_credentials_service::mark_dynamic_application(pg_pool, &application.id)
         .await?;
@@ -485,7 +485,7 @@ pub async fn oauth_register(
 #[endpoint(tags("Authentication"), summary = "Get QR code")]
 pub async fn get_qrcode(depot: &mut Depot, req: &mut Request) -> AppResult<Json<QrCodeResponse>> {
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -539,7 +539,7 @@ pub async fn handle_official_account_event(
     req: &mut Request,
 ) -> AppResult<String> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let body = req
@@ -661,7 +661,7 @@ pub async fn logout(
     res: &mut Response,
 ) -> Result<(), AppError> {
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -736,7 +736,7 @@ pub async fn logout(
 )]
 pub async fn get_account(depot: &mut Depot) -> Result<Json<UserResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -747,7 +747,7 @@ pub async fn get_account(depot: &mut Depot) -> Result<Json<UserResponse>, AppErr
 
     let user_service = UserService::new(pool);
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let auth_service = AuthService::new(user_service).with_pg_pool(pg_pool);
@@ -864,7 +864,7 @@ pub async fn oauth_access_token(
     res: &mut Response,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -898,7 +898,7 @@ pub async fn oauth_access_token(
     }
     if req.grant_type == crate::services::protocol_gap_service::DEVICE_GRANT {
         let pg_pool = depot
-            .obtain::<PgPool>()
+            .get_typed::<PgPool>()
             .cloned()
             .map_err(|_| AppError::Internal("Database unavailable".into()))?;
         let code = req
@@ -951,7 +951,7 @@ pub async fn oauth_access_token(
                 .as_deref()
                 .ok_or_else(|| AppError::Validation("password is required".to_string()))?;
             let pg_pool = depot
-                .obtain::<PgPool>()
+                .get_typed::<PgPool>()
                 .map_err(|_| AppError::Internal("Authentication database unavailable".into()))?
                 .clone();
             let login_request: LoginRequest = serde_json::from_value(serde_json::json!({
@@ -1004,7 +1004,7 @@ pub async fn oauth_refresh_token(
     request: &mut Request,
 ) -> Result<Json<OAuthTokenResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -1055,7 +1055,7 @@ pub async fn oauth_introspect(
     request: &mut Request,
 ) -> Result<Json<IntrospectResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -1098,7 +1098,7 @@ pub async fn oauth_revoke(
     request: &mut Request,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -1134,7 +1134,7 @@ pub async fn set_password(
     req: JsonBody<SetPasswordRequest>,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -1145,7 +1145,7 @@ pub async fn set_password(
 
     let user_service = UserService::new(pool);
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let auth_service = AuthService::new(user_service).with_pg_pool(pg_pool);
@@ -1171,7 +1171,7 @@ pub async fn check_user_password(
     req: JsonBody<CheckPasswordRequest>,
 ) -> Result<Json<CheckPasswordResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -1182,7 +1182,7 @@ pub async fn check_user_password(
 
     let user_service = UserService::new(pool);
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let auth_service = AuthService::new(user_service).with_pg_pool(pg_pool);
@@ -1211,7 +1211,7 @@ pub async fn check_user_password(
 )]
 pub async fn sso_logout(depot: &mut Depot, req: &mut Request) -> Result<&'static str, AppError> {
     let pg_pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 

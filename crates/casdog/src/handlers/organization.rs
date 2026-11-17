@@ -28,7 +28,7 @@ pub async fn list_organizations(
     req: &mut Request,
 ) -> Result<Json<OrganizationListResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let org_service = OrgService::new(pool);
@@ -69,7 +69,7 @@ pub async fn create_organization(
     req: JsonBody<CreateOrganizationRequest>,
 ) -> Result<Json<OrganizationResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let org_service = OrgService::new(pool);
@@ -94,7 +94,7 @@ pub async fn get_organization(
     id: PathParam<String>,
 ) -> Result<Json<OrganizationResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let org_service = OrgService::new(pool);
@@ -121,7 +121,7 @@ pub async fn update_organization(
     req: JsonBody<UpdateOrganizationRequest>,
 ) -> Result<Json<OrganizationResponse>, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let org_service = OrgService::new(pool);
@@ -148,7 +148,7 @@ pub async fn delete_organization(
     id: PathParam<String>,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<DieselPool>()
+        .get_typed::<DieselPool>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
     let org_service = OrgService::new(pool);

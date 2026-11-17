@@ -44,7 +44,7 @@ impl Handler for CasbinAuth {
             }
         };
 
-        let casbin_service = match depot.obtain::<CasbinService>() {
+        let casbin_service = match depot.get_typed::<CasbinService>() {
             Ok(service) => service.clone(),
             Err(_) => {
                 tracing::error!("Casbin service not found in depot");

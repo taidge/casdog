@@ -45,7 +45,7 @@ pub struct SetPreferredMfaRequest {
 )]
 pub async fn initiate_mfa_setup(depot: &mut Depot) -> Result<Json<MfaSetupResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -82,7 +82,7 @@ pub async fn verify_mfa_setup(
     req: JsonBody<MfaVerifyRequest>,
 ) -> Result<Json<MfaVerifyResponse>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -119,7 +119,7 @@ pub async fn verify_mfa_setup(
 )]
 pub async fn enable_mfa(depot: &mut Depot) -> Result<Json<serde_json::Value>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -153,7 +153,7 @@ pub async fn delete_mfa(
     req: JsonBody<MfaDeleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 
@@ -180,7 +180,7 @@ pub async fn set_preferred_mfa(
     req: JsonBody<SetPreferredMfaRequest>,
 ) -> Result<&'static str, AppError> {
     let pool = depot
-        .obtain::<Pool<Postgres>>()
+        .get_typed::<Pool<Postgres>>()
         .map_err(|_| AppError::Internal("Database pool not available".to_string()))?
         .clone();
 

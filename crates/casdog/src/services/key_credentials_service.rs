@@ -32,7 +32,7 @@ impl CredentialIdentity {
 
 pub fn application_identity(depot: &Depot) -> bool {
     matches!(
-        depot.obtain::<CredentialIdentity>(),
+        depot.get_typed::<CredentialIdentity>(),
         Ok(CredentialIdentity::Application { .. })
     )
 }
