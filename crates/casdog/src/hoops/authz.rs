@@ -20,7 +20,7 @@ pub struct Principal {
 struct ApplicationIdentity(bool);
 
 pub(crate) fn set_application_identity(depot: &mut Depot, value: bool) {
-    depot.inject(ApplicationIdentity(value));
+    depot.insert_typed(ApplicationIdentity(value));
 }
 
 impl Principal {

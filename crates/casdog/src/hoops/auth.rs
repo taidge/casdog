@@ -106,7 +106,7 @@ fn validate_credential_epoch(claims: &Claims, changed: Option<String>) -> AppRes
 
 pub fn insert_claims(depot: &mut Depot, claims: Claims) {
     super::authz::set_application_identity(depot, false);
-    depot.inject(
+    depot.insert_typed(
         crate::services::key_credentials_service::CredentialIdentity::User(
             super::authz::Principal {
                 id: claims.sub.clone(),
